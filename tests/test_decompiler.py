@@ -57,5 +57,17 @@ class TestDecompiler(unittest.TestCase):
     def test_function_call(self):
         self._run_test_on_snippet("func")
 
+    def test_control_flow(self):
+        self._run_test_on_snippet("control_flow")
+
+    def test_loops(self):
+        self._run_test_on_snippet("loops")
+
+    def test_docstrings(self):
+        self._run_test_on_snippet("docstrings")
+
+    def test_nested(self):
+        self._run_test_on_snippet("nested")
+
 if __name__ == "__main__":
     unittest.main()

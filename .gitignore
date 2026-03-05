@@ -1,3 +1,5 @@
 trace.log
 *.log
 __pycache__
+*.txt
+*.json
