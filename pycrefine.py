@@ -53,7 +53,7 @@ class DecompilerBase:
 class DecompilerGeneric(DecompilerBase):
     def __init__(self, code_obj: types.CodeType, indent_level: int = 0):
         super().__init__(code_obj, indent_level)
-        self.stack: List[str] = []
+        self.stack: List[Union[str, Tuple[Any, ...]]] = []
 
     def decompile(self) -> str:
         self._disassemble()
@@ -80,7 +80,8 @@ class DecompilerGeneric(DecompilerBase):
             while self.blocks and instr.offset >= self.blocks[-1][0]:
                 block_end, block_type = self.blocks.pop()
                 self.indent_level -= 1
-                if block_type == "if_implicit_else":
+                if block_type == "if_implicit_else" and self.pc < len(self.instructions):
+                    # Only add else if there's actually more code to put in it
                     self._append_reconstructed("else:")
                     self.indent_level += 1
                     # New target is effectively the end of the script/function
@@ -89,7 +90,7 @@ class DecompilerGeneric(DecompilerBase):
             self.pc += 1
             self._handle_instruction(instr)
         
-        return "\n".join(self.reconstructed).rstrip()
+        return "\n".join(str(s) for s in self.reconstructed).rstrip()
 
     def _append_reconstructed(self, line: str, indent_multiline: bool = False):
         if not line: return
@@ -148,10 +149,18 @@ class DecompilerGeneric(DecompilerBase):
         elif instr.opname in ("STORE_NAME", "STORE_FAST"):
             if self.stack:
                 val = self.stack.pop()
-                if isinstance(val, tuple) and val[0] in ("func", "class"):
+                s_val = str(val)
+                if isinstance(val, tuple) and len(val) >= 2 and val[0] == "import":
+                    # Reconstruct import
+                    _, name, fromlist, level = val
+                    if str(fromlist) in ("None", "()"):
+                        self._append_reconstructed(f"import {name}")
+                    else:
+                        names = str(fromlist).strip("()").replace("'", "").replace(" ", "")
+                        self._append_reconstructed(f"from {name} import {names}")
+                elif isinstance(val, tuple) and len(val) >= 2 and val[0] in ("func", "class"):
                     # Block already reconstructed
-                    self._append_reconstructed(val[1], indent_multiline=True)
-                    # Add newline after function/class if at top level
+                    self._append_reconstructed(str(val[1]), indent_multiline=True)
                     if self.indent_level == 0:
                         self.reconstructed.append("")
                 elif str(instr.argval) == "__doc__":
@@ -166,6 +175,40 @@ class DecompilerGeneric(DecompilerBase):
                 else:
                     self._append_reconstructed(f"{instr.argval} = {val}", indent_multiline=False)
                     
+        elif instr.opname == "STORE_ATTR":
+            if len(self.stack) >= 2:
+                obj = self.stack.pop()
+                val = self.stack.pop()
+                self._append_reconstructed(f"{obj}.{instr.argval} = {val}")
+
+        elif instr.opname == "IMPORT_NAME":
+            if len(self.stack) >= 2:
+                fromlist = self.stack.pop()
+                level = self.stack.pop()
+                self.stack.append(("import", instr.argval, fromlist, level))
+
+        elif instr.opname == "IMPORT_FROM":
+            if self.stack and isinstance(self.stack[-1], tuple) and self.stack[-1][0] == "import":
+                # We stay in "import" mode but we'll know to use 'from ... import ...' later
+                # For now just push the name
+                self.stack.append(instr.argval)
+            else:
+                self.stack.append(instr.argval)
+
+        elif instr.opname == "BINARY_SUBSCR":
+            if len(self.stack) >= 2:
+                sub = self.stack.pop()
+                container = self.stack.pop()
+                self.stack.append(f"{container}[{sub}]")
+
+        elif instr.opname == "RAISE_VARARGS":
+            num = int(instr.arg) if instr.arg is not None else 0
+            if num == 1:
+                val = self.stack.pop() if self.stack else "Exception"
+                self._append_reconstructed(f"raise {val}")
+            elif num == 0:
+                self._append_reconstructed("raise")
+
         elif instr.opname == "MAKE_FUNCTION":
             # In 3.13, MAKE_FUNCTION has no arg and only code object on stack
             # In 3.9/3.11, MAKE_FUNCTION pushes name then code object
@@ -209,9 +252,22 @@ class DecompilerGeneric(DecompilerBase):
         elif instr.opname == "POP_TOP":
             if self.stack:
                 stmt = self.stack.pop()
-                if stmt != "None" and not (isinstance(stmt, tuple) and stmt[0] in ("code", "func")):
+                if stmt != "None" and not (isinstance(stmt, tuple) and stmt[0] in ("code", "func", "import")):
                     self._append_reconstructed(str(stmt))
                     
+        elif instr.opname == "CHECK_EXC_MATCH":
+            if len(self.stack) >= 2:
+                exc_type = self.stack.pop()
+                # self.stack.top is exception from PUSH_EXC_INFO
+                self.stack.append(f"Exception matching {exc_type}")
+
+        elif instr.opname == "PUSH_EXC_INFO":
+            # Usually pushes the current exception
+            self.stack.append("Exception")
+
+        elif instr.opname in ("POP_EXCEPT", "RERAISE"):
+            pass
+
         elif "BINARY" in instr.opname:
             if len(self.stack) >= 2:
                 right = self.stack.pop()
@@ -223,36 +279,70 @@ class DecompilerGeneric(DecompilerBase):
                     "BINARY_RSHIFT": ">>", "BINARY_AND": "&", "BINARY_OR": "|", "BINARY_XOR": "^"
                 }
                 op = op_map.get(instr.opname, "unknown_op")
-                self.stack.append(f"({left} {op} {right})")
+                # Avoid redundant parens for simple names
+                l_str = str(left)
+                r_str = str(right)
+                if (" " in l_str and not (l_str.startswith("(") and l_str.endswith(")"))):
+                    l_str = f"({l_str})"
+                if (" " in r_str and not (r_str.startswith("(") and r_str.endswith(")"))):
+                    r_str = f"({r_str})"
+                self.stack.append(f"{l_str} {op} {r_str}")
 
         elif "CALL" in instr.opname:
-            args: List[str] = []
             num_args = int(instr.arg) if (instr.arg is not None) else 0
-            for _ in range(num_args):
-                if self.stack:
-                    arg = self.stack.pop()
-                    # If arg is a function tuple, use its text
-                    if isinstance(arg, tuple) and arg[0] in ("func", "class"):
-                        args.insert(0, arg[1])
-                    else:
-                        args.insert(0, str(arg))
+            is_kw = "kwnames" in str(instr.argval) or instr.opname == "CALL_KW"
+            kw_names = []
+            if is_kw and self.stack:
+                raw_kw = self.stack.pop()
+                s_kw = str(raw_kw).strip("()")
+                if s_kw:
+                    kw_names = [n.strip("'\" ") for n in s_kw.split(",")]
             
-            func = self.stack.pop() if self.stack else "unknown_func"
+            total_vals = num_args + len(kw_names)
+            vals: List[str] = []
+            for _ in range(total_vals):
+                if self.stack:
+                    v = self.stack.pop()
+                    if isinstance(v, tuple) and len(v) >= 2 and v[0] in ("func", "class"):
+                        vals.insert(0, str(v[1]))
+                    else:
+                        vals.insert(0, str(v))
+            
+            pos_args = vals[:num_args]
+            kw_args = vals[num_args:]
+            
+            final_args = list(pos_args)
+            if len(kw_names) == len(kw_args):
+                for name, val in zip(kw_names, kw_args):
+                    if name:
+                        final_args.append(f"{name}={val}")
+                
+            func_val = self.stack.pop() if self.stack else "unknown_func"
+            if str(func_val) == "None" and self.stack: # Handle PUSH_NULL
+                 func_val = self.stack.pop()
+            
+            func = str(func_val)
+            if " + NULL" in func or "|NULL" in func:
+                 func = func.split(" + ")[0].split("|")[0]
             
             # Detect class builder
-            if func == "__build_class__" and len(args) >= 2:
-                body_text = args[0]
-                cls_name = args[1].strip("'\"")
-                # Class body text usually starts with "def Name():"
-                # We need to change it to "class Name:"
+            if func == "__build_class__" and len(final_args) >= 2:
+                body_text = str(final_args[0])
+                cls_name = str(final_args[1]).strip("'\"")
+                bases = final_args[2:]
+                bases_str = f"({', '.join(str(b) for b in bases)})" if bases else ""
                 lines = body_text.split("\n")
                 if len(lines) > 1:
                     real_body = "\n".join(lines[1:])
-                    self.stack.append(("class", f"class {cls_name}:\n{real_body}"))
+                    self.stack.append(("class", f"class {cls_name}{bases_str}:\n{real_body}"))
                 else:
-                    self.stack.append(("class", f"class {cls_name}: pass"))
+                    self.stack.append(("class", f"class {cls_name}{bases_str}: pass"))
             else:
-                self.stack.append(f"{func}({', '.join(args)})")
+                # Handle super() call specifically if it has no args
+                if func == "super" and not final_args:
+                    self.stack.append("super()")
+                else:
+                    self.stack.append(f"{func}({', '.join(str(a) for a in final_args)})")
 
         elif instr.opname == "LOAD_BUILD_CLASS":
             self.stack.append("__build_class__")
@@ -352,19 +442,49 @@ class DecompilerGeneric(DecompilerBase):
 
         elif instr.opname == "LIST_EXTEND":
             if len(self.stack) >= 2:
-                it = self.stack.pop()
-                lst = self.stack.pop()
+                it = str(self.stack.pop())
+                lst = str(self.stack.pop())
                 if lst == "[]":
                     if it.startswith("(") and it.endswith(")"):
-                        self.stack.append("[" + it[1:-1] + "]")
+                        self.stack.append("[" + str(it)[1:-1] + "]")
                     else:
                         self.stack.append(f"list({it})")
                 else:
                     self.stack.append(f"[*({lst}), *({it})]")
 
+        elif "LOAD_FAST" in instr.opname or "LOAD_GLOBAL" in instr.opname:
+            if "_" in instr.opname and "LOAD_FAST" in instr.opname:
+                # Handle fused opcodes like LOAD_FAST_BORROW_LOAD_FAST_BORROW
+                if isinstance(instr.argval, (tuple, list)):
+                    for n in instr.argval:
+                        self.stack.append(str(n))
+                else:
+                    s_arg = str(instr.argval).strip("()")
+                    names = s_arg.split(", ")
+                    for n in names:
+                        self.stack.append(n.strip("'\" "))
+            else:
+                self.stack.append(str(instr.argval))
+
         elif instr.opname in ("LOAD_ATTR", "LOAD_METHOD"):
             obj = self.stack.pop() if self.stack else "obj"
-            self.stack.append(str(obj) + "." + str(instr.argval))
+            name = str(instr.argval)
+            if " + " in name: # Handle 3.12+ fused names like 'append + NULL|self'
+                name = name.split(" + ")[0]
+            # Avoid wrapping names in quotes or parens incorrectly
+            s_obj = str(obj).strip("'\"") if str(obj) in ("self", "cls") else str(obj)
+            self.stack.append(f"{s_obj}.{name}")
+
+        elif instr.opname == "LOAD_SUPER_ATTR":
+            # 3.12+ fused opcode
+            name = str(instr.argval)
+            if " + " in name:
+                name = name.split(" + ")[0]
+            # super() call is usually implicit or zero-arg in this context
+            self.stack.append(f"super().{name}")
+
+        elif instr.opname == "LOAD_FROM_DICT_OR_GLOBALS":
+            self.stack.append(str(instr.argval))
 
         elif instr.opname == "RETURN_CONST":
             val = repr(instr.argval) if instr.argval is not None else "None"
@@ -485,7 +605,7 @@ class Decompiler311Plus(DecompilerGeneric):
                 op_idx = int(instr.arg) if (instr.arg is not None) else -1
                 op_symbol = op_map.get(op_idx, f"<op:{op_idx}>")
                 self.stack.append(f"({left} {op_symbol} {right})")
-        elif instr.opname == "FORMAT_VALUE":
+        elif instr.opname == "FORMAT_VALUE" or instr.opname == "FORMAT_SIMPLE":
             if self.stack:
                 val = self.stack.pop()
                 self.stack.append(f"{{{val}}}")

@@ -69,5 +69,33 @@ class TestDecompiler(unittest.TestCase):
     def test_nested(self):
         self._run_test_on_snippet("nested")
 
+    def test_comprehensive(self):
+        """Test with a comprehensive real-world like script."""
+        current_dir = os.path.dirname(__file__)
+        path = os.path.abspath(os.path.join(current_dir, "..", "test_files", "comprehensive.py"))
+        pyc_path = py_compile.compile(path, cfile=os.path.join(self.test_dir, "comprehensive.pyc"))
+        
+        # Decompile
+        decompiler = get_decompiler(pyc_path)
+        decompiled_code = decompiler.decompile()
+        
+        # Verify by execution
+        orig_out = subprocess.check_output([sys.executable, path], text=True, stderr=subprocess.STDOUT)
+        
+        # Run decompiled
+        decomp_file = os.path.join(self.test_dir, "comprehensive_decomp.py")
+        with open(decomp_file, "w") as f:
+            f.write(decompiled_code)
+        
+        try:
+            decomp_out = subprocess.check_output([sys.executable, decomp_file], text=True, stderr=subprocess.PIPE)
+            self.assertEqual(orig_out.strip(), decomp_out.strip())
+        except subprocess.CalledProcessError as e:
+            print(f"\nDECOMPILED CODE FAILURE:")
+            print(f"STDOUT: {e.output}")
+            print(f"STDERR: {e.stderr}")
+            print(f"CODE:\n{decompiled_code}")
+            raise
+
 if __name__ == "__main__":
     unittest.main()
