@@ -23,6 +23,7 @@ class DecompilerBase:
         self.instructions: List[BytecodeInstruction] = []
         self.reconstructed: List[str] = []
         self.indent_level = indent_level
+        self.starts_as_function = (indent_level > 0)
         self.blocks: List[Tuple[int, str]] = [] # Stack of (end_offset, type)
         self.pc = 0
 
@@ -44,7 +45,9 @@ class DecompilerBase:
         raise NotImplementedError("Subclasses must implement decompile()")
 
     def _get_jump_target(self, instr: BytecodeInstruction) -> int:
-        """Calculate absolute jump target. Default assumes absolute offset in arg."""
+        """Calculate absolute jump target. Prefer argval if resolved by dis."""
+        if isinstance(instr.argval, int):
+            return instr.argval
         return int(instr.arg) if (instr.arg is not None) else 0
 
 class DecompilerGeneric(DecompilerBase):
@@ -57,66 +60,111 @@ class DecompilerGeneric(DecompilerBase):
         self.pc = 0
         self.blocks = [] # Stack of (end_offset, type)
         
-        # Check for module docstring
-        if self.code_obj.co_consts and isinstance(self.code_obj.co_consts[0], str) and self.indent_level == 0:
-            doc = self.code_obj.co_consts[0]
-            if doc:
-                self.reconstructed.append(f'"""\n{doc.strip()}\n"""\n')
+        # Check for docstring (if not explicitly loaded later)
+        self.has_doc = False
+        if self.code_obj.co_consts and isinstance(self.code_obj.co_consts[0], str):
+            is_loaded = any(instr.opname == "LOAD_CONST" and instr.arg == 0 for instr in self.instructions)
+            if not is_loaded:
+                doc = self.code_obj.co_consts[0]
+                if doc:
+                    self._append_reconstructed('"""', indent_multiline=True)
+                    self._append_reconstructed(doc.strip(), indent_multiline=True)
+                    self._append_reconstructed('"""', indent_multiline=True)
+                    self.has_doc = True
+                    self.reconstructed.append("") # Line separation after docstring
         
         while self.pc < len(self.instructions):
             instr = self.instructions[self.pc]
             
             # Check for block ends
             while self.blocks and instr.offset >= self.blocks[-1][0]:
-                self.blocks.pop()
+                block_end, block_type = self.blocks.pop()
                 self.indent_level -= 1
+                if block_type == "if_implicit_else":
+                    self._append_reconstructed("else:")
+                    self.indent_level += 1
+                    # New target is effectively the end of the script/function
+                    self.blocks.append((self.instructions[-1].offset + 2, "else"))
 
             self.pc += 1
             self._handle_instruction(instr)
         
-        return "\n".join(self.reconstructed).strip()
+        return "\n".join(self.reconstructed).rstrip()
 
-    def _append_reconstructed(self, line: str):
+    def _append_reconstructed(self, line: str, indent_multiline: bool = False):
+        if not line: return
+        
+        # Add spacing before major blocks
+        if line.startswith(("def ", "class ", "if ", "for ", "while ")) and self.reconstructed:
+            if self.reconstructed[-1] != "":
+                self.reconstructed.append("")
+
         if "\n" in line:
-            # For multi-line blocks like functions, we assume they are already formatted or need block indentation
-            indented_lines = []
-            for l in line.split("\n"):
-                if l.strip():
-                    indented_lines.append("    " * self.indent_level + l)
-                else:
-                    indented_lines.append("")
-            self.reconstructed.append("\n".join(indented_lines))
+            parts = line.split("\n")
+            if indent_multiline:
+                for l in parts:
+                    clean_l = l.strip()
+                    if clean_l or l == "":
+                        self.reconstructed.append("    " * self.indent_level + l)
+                    else:
+                        self.reconstructed.append("")
+            else:
+                for i, l in enumerate(parts):
+                    if i == 0:
+                        self.reconstructed.append("    " * self.indent_level + l)
+                    else:
+                        self.reconstructed.append(l)
         else:
             self.reconstructed.append("    " * self.indent_level + line)
 
+        # Spacing after blocks
+        if line.endswith((":",)) and "\n" not in line: # End of a header like "def ...:" or "class ...:"
+             pass # Indentation handles the following lines
+
+    def _format_val(self, val):
+        if isinstance(val, str) and "\n" in val:
+            if '"""' in val:
+                return f"'''{val}'''"
+            return f'"""{val}"""'
+        # Handle LOAD_SMALL_INT or other numbers correctly
+        return repr(val)
+
     def _handle_instruction(self, instr: BytecodeInstruction):
-        if instr.opname in ("LOAD_CONST", "LOAD_NAME", "LOAD_FAST", "LOAD_GLOBAL"):
+        if instr.opname in ("LOAD_CONST", "LOAD_NAME", "LOAD_FAST", "LOAD_GLOBAL", "LOAD_SMALL_INT", "LOAD_FAST_BORROW", "LOAD_CONST_BORROW", "LOAD_DEREF"):
             if isinstance(instr.argval, types.CodeType):
                 self.stack.append(("code", instr.argval))
-            elif instr.opname == "LOAD_CONST" and isinstance(instr.argval, str) and instr.offset == 0:
-                # Skip if already handled as docstring
+            elif instr.opname == "LOAD_CONST" and instr.arg == 0 and isinstance(instr.argval, str) and self.has_doc:
+                # Skip if already handled as docstring (first const)
                 pass
             else:
-                self.stack.append(repr(instr.argval) if instr.opname == "LOAD_CONST" else str(instr.argval))
+                val = instr.argval
+                if val is None and instr.opname == "LOAD_SMALL_INT":
+                    val = instr.arg
+                if "CONST" in instr.opname or "SMALL_INT" in instr.opname:
+                    self.stack.append(self._format_val(val))
+                else:
+                    self.stack.append(str(val))
                 
         elif instr.opname in ("STORE_NAME", "STORE_FAST"):
             if self.stack:
                 val = self.stack.pop()
-                if isinstance(val, tuple) and val[0] == "func":
-                    # Function already reconstructed by MAKE_FUNCTION
-                    self._append_reconstructed(val[1])
+                if isinstance(val, tuple) and val[0] in ("func", "class"):
+                    # Block already reconstructed
+                    self._append_reconstructed(val[1], indent_multiline=True)
+                    # Add newline after function/class if at top level
+                    if self.indent_level == 0:
+                        self.reconstructed.append("")
                 elif str(instr.argval) == "__doc__":
                     # Module or class docstring stored in __doc__
-                    if isinstance(val, str):
-                        doc_text = val.strip("'\"").strip()
-                        self._append_reconstructed(f'"""{doc_text}"""')
-                    else:
-                        self._append_reconstructed(f'"""{val}"""')
+                    doc_text = str(val).strip("'\"").strip()
+                    if doc_text:
+                        self._append_reconstructed(f'"""\n{doc_text}\n"""', indent_multiline=True)
+                        self.reconstructed.append("")
                 elif val == str(instr.argval):
                     # Suppress redundant assignments like item = item from loops
                     pass
                 else:
-                    self._append_reconstructed(f"{instr.argval} = {val}")
+                    self._append_reconstructed(f"{instr.argval} = {val}", indent_multiline=False)
                     
         elif instr.opname == "MAKE_FUNCTION":
             # In 3.13, MAKE_FUNCTION has no arg and only code object on stack
@@ -135,12 +183,15 @@ class DecompilerGeneric(DecompilerBase):
                     args = list(code_obj.co_varnames[:code_obj.co_argcount])
                     
                     # Decompile function body
-                    if isinstance(self, Decompiler39): dec_class = Decompiler39
-                    elif isinstance(self, Decompiler311Plus): dec_class = Decompiler311Plus
-                    else: dec_class = DecompilerGeneric
-
-                    # Temporary reset indentation for body as it will be indented by _append_reconstructed
-                    dec = dec_class(code_obj, indent_level=0)
+                    dec_class = DecompilerGeneric
+                    if isinstance(self, Decompiler39):
+                        dec_class = Decompiler39
+                    elif isinstance(self, Decompiler311Plus):
+                        dec_class = Decompiler311Plus
+                        
+                    # Decompile function body with starting indent level 1
+                    # Indentation will be applied when the function is emitted by STORE_NAME
+                    dec = dec_class(code_obj, indent_level=1)
                     body = dec.decompile()
                     sig = f"def {code_obj.co_name}({', '.join(args)}):"
                     self.stack.append(("func", f"{sig}\n{body}"))
@@ -150,8 +201,10 @@ class DecompilerGeneric(DecompilerBase):
         elif instr.opname == "RETURN_VALUE":
             if self.stack:
                 val = self.stack.pop()
-                if val != "None":
-                    self._append_reconstructed(f"return {val}")
+                if self.starts_as_function:
+                    is_last = (self.pc >= len(self.instructions))
+                    if val != "None" or not is_last:
+                        self._append_reconstructed(f"return {val}")
                     
         elif instr.opname == "POP_TOP":
             if self.stack:
@@ -173,13 +226,36 @@ class DecompilerGeneric(DecompilerBase):
                 self.stack.append(f"({left} {op} {right})")
 
         elif "CALL" in instr.opname:
-            args = []
+            args: List[str] = []
             num_args = int(instr.arg) if (instr.arg is not None) else 0
             for _ in range(num_args):
-                if self.stack: args.insert(0, str(self.stack.pop()))
-            func = str(self.stack.pop()) if self.stack else "unknown_func"
-            call_expr = f"{func}({', '.join(args)})"
-            self.stack.append(call_expr)
+                if self.stack:
+                    arg = self.stack.pop()
+                    # If arg is a function tuple, use its text
+                    if isinstance(arg, tuple) and arg[0] in ("func", "class"):
+                        args.insert(0, arg[1])
+                    else:
+                        args.insert(0, str(arg))
+            
+            func = self.stack.pop() if self.stack else "unknown_func"
+            
+            # Detect class builder
+            if func == "__build_class__" and len(args) >= 2:
+                body_text = args[0]
+                cls_name = args[1].strip("'\"")
+                # Class body text usually starts with "def Name():"
+                # We need to change it to "class Name:"
+                lines = body_text.split("\n")
+                if len(lines) > 1:
+                    real_body = "\n".join(lines[1:])
+                    self.stack.append(("class", f"class {cls_name}:\n{real_body}"))
+                else:
+                    self.stack.append(("class", f"class {cls_name}: pass"))
+            else:
+                self.stack.append(f"{func}({', '.join(args)})")
+
+        elif instr.opname == "LOAD_BUILD_CLASS":
+            self.stack.append("__build_class__")
             
         elif instr.opname == "COMPARE_OP":
             if len(self.stack) >= 2:
@@ -207,7 +283,7 @@ class DecompilerGeneric(DecompilerBase):
                 self.indent_level += 1
                 self.blocks.append((else_end, "else"))
 
-        elif instr.opname in ("PUSH_NULL", "RESUME", "PRECALL", "CACHE"):
+        elif instr.opname in ("PUSH_NULL", "RESUME", "PRECALL", "CACHE", "COPY_FREE_VARS", "MAKE_CELL", "SET_FUNCTION_ATTRIBUTE", "END_FOR", "POP_ITER"):
             pass  # no-ops for decompilation
 
         elif instr.opname == "POP_JUMP_IF_FALSE":
@@ -216,17 +292,39 @@ class DecompilerGeneric(DecompilerBase):
                 self._append_reconstructed(f"if {cond}:")
                 self.indent_level += 1
                 jump_target = self._get_jump_target(instr)
+                
+                # Advanced check: if the code just before jump_target ends with a terminal 
+                # instruction (return, raise), and there is more code AT the jump_target,
+                # then we have an implicit 'else'.
+                target_idx = -1
+                for i, ins in enumerate(self.instructions):
+                    if ins.offset == jump_target:
+                        target_idx = i
+                        break
+                
+                if target_idx > 0:
+                    prev_ins = self.instructions[target_idx - 1]
+                    if prev_ins.opname in ("RETURN_VALUE", "RETURN_CONST", "RAISE_EXCEPTION", "BREAK_LOOP"):
+                        self.blocks.append((jump_target, "if_implicit_else"))
+                        return
+                
                 self.blocks.append((jump_target, "if"))
-
 
         elif instr.opname == "FOR_ITER":
             if self.stack:
                 iterator = self.stack.pop()
-                self._append_reconstructed(f"for item in {iterator}:")
+                var_name = "item"
+                # Peek for store to use better name
+                if self.pc < len(self.instructions):
+                    next_instr = self.instructions[self.pc]
+                    if next_instr.opname in ("STORE_NAME", "STORE_FAST"):
+                        var_name = str(next_instr.argval)
+                
+                self._append_reconstructed(f"for {var_name} in {iterator}:")
                 self.indent_level += 1
                 jump_target = self._get_jump_target(instr)
                 self.blocks.append((jump_target, "for"))
-                self.stack.append("item")
+                self.stack.append(var_name)
 
         elif instr.opname == "BUILD_TUPLE":
             items = []
@@ -251,6 +349,18 @@ class DecompilerGeneric(DecompilerBase):
 
         elif instr.opname in ("GET_ITER", "UNPACK_SEQUENCE"):
             pass
+
+        elif instr.opname == "LIST_EXTEND":
+            if len(self.stack) >= 2:
+                it = self.stack.pop()
+                lst = self.stack.pop()
+                if lst == "[]":
+                    if it.startswith("(") and it.endswith(")"):
+                        self.stack.append("[" + it[1:-1] + "]")
+                    else:
+                        self.stack.append(f"list({it})")
+                else:
+                    self.stack.append(f"[*({lst}), *({it})]")
 
         elif instr.opname in ("LOAD_ATTR", "LOAD_METHOD"):
             obj = self.stack.pop() if self.stack else "obj"
@@ -392,11 +502,13 @@ class Decompiler311Plus(DecompilerGeneric):
             super()._handle_instruction(instr)
 
     def _get_jump_target(self, instr: BytecodeInstruction) -> int:
-        """3.11+ relative jumps in words (usually)."""
+        """Use resolved target if available, else fall back to relative calc."""
+        if isinstance(instr.argval, int):
+            return instr.argval
         arg = int(instr.arg) if (instr.arg is not None) else 0
         if "BACKWARD" in instr.opname:
             return instr.offset + 2 - (arg * 2)
-        # FOR_ITER and POP_JUMP_IF_* forward jumps
+        # Fallback for forward jumps if argval missing (version-specific cache sizes might vary)
         return instr.offset + 2 + (arg * 2)
 
 class MarshalParser:
@@ -525,7 +637,6 @@ class MarshalParser:
         lnotab = self.load()
         
         # Ensure components are of correct type
-        # Ensure components are of correct type
         def to_tuple_strings(x):
             if x is None or isinstance(x, int): return ()
             return tuple( s.decode('utf-8', 'replace') if isinstance(s, bytes) else str(s) for s in x )
@@ -563,7 +674,18 @@ def get_decompiler(filepath: str) -> DecompilerBase:
         raise ValueError("Invalid .pyc file: too short")
     
     magic = struct.unpack("<I", all_data[0:4])[0]
+    version_id = magic & 0xFFFF
     
+    # Basic sanity check for Python 3 magic numbers (usually 3000+)
+    # Python 3.0 was 3141, 3.14 is around 3560.
+    if not (3000 <= version_id <= 4000):
+        # Allow it if it matches host magic exactly, just in case
+        import importlib.util
+        host_magic = int.from_bytes(importlib.util.MAGIC_NUMBER, 'little')
+        if magic != host_magic:
+            raise ValueError(f"Invalid or unsupported Python magic number: 0x{magic:08x} (version id: {version_id}). "
+                             "This file may be corrupt or from an unsupported Python version.")
+
     import importlib.util
     host_magic = int.from_bytes(importlib.util.MAGIC_NUMBER, 'little')
     
@@ -617,9 +739,13 @@ def main():
     try:
         decompiler = get_decompiler(pyc_path)
         print(decompiler.decompile())
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
     except Exception:
         import traceback
         traceback.print_exc()
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
