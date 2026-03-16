@@ -188,6 +188,7 @@ class DecompilerGeneric(DecompilerBase):
         self._exc_as_store_offset: int = -1      # offset of 'as e' STORE to skip
         self._exc_cleanup_name: Optional[str] = None   # name to suppress in cleanup
         self._except_header_indent: int = -1           # indent level for except headers
+        self._exc_bound_names: set = set()             # all names ever bound in except-as
 
     # ------------------------------------------------------------------
     # Main loop
@@ -351,14 +352,19 @@ class DecompilerGeneric(DecompilerBase):
                 return ins.offset
         return -1
 
+    @staticmethod
+    def _is_backward_jump(opname: str) -> bool:
+        """True for any backward-looping opcode (handles 3.14 renames)."""
+        return "JUMP_BACKWARD" in opname
+
     def _has_jump_backward(self) -> bool:
-        """Return True if the code contains a JUMP_BACKWARD (while-True loop)."""
-        return any(ins.opname == "JUMP_BACKWARD" for ins in self.instructions)
+        """Return True if the code contains any backward jump."""
+        return any(self._is_backward_jump(ins.opname) for ins in self.instructions)
 
     def _find_jump_backward_target(self) -> int:
-        """Return the jump target of the first JUMP_BACKWARD, or -1."""
+        """Return the jump target of the first backward jump, or -1."""
         for ins in self.instructions:
-            if ins.opname == "JUMP_BACKWARD":
+            if self._is_backward_jump(ins.opname):
                 return self._get_jump_target(ins)
         return -1
 
@@ -394,7 +400,7 @@ class DecompilerGeneric(DecompilerBase):
         self._while_true_ends: set = set()     # end offsets of while-True (NOP-driven) loops
 
         for jb in self.instructions:
-            if jb.opname != "JUMP_BACKWARD":
+            if not self._is_backward_jump(jb.opname):
                 continue
             body_start = self._get_jump_target(jb)
 
@@ -429,10 +435,10 @@ class DecompilerGeneric(DecompilerBase):
                 self._while_header_targets[body_start] = guard_offset
 
     def _find_jump_backward_end(self) -> int:
-        """Return the offset just after the last JUMP_BACKWARD instruction."""
+        """Return the offset just after the last backward-jump instruction."""
         last_offset = -1
         for ins in self.instructions:
-            if ins.opname == "JUMP_BACKWARD":
+            if self._is_backward_jump(ins.opname):
                 last_offset = ins.offset
         if last_offset >= 0:
             return last_offset + 2
@@ -623,10 +629,15 @@ class DecompilerGeneric(DecompilerBase):
             # without a new PUSH_EXC_INFO reset).
             if self._except_header_indent >= 0:
                 self.indent_level = self._except_header_indent
-            # Peek past POP_JUMP_IF_FALSE for optional STORE_NAME 'as varname'
+            # Peek past POP_JUMP_IF_FALSE (and optional POP_TOP in 3.14+)
+            # for the optional STORE_NAME 'as varname' binding.
             as_name = None
             look = self.pc
+            # Skip past the conditional jump
             while look < len(self.instructions) and "POP_JUMP_IF" in self.instructions[look].opname:
+                look += 1
+            # 3.14 inserts POP_TOP to discard the exception type before binding
+            if look < len(self.instructions) and self.instructions[look].opname == "POP_TOP":
                 look += 1
             if look < len(self.instructions) and self.instructions[look].opname in (
                 "STORE_NAME", "STORE_FAST"
@@ -637,8 +648,6 @@ class DecompilerGeneric(DecompilerBase):
                 self._exc_as_store_offset = -1
             self._exc_cleanup_name = as_name
             # Also record in a persistent set for re-raise-path cleanup suppression
-            if not hasattr(self, "_exc_bound_names"):
-                self._exc_bound_names: set = set()
             if as_name:
                 self._exc_bound_names.add(as_name)
             if as_name:
@@ -733,6 +742,51 @@ class DecompilerGeneric(DecompilerBase):
                 self.stack.append(("func", f"{sig}\n{body}"))
             else:
                 self.stack.append("make_function(?)")
+
+        # ── SET_FUNCTION_ATTRIBUTE (Python 3.14+) ─────────────────────
+        elif opname == "SET_FUNCTION_ATTRIBUTE":
+            # 3.14 uses SET_FUNCTION_ATTRIBUTE to attach defaults/annotations
+            # to a function after MAKE_FUNCTION.
+            # Stack layout: TOS=func_tuple, TOS-1=attribute_value
+            # arg bitmask: 0x01=defaults, 0x02=kwonly_defaults, 0x04=annotations, 0x08=closure
+            attr_flags = int(instr.arg) if instr.arg is not None else 0
+            func_val = self.stack.pop() if self.stack else None
+            attr_val = self.stack.pop() if self.stack else None
+
+            if (func_val is not None and isinstance(func_val, tuple)
+                    and func_val[0] == "func" and attr_val is not None
+                    and (attr_flags & 0x01)):  # positional defaults
+                # Rewrite the function signature to include defaults
+                func_text = str(func_val[1])
+                lines_f = func_text.split("\n")
+                sig_line = lines_f[0] if lines_f else ""
+                # Parse: "def name(args):" -> attach defaults from attr_val
+                if sig_line.startswith("def ") and "(" in sig_line:
+                    raw = str(attr_val).strip()
+                    # attr_val is repr of tuple e.g. "(10,)" or "(10, 'hello')"
+                    inner = raw
+                    if inner.startswith("(") and inner.endswith(")"):
+                        inner = inner[1:-1]
+                    defs = [d.strip() for d in inner.split(",") if d.strip()]
+                    # Get arg list from sig
+                    paren_start = sig_line.index("(") + 1
+                    paren_end = sig_line.rindex(")")
+                    args_str = sig_line[paren_start:paren_end]
+                    args = [a.strip() for a in args_str.split(",") if a.strip()]
+                    n_no_def = len(args) - len(defs)
+                    for i, d in enumerate(defs):
+                        idx = n_no_def + i
+                        if 0 <= idx < len(args) and "=" not in args[idx]:
+                            args[idx] = f"{args[idx]}={d}"
+                    new_sig = sig_line[:paren_start] + ", ".join(args) + sig_line[paren_end:]
+                    lines_f[0] = new_sig
+                    self.stack.append(("func", "\n".join(lines_f)))
+                else:
+                    self.stack.append(func_val)
+            else:
+                # Non-defaults attribute or unrecognised — push func back unchanged
+                if func_val is not None:
+                    self.stack.append(func_val)
 
         # ── return ─────────────────────────────────────────────────────
         elif opname == "RETURN_VALUE":
@@ -966,7 +1020,7 @@ class DecompilerGeneric(DecompilerBase):
             self.stack.append(f'f"{content}"' if has_fmt else f'"{content}"')
 
         # ── jumps / control flow ───────────────────────────────────────
-        elif opname in ("JUMP_FORWARD", "JUMP_BACKWARD"):
+        elif opname == "JUMP_FORWARD" or self._is_backward_jump(opname):
             jump_target = self._get_jump_target(instr)
 
             # FIX-11: detect while loop.
@@ -985,7 +1039,7 @@ class DecompilerGeneric(DecompilerBase):
             #      is duplicate — register those offsets for suppression.
             #   2. Retroactively rewrite the 'if' header → 'while'.
             #   3. Drain spurious stack items pushed by the dup condition.
-            if opname == "JUMP_BACKWARD" and jump_target <= instr.offset:
+            if self._is_backward_jump(opname) and jump_target <= instr.offset:
                 # Pre-scan already registered the dup-condition region in
                 # _while_body_offsets and the guard offset in _while_header_targets.
                 # Nothing to do here except prevent falling into the else-detection below.
@@ -1065,7 +1119,7 @@ class DecompilerGeneric(DecompilerBase):
         # ── no-ops ─────────────────────────────────────────────────────
         elif opname in (
             "PUSH_NULL", "RESUME", "PRECALL", "CACHE", "COPY_FREE_VARS",
-            "MAKE_CELL", "SET_FUNCTION_ATTRIBUTE", "END_FOR", "POP_ITER",
+            "MAKE_CELL", "END_FOR", "POP_ITER",
             "YIELD_FROM", "COPY",
         ):
             pass
@@ -1670,7 +1724,34 @@ class Decompiler311Plus(DecompilerGeneric):
                 left = self.stack.pop()
                 # Pure binary ops (indices 0–13)
                 # In-place ops (indices 16–29) — same arithmetic, result stored back
-                # CPython 3.12 NB_* enum -> operator symbol (verified empirically).
+                # CPython NB_* enum -> operator symbol.
+                op_idx = int(instr.arg) if instr.arg is not None else -1
+
+                # Python 3.14: BINARY_SUBSCR is encoded as BINARY_OP arg 26
+                if op_idx == 26:
+                    self.stack.append(f"{left}[{right}]")
+                    return
+
+                # Binary (non-mutating):
+                op_map = {
+                    0: "+",  1: "&",  2: "//", 3: "<<", 4: "@",
+                    5: "*",  6: "%",  7: "|",  8: "**", 9: ">>",
+                    10: "-", 11: "/", 12: "^",
+                }
+                # In-place / augmented-assignment:
+                inplace_map = {
+                    13: "+=",  14: "&=",  15: "//=", 16: "<<=", 17: "@=",
+                    18: "*=",  19: "%=",  20: "|=",  21: "**=", 22: ">>=",
+                    23: "-=",  24: "/=",  25: "^=",
+                }
+                inplace_op = inplace_map.get(op_idx)
+                bin_op = op_map.get(op_idx)
+
+                # 3.14+: subscript via BINARY_OP arg 26
+                if op_idx == 26:
+                    self.stack.append(f"{left}[{right}]")
+                    return
+
                 # Binary (non-mutating):
                 op_map = {
                     0: "+",  1: "&",  2: "//", 3: "<<", 4: "@",
