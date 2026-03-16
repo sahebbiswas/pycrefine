@@ -1,4 +1,4 @@
-name: CI Py3.14
+name: Python 3.14
 
 on:
   push:

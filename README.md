@@ -2,6 +2,9 @@
 
 A Python `.pyc` decompiler that reconstructs readable source code from compiled bytecode. Built with a layered, version-aware architecture to correctly handle `.pyc` files from Python **3.9 through 3.14**, regardless of which Python version you run it under.
 
+![Python 3.9](https://github.com/sahebbiswas/pycrefine/actions/workflows/ci-py39.yml/badge.svg)
+![Python 3.14](https://github.com/sahebbiswas/pycrefine/actions/workflows/ci-py314.yml/badge.svg)
+
 ---
 
 ## Features
