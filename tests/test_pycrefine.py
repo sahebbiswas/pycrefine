@@ -58,6 +58,7 @@ sys.path.insert(0, str(_HERE.parent))
 sys.path.insert(0, str(_HERE.parent / "outputs"))
 
 from pycrefine import (  # noqa: E402
+    BytecodeInstruction,
     DecompilerGeneric,
     Decompiler311Plus,
     Decompiler39,
@@ -1071,8 +1072,156 @@ class TestWhilePrescan(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# Decompiler39 class reconstruction  (CALL_FUNCTION __build_class__ fix)
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
+class TestDecompiler39Classes(unittest.TestCase):
+    """
+    White-box tests for Decompiler39.CALL_FUNCTION __build_class__ handling.
+
+    In Python 3.9, class definitions compile to:
+        LOAD_BUILD_CLASS
+        LOAD_CONST <code object>
+        MAKE_FUNCTION 0
+        LOAD_CONST 'ClassName'
+        [LOAD_NAME BaseClass ...]
+        CALL_FUNCTION N
+
+    The CALL_FUNCTION handler must detect func == "__build_class__", preserve
+    the ("func", body_text) tuple from MAKE_FUNCTION without converting it to
+    a raw string, and reconstruct "class Name(bases): body" correctly.
+    """
+
+    def _make_dec(self):
+        """Return a fresh Decompiler39 instance with an empty stack."""
+        code = compile("pass", "<test>", "exec")
+        return Decompiler39(code)
+
+    def _call_function(self, dec, num_args: int):
+        """Fire a CALL_FUNCTION instruction with the given arg count."""
+        instr = BytecodeInstruction(
+            opcode=131, opname="CALL_FUNCTION", arg=num_args, argval=num_args,
+            offset=0, starts_line=None, is_jump_target=False,
+        )
+        dec._handle_instruction(instr)
+
+    # ------------------------------------------------------------------
+    # Core class-builder detection
+    # ------------------------------------------------------------------
+
+    def test_simple_class_produces_tuple(self):
+        """CALL_FUNCTION with __build_class__ must push a ("class", text) tuple."""
+        dec = self._make_dec()
+        body = "def Foo():\n    def __init__(self):\n        self.x = 1"
+        dec.stack = ["__build_class__", ("func", body), "'Foo'"]
+        self._call_function(dec, 2)
+        result = dec.stack[-1]
+        self.assertIsInstance(result, tuple, "Expected (class, text) tuple on stack")
+        self.assertEqual(result[0], "class")
+
+    def test_simple_class_header(self):
+        """Reconstructed class must start with 'class Foo:'."""
+        dec = self._make_dec()
+        body = "def Foo():\n    def __init__(self):\n        self.x = 1"
+        dec.stack = ["__build_class__", ("func", body), "'Foo'"]
+        self._call_function(dec, 2)
+        text = dec.stack[-1][1]
+        self.assertIn("class Foo:", text)
+
+    def test_class_body_included(self):
+        """The class body (def __init__ etc.) must appear in the result."""
+        dec = self._make_dec()
+        body = "def Foo():\n    def __init__(self):\n        self.x = 1"
+        dec.stack = ["__build_class__", ("func", body), "'Foo'"]
+        self._call_function(dec, 2)
+        text = dec.stack[-1][1]
+        self.assertIn("def __init__(self):", text)
+        self.assertIn("self.x = 1", text)
+
+    def test_no_raw_build_class_in_output(self):
+        """The raw __build_class__ string must never appear in the result."""
+        dec = self._make_dec()
+        dec.stack = ["__build_class__", ("func", "def Foo():\n    pass"), "'Foo'"]
+        self._call_function(dec, 2)
+        text = dec.stack[-1][1]
+        self.assertNotIn("__build_class__", text)
+
+    def test_no_raw_func_tuple_in_output(self):
+        """The raw ('func', ...) tuple repr must not appear in the class text."""
+        dec = self._make_dec()
+        dec.stack = ["__build_class__", ("func", "def Foo():\n    pass"), "'Foo'"]
+        self._call_function(dec, 2)
+        text = dec.stack[-1][1]
+        self.assertNotIn("('func'", text)
+        self.assertNotIn("(\"func\"", text)
+
+    # ------------------------------------------------------------------
+    # Base classes
+    # ------------------------------------------------------------------
+
+    def test_class_with_single_base(self):
+        """Class with a base class must produce 'class Child(Base):'."""
+        dec = self._make_dec()
+        dec.stack = ["__build_class__", ("func", "def Child():\n    pass"), "'Child'", "Base"]
+        self._call_function(dec, 3)
+        text = dec.stack[-1][1]
+        self.assertIn("class Child(Base):", text)
+
+    def test_class_with_two_bases(self):
+        """Class with two base classes must include both in the header."""
+        dec = self._make_dec()
+        dec.stack = [
+            "__build_class__", ("func", "def Multi():\n    pass"),
+            "'Multi'", "Base", "Mixin",
+        ]
+        self._call_function(dec, 4)
+        text = dec.stack[-1][1]
+        self.assertIn("class Multi(", text)
+        self.assertIn("Base", text)
+        self.assertIn("Mixin", text)
+
+    # ------------------------------------------------------------------
+    # Regular (non-class) calls must be unaffected
+    # ------------------------------------------------------------------
+
+    def test_regular_call_unaffected(self):
+        """Regular CALL_FUNCTION (not __build_class__) must still work."""
+        dec = self._make_dec()
+        dec.stack = ["print", "'hello'", "'world'"]
+        self._call_function(dec, 2)
+        result = dec.stack[-1]
+        self.assertIsInstance(result, str)
+        self.assertIn("print(", result)
+        self.assertIn("'hello'", result)
+        self.assertNotIn("__build_class__", result)
+
+    def test_regular_call_with_func_tuple_arg(self):
+        """A regular call that happens to receive a (func, text) tuple converts it."""
+        dec = self._make_dec()
+        body_tuple = ("func", "def f():\n    return 1")
+        dec.stack = ["decorator", body_tuple]
+        self._call_function(dec, 1)
+        result = dec.stack[-1]
+        self.assertIsInstance(result, str)
+        # Should use the body text, not the raw tuple repr
+        self.assertNotIn("('func'", result)
+
+    # ------------------------------------------------------------------
+    # STORE_NAME integration
+    # ------------------------------------------------------------------
+
+    def test_store_name_emits_class_correctly(self):
+        """After CALL_FUNCTION, STORE_NAME must emit the class definition to output."""
+        dec = self._make_dec()
+        dec.indent_level = 0
+        body = "class Foo:\n    def __init__(self):\n        self.x = 1"
+        dec.stack = [("class", body)]
+        store = BytecodeInstruction(
+            opcode=90, opname="STORE_NAME", arg=0, argval="Foo",
+            offset=0, starts_line=None, is_jump_target=False,
+        )
+        dec._handle_instruction(store)
+        out = "\n".join(dec.reconstructed)
+        self.assertIn("class Foo:", out)
+        self.assertNotIn("('class'", out)
+        self.assertNotIn("__build_class__", out)

@@ -423,14 +423,42 @@ class DecompilerGeneric(DecompilerBase):
             # whose target is beyond JUMP_BACKWARD (the loop-exit path).
             # We want the CLOSEST (highest offset) qualifying guard to correctly
             # associate nested inner loops with their own guard.
+            # The while-loop guard: the conditional jump that exits the loop.
+            #
+            # Python 3.12-: guard is BEFORE body_start (condition checked at top).
+            # Python 3.14+: guard may be AFTER body_start (do-while style, condition
+            #               checked at bottom, just before JUMP_BACKWARD).
+            #
+            # Strategy: find the conditional jump that is CLOSEST to body_start
+            # (either just before or anywhere before jb.offset) whose target
+            # is BEYOND jb.offset (i.e. exits the loop).
+            #
+            # Also: dis may leave argval unresolved on 3.14, so compute the
+            # absolute target two ways and take the larger.
             guard_offset = -1
+            guard_dist = float('inf')   # distance from body_start
             for ins in self.instructions:
-                if ("POP_JUMP_IF_FALSE" in ins.opname or "POP_JUMP_IF_TRUE" in ins.opname):
-                    t = self._get_jump_target(ins)
-                    if ins.offset < body_start and t > jb.offset:
-                        # Take the closest (largest offset) guard before body_start
-                        if ins.offset > guard_offset:
-                            guard_offset = ins.offset
+                if not ("POP_JUMP_IF_FALSE" in ins.opname
+                        or "POP_JUMP_IF_TRUE" in ins.opname
+                        or "JUMP_IF_FALSE" in ins.opname
+                        or "JUMP_IF_TRUE" in ins.opname):
+                    continue
+                # Must be within the loop (not after jb)
+                if ins.offset > jb.offset:
+                    continue
+                # Compute absolute target robustly
+                t_argval  = self._get_jump_target(ins)
+                arg       = ins.arg if ins.arg is not None else 0
+                t_forward = ins.offset + 2 + (arg * 2)
+                t = max(t_argval, t_forward)
+                # Target must exit the loop (land at or beyond jb)
+                if t < jb.offset:
+                    continue
+                # Pick the guard closest to body_start (from either direction)
+                dist = abs(ins.offset - body_start)
+                if dist < guard_dist:
+                    guard_dist = dist
+                    guard_offset = ins.offset
             if guard_offset >= 0:
                 self._while_header_targets[body_start] = guard_offset
 
@@ -629,22 +657,75 @@ class DecompilerGeneric(DecompilerBase):
             # without a new PUSH_EXC_INFO reset).
             if self._except_header_indent >= 0:
                 self.indent_level = self._except_header_indent
-            # Peek past POP_JUMP_IF_FALSE (and optional POP_TOP in 3.14+)
-            # for the optional STORE_NAME 'as varname' binding.
+            # Peek ahead from the current position to find the optional
+            # STORE_NAME / STORE_FAST that binds the 'as varname' in except.
+            #
+            # The bytecode varies by version:
+            #   3.12: POP_JUMP_IF_FALSE -> STORE_NAME e
+            #   3.14: POP_JUMP_IF_FALSE -> POP_TOP -> STORE_NAME e
+            #         (may include additional CACHE or other slots)
+            #
+            # Strategy: skip forward through "harmless" single-cycle opcodes
+            # (POP_JUMP_IF_*, POP_TOP, CACHE, NOP, COPY, RESUME) until we
+            # either find a STORE or hit something that clearly belongs to
+            # the handler body (a LOAD, BINARY, COMPARE, RETURN, RERAISE...).
+            #
+            # The window is capped at 10 instructions to prevent runaway.
+            # Scan forward from the current PC to find the optional
+            # STORE_NAME / STORE_FAST that binds 'as varname' in except.
+            #
+            # The binding zone (between CHECK_EXC_MATCH and handler body) looks like:
+            #   3.12 no-as:  POP_JUMP_IF_FALSE(reraise) -> POP_TOP -> body
+            #   3.12 as-e:   POP_JUMP_IF_FALSE(reraise) -> STORE_NAME e -> body
+            #   3.14 as-e:   POP_JUMP_IF_FALSE(reraise) -> <extras> -> STORE_NAME e
+            #
+            # Key invariant: the 'as e' STORE_NAME is always the FIRST STORE_NAME
+            # after the POP_JUMP_IF_FALSE and before POP_TOP / body opcodes.
+            # POP_TOP in the no-as case immediately follows POP_JUMP_IF_FALSE and
+            # signals there is no binding.
+            #
+            # Rules applied in order:
+            #  1. Skip POP_JUMP_IF_* opcodes
+            #  2. If next is POP_TOP -> no binding (POP_TOP discards exc value)
+            #  3. If next is STORE_NAME/STORE_FAST -> that IS the binding
+            #  4. Skip CACHE, NOP, RESUME, COPY (neutral opcodes that 3.14 inserts)
+            #  5. Stop at jump-target boundaries, RERAISE, RETURN_*, JUMP_*
+            #  6. Cap at 8 steps
             as_name = None
             look = self.pc
-            # Skip past the conditional jump
-            while look < len(self.instructions) and "POP_JUMP_IF" in self.instructions[look].opname:
+            # Step 1: skip conditional jumps
+            while (look < len(self.instructions)
+                   and "POP_JUMP_IF" in self.instructions[look].opname):
                 look += 1
-            # 3.14 inserts POP_TOP to discard the exception type before binding
-            if look < len(self.instructions) and self.instructions[look].opname == "POP_TOP":
-                look += 1
-            if look < len(self.instructions) and self.instructions[look].opname in (
-                "STORE_NAME", "STORE_FAST"
-            ):
-                as_name = str(self.instructions[look].argval)
-                self._exc_as_store_offset = self.instructions[look].offset
-            else:
+            # Steps 2-6: scan binding zone
+            for _ in range(8):
+                if look >= len(self.instructions):
+                    break
+                ins_l = self.instructions[look]
+                op = ins_l.opname
+                # Step 3: found the binding
+                if op in ("STORE_NAME", "STORE_FAST"):
+                    as_name = str(ins_l.argval)
+                    self._exc_as_store_offset = ins_l.offset
+                    break
+                # Step 2: POP_TOP means no 'as' binding — exception value discarded
+                if op == "POP_TOP":
+                    break
+                # Step 5: hard stops
+                if (op in ("RERAISE", "RAISE_VARARGS", "RETURN_CONST",
+                           "RETURN_VALUE", "JUMP_FORWARD")
+                        or self._is_backward_jump(op)):
+                    break
+                # Step 5: jump-target boundary = entered a new block
+                if ins_l.is_jump_target:
+                    break
+                # Step 4: neutral single-cycle opcodes — skip
+                if op in ("CACHE", "NOP", "RESUME", "COPY"):
+                    look += 1
+                    continue
+                # Unknown — stop to be safe
+                break
+            if as_name is None:
                 self._exc_as_store_offset = -1
             self._exc_cleanup_name = as_name
             # Also record in a persistent set for re-raise-path cleanup suppression
@@ -1040,9 +1121,60 @@ class DecompilerGeneric(DecompilerBase):
             #   2. Retroactively rewrite the 'if' header → 'while'.
             #   3. Drain spurious stack items pushed by the dup condition.
             if self._is_backward_jump(opname) and jump_target <= instr.offset:
-                # Pre-scan already registered the dup-condition region in
-                # _while_body_offsets and the guard offset in _while_header_targets.
-                # Nothing to do here except prevent falling into the else-detection below.
+                body_start = jump_target
+
+                # If the prescan successfully identified the loop guard
+                # (guard_offset in _while_header_targets), it already arranged for
+                # the POP_JUMP_IF_FALSE handler to open a "while" block instead of
+                # an "if" block.  Nothing more to do — just return.
+                if body_start in self._while_header_targets:
+                    return  # prescan handled it
+
+                # Fallback for Python 3.14+ where the prescan could not identify
+                # the guard (e.g. guard offset >= body_start in a do-while layout,
+                # or argval unresolved in a way the broadened search still misses).
+                # Retroactively rewrite the most recent "if" header → "while".
+                #
+                # Also suppress dup-condition instructions that already executed:
+                # find where the dup region starts (first instruction after the
+                # last STORE in the body) and drain extra stack items.
+                dup_start = instr.offset
+                for ins in self.instructions:
+                    if body_start <= ins.offset < instr.offset:
+                        if ins.opname in (
+                            "STORE_NAME", "STORE_FAST", "STORE_GLOBAL",
+                            "STORE_ATTR", "STORE_SUBSCR",
+                        ):
+                            dup_start = ins.offset + 2
+
+                dup_depth = 0
+                for ins in self.instructions:
+                    if dup_start <= ins.offset < instr.offset:
+                        if ins.opname in (
+                            "LOAD_CONST", "LOAD_NAME", "LOAD_FAST",
+                            "LOAD_GLOBAL", "LOAD_DEREF", "LOAD_SMALL_INT",
+                        ):
+                            dup_depth += 1
+                        elif ins.opname in ("COMPARE_OP", "BINARY_OP"):
+                            dup_depth -= 1
+                for _ in range(max(0, dup_depth)):
+                    if self.stack:
+                        self.stack.pop()
+
+                # Find the most recently emitted "if" header and rewrite it.
+                for bi in range(len(self.blocks) - 1, -1, -1):
+                    boff, btype = self.blocks[bi]
+                    if btype in ("if", "if_implicit_else") and boff >= instr.offset:
+                        for idx in range(len(self.reconstructed) - 1, -1, -1):
+                            if self.reconstructed[idx].lstrip().startswith("if "):
+                                self.reconstructed[idx] = self.reconstructed[idx].replace(
+                                    "if ", "while ", 1
+                                )
+                                self.blocks[bi] = (boff, "while")
+                                self._while_true_ends.discard(boff)
+                                break
+                        break
+
                 return  # never treat JUMP_BACKWARD as else-opener
 
 
@@ -1651,12 +1783,45 @@ class Decompiler39(DecompilerGeneric):
         # CALL_FUNCTION: positional-only call (3.9)
         elif opname == "CALL_FUNCTION":
             num = int(instr.arg) if instr.arg is not None else 0
-            args = []
+            # Pop args WITHOUT converting to str — preserve ('func',…) and
+            # ('class',…) tuples so __build_class__ detection works correctly.
+            raw_args = []
             for _ in range(num):
                 if self.stack:
-                    args.insert(0, str(self.stack.pop()))
-            func = self.stack.pop() if self.stack else "func"
-            self.stack.append(f"{func}({', '.join(args)})")
+                    raw_args.insert(0, self.stack.pop())
+            func_val = self.stack.pop() if self.stack else "func"
+            func = str(func_val)
+
+            # Class builder: LOAD_BUILD_CLASS pushes '__build_class__', then
+            # MAKE_FUNCTION pushes ('func', body_text), then LOAD_CONST 'ClassName',
+            # then optional base-class LOADs, then CALL_FUNCTION N.
+            if func == "__build_class__" and len(raw_args) >= 2:
+                # raw_args[0] is the ('func', body_text) tuple from MAKE_FUNCTION
+                # raw_args[1] is the class name string
+                # raw_args[2:] are base classes
+                body_val = raw_args[0]
+                if isinstance(body_val, tuple) and body_val[0] == "func":
+                    body_text = str(body_val[1])
+                else:
+                    body_text = str(body_val)
+                cls_name = str(raw_args[1]).strip("'\"")
+                bases = [str(b) for b in raw_args[2:]]
+                bases_str = f"({', '.join(bases)})" if bases else ""
+                lines = body_text.split("\n")
+                if len(lines) > 1:
+                    real_body = "\n".join(lines[1:])
+                    self.stack.append(("class", f"class {cls_name}{bases_str}:\n{real_body}"))
+                else:
+                    self.stack.append(("class", f"class {cls_name}{bases_str}: pass"))
+            else:
+                # Regular function call — convert args to strings now
+                str_args = []
+                for v in raw_args:
+                    if isinstance(v, tuple) and len(v) >= 2 and v[0] in ("func", "class"):
+                        str_args.append(str(v[1]))
+                    else:
+                        str_args.append(str(v))
+                self.stack.append(f"{func}({', '.join(str_args)})")
 
         # CALL_FUNCTION_KW: last stack item is tuple of kw names
         elif opname == "CALL_FUNCTION_KW":
