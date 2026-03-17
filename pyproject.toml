@@ -7,7 +7,7 @@ name = "pycrefine"
 version = "0.1.0"
 description = "A Python .pyc decompiler with version-aware architecture"
 authors = [{name = "Saheb"}]
-license = {text = "MIT"}
+license = "MIT"
 requires-python = ">=3.9"
 dependencies = [] # Keeps your "no dependencies" promise
 
@@ -16,6 +16,10 @@ test = ["pytest"]
 
 [project.scripts]
 pycrefine = "pycrefine:main" # Allows running 'pycrefine' directly in terminal
+
+[tool.setuptools]
+py-modules = ["pycrefine"]
+packages = []
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

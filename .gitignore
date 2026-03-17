@@ -3,3 +3,4 @@ trace.log
 __pycache__
 *.txt
 *.json
+pycrefine.egg-info 
