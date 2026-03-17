@@ -212,7 +212,7 @@ class DecompilerGeneric(DecompilerBase):
             # Find first non-trivial instruction
             first_meaningful = None
             for ins in self.instructions:
-                if ins.opname not in ("RESUME", "NOP", "CACHE"):
+                if ins.opname not in ("RESUME", "NOP", "CACHE", "NOT_TAKEN"):
                     first_meaningful = ins
                     break
             is_docstring = False
@@ -258,7 +258,7 @@ class DecompilerGeneric(DecompilerBase):
                             break
                         if ins.opname in (
                             "RETURN_VALUE", "RETURN_CONST", "RESUME",
-                            "POP_TOP", "CACHE", "END_FOR", "POP_ITER",
+                            "POP_TOP", "CACHE", "END_FOR", "POP_ITER", "NOT_TAKEN",
                         ):
                             continue
                         if ins.opname in ("LOAD_CONST", "LOAD_NAME") and ins.argval is None:
@@ -270,7 +270,7 @@ class DecompilerGeneric(DecompilerBase):
                         next_pc = self.pc
                         while (
                             next_pc < len(self.instructions)
-                            and self.instructions[next_pc].opname in ("RESUME", "CACHE", "NOP")
+                            and self.instructions[next_pc].opname in ("RESUME", "CACHE", "NOP", "NOT_TAKEN")
                         ):
                             next_pc += 1
 
@@ -636,7 +636,7 @@ class DecompilerGeneric(DecompilerBase):
             # If yes, defer except header to CHECK_EXC_MATCH.
             look = self.pc
             while look < len(self.instructions) and self.instructions[look].opname in (
-                "RESUME", "NOP", "CACHE"
+                "RESUME", "NOP", "CACHE", "NOT_TAKEN"
             ):
                 look += 1
             if look < len(self.instructions) and self.instructions[look].opname in (
@@ -674,56 +674,61 @@ class DecompilerGeneric(DecompilerBase):
             # Scan forward from the current PC to find the optional
             # STORE_NAME / STORE_FAST that binds 'as varname' in except.
             #
-            # The binding zone (between CHECK_EXC_MATCH and handler body) looks like:
-            #   3.12 no-as:  POP_JUMP_IF_FALSE(reraise) -> POP_TOP -> body
-            #   3.12 as-e:   POP_JUMP_IF_FALSE(reraise) -> STORE_NAME e -> body
-            #   3.14 as-e:   POP_JUMP_IF_FALSE(reraise) -> <extras> -> STORE_NAME e
+            # The binding zone varies by Python version:
+            #   3.12 no-as:  POP_JUMP_IF_FALSE -> POP_TOP    -> LOAD_CONST  -> body
+            #   3.12 as-e:   POP_JUMP_IF_FALSE -> STORE_NAME e -> body
+            #   3.14 no-as:  POP_JUMP_IF_FALSE -> POP_TOP    -> LOAD_CONST  -> body
+            #   3.14 as-e:   POP_JUMP_IF_FALSE -> POP_TOP    -> STORE_NAME e -> body
             #
-            # Key invariant: the 'as e' STORE_NAME is always the FIRST STORE_NAME
-            # after the POP_JUMP_IF_FALSE and before POP_TOP / body opcodes.
-            # POP_TOP in the no-as case immediately follows POP_JUMP_IF_FALSE and
-            # signals there is no binding.
+            # The correct discriminator is NOT "POP_TOP = no binding".
+            # On 3.14, POP_TOP appears in BOTH cases (it pops the exc_type from
+            # the CHECK_EXC_MATCH result). The real signal is whether STORE_NAME
+            # appears before any LOAD_* or other body-start instruction.
             #
-            # Rules applied in order:
-            #  1. Skip POP_JUMP_IF_* opcodes
-            #  2. If next is POP_TOP -> no binding (POP_TOP discards exc value)
-            #  3. If next is STORE_NAME/STORE_FAST -> that IS the binding
-            #  4. Skip CACHE, NOP, RESUME, COPY (neutral opcodes that 3.14 inserts)
-            #  5. Stop at jump-target boundaries, RERAISE, RETURN_*, JUMP_*
-            #  6. Cap at 8 steps
+            # Rules:
+            #  1. Skip POP_JUMP_IF_* opcodes (the type-match conditional gate)
+            #  2. Skip POP_TOP, CACHE, NOP, RESUME, COPY (neutral in all versions)
+            #  3. If STORE_NAME / STORE_FAST found -> that IS the 'as e' binding
+            #  4. Stop (no binding) at: any LOAD_*, RERAISE, RETURN_*, JUMP_*,
+            #     or a jump-target boundary (entered a new block)
+            #  5. Cap at 8 steps
+            _SKIP = frozenset({
+                "POP_TOP", "CACHE", "NOP", "RESUME", "COPY", "NOT_TAKEN",
+            })
+            _STOP = frozenset({
+                "LOAD_CONST", "LOAD_NAME", "LOAD_FAST", "LOAD_GLOBAL",
+                "LOAD_DEREF", "LOAD_SMALL_INT", "LOAD_ATTR", "PUSH_NULL",
+                "RERAISE", "RAISE_VARARGS", "RETURN_CONST", "RETURN_VALUE",
+                "JUMP_FORWARD",
+            })
             as_name = None
             look = self.pc
             # Step 1: skip conditional jumps
             while (look < len(self.instructions)
                    and "POP_JUMP_IF" in self.instructions[look].opname):
                 look += 1
-            # Steps 2-6: scan binding zone
+            # Steps 2-5: scan binding zone
             for _ in range(8):
                 if look >= len(self.instructions):
                     break
                 ins_l = self.instructions[look]
                 op = ins_l.opname
-                # Step 3: found the binding
+                # Step 3: found the 'as e' binding
                 if op in ("STORE_NAME", "STORE_FAST"):
                     as_name = str(ins_l.argval)
                     self._exc_as_store_offset = ins_l.offset
                     break
-                # Step 2: POP_TOP means no 'as' binding — exception value discarded
-                if op == "POP_TOP":
+                # Step 4: definitively in handler body — no binding
+                if op in _STOP or self._is_backward_jump(op):
                     break
-                # Step 5: hard stops
-                if (op in ("RERAISE", "RAISE_VARARGS", "RETURN_CONST",
-                           "RETURN_VALUE", "JUMP_FORWARD")
-                        or self._is_backward_jump(op)):
-                    break
-                # Step 5: jump-target boundary = entered a new block
+                # Step 4: new block boundary — no binding
                 if ins_l.is_jump_target:
                     break
-                # Step 4: neutral single-cycle opcodes — skip
-                if op in ("CACHE", "NOP", "RESUME", "COPY"):
+                # Step 2: neutral opcode — skip past it
+                if op in _SKIP:
                     look += 1
                     continue
-                # Unknown — stop to be safe
+                # Unknown opcode — stop safely
                 break
             if as_name is None:
                 self._exc_as_store_offset = -1
@@ -1205,7 +1210,7 @@ class DecompilerGeneric(DecompilerBase):
                     next_i = self.pc
                     while (
                         next_i < len(self.instructions)
-                        and self.instructions[next_i].opname in ("RESUME", "CACHE", "NOP")
+                        and self.instructions[next_i].opname in ("RESUME", "CACHE", "NOP", "NOT_TAKEN")
                     ):
                         next_i += 1
 
@@ -1240,7 +1245,7 @@ class DecompilerGeneric(DecompilerBase):
                             ins = self.instructions[b_idx]
                             if ins.offset >= meaningful_range_end:
                                 break
-                            if ins.opname not in ("RESUME", "CACHE", "NOP", "END_FOR", "POP_ITER"):
+                            if ins.opname not in ("RESUME", "CACHE", "NOP", "END_FOR", "POP_ITER", "NOT_TAKEN"):
                                 meaningful = True
                                 break
                         if meaningful:
@@ -1250,7 +1255,7 @@ class DecompilerGeneric(DecompilerBase):
 
         # ── no-ops ─────────────────────────────────────────────────────
         elif opname in (
-            "PUSH_NULL", "RESUME", "PRECALL", "CACHE", "COPY_FREE_VARS",
+            "PUSH_NULL", "RESUME", "PRECALL", "CACHE", "COPY_FREE_VARS", "NOT_TAKEN",
             "MAKE_CELL", "END_FOR", "POP_ITER",
             "YIELD_FROM", "COPY",
         ):
@@ -1938,7 +1943,7 @@ class Decompiler311Plus(DecompilerGeneric):
                     # to the same name so we can emit `left op= right` directly.
                     next_pc = self.pc  # pc already past current instr
                     while (next_pc < len(self.instructions) and
-                           self.instructions[next_pc].opname in ("CACHE", "RESUME")):
+                           self.instructions[next_pc].opname in ("CACHE", "RESUME", "NOT_TAKEN")):
                         next_pc += 1
                     if (next_pc < len(self.instructions) and
                             self.instructions[next_pc].opname in (
