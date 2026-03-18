@@ -188,6 +188,7 @@ class DecompilerGeneric(DecompilerBase):
         self._exc_as_store_offset: int = -1      # offset of 'as e' STORE to skip
         self._exc_cleanup_name: Optional[str] = None   # name to suppress in cleanup
         self._except_header_indent: int = -1           # indent level for except headers
+        self._except_end_offset: int = -1             # end of exception zone (suppress JUMP_FWD)
         self._exc_bound_names: set = set()             # all names ever bound in except-as
 
     # ------------------------------------------------------------------
@@ -1790,6 +1791,11 @@ class Decompiler39(DecompilerGeneric):
     def _handle_instruction(self, instr: BytecodeInstruction):
         opname = instr.opname
 
+        # Scoped suppression: clear except-zone state when we exit the handler scope.
+        if self._except_end_offset >= 0 and instr.offset >= self._except_end_offset:
+            self._except_header_indent = -1
+            self._except_end_offset = -1
+
         # Binary ops (3.9 uses named opcodes, not BINARY_OP)
         _bin39 = {
             "BINARY_ADD": "+", "BINARY_SUBTRACT": "-",
@@ -1818,9 +1824,7 @@ class Decompiler39(DecompilerGeneric):
         _while_true_body_starts = {
             bs for bs, go in _while_header_targets.items() if go == -1
         }
-        if instr.offset in _while_true_body_starts and not any(
-            b[1] == "while" for b in self.blocks
-        ):
+        if instr.offset in _while_true_body_starts:
             self._append_reconstructed("while True:")
             self.indent_level += 1
             # Find the loop end: offset just after the last backward jump that
@@ -1889,7 +1893,7 @@ class Decompiler39(DecompilerGeneric):
                         )):
                     store_name = str(self.instructions[next_pc].argval)
                     left_name  = str(left).split(".")[-1]
-                    if store_name == left_name or str(left).endswith(store_name):
+                    if store_name == left_name or str(left) == store_name or str(left).endswith("." + store_name):
                         self._append_reconstructed(f"{left} {op} {right}")
                         self.pc = next_pc + 1  # consume the STORE
                         return
@@ -2004,6 +2008,13 @@ class Decompiler39(DecompilerGeneric):
             # Only set when not already inside an except handler.
             if self._except_header_indent < 0:
                 self._except_header_indent = self.indent_level
+                # Peek ahead for JUMP_FORWARD at end of try block to establish scope.
+                look = self.pc
+                while (look < len(self.instructions) and
+                       self.instructions[look].opname in ("RESUME", "NOP", "CACHE")):
+                    look += 1
+                if look < len(self.instructions) and self.instructions[look].opname == "JUMP_FORWARD":
+                    self._except_end_offset = self._get_jump_target(self.instructions[look])
 
         # JUMP_ABSOLUTE: in 3.9 this is used both as:
         #   (a) a loop back-edge (target <= current offset) — treat as JUMP_BACKWARD

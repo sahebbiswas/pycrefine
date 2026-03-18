@@ -1297,7 +1297,7 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
             instr = dec.instructions[dec.pc]
             # Close expired blocks
             while dec.blocks and instr.offset >= dec.blocks[-1][0]:
-                block_end, block_type = dec.blocks.pop()
+                _block_end, _block_type = dec.blocks.pop()
                 last_idx = len(dec.reconstructed) - 1
                 while last_idx >= 0 and not dec.reconstructed[last_idx].strip():
                     last_idx -= 1
@@ -1368,16 +1368,16 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
            12  JUMP_ABSOLUTE 0        <- back-edge
            14  RETURN_VALUE           <- loop exit (is_jump_target=True)
         """
-        I = BytecodeInstruction
+        Instr = BytecodeInstruction
         out = self._run39([
-            I(0, "LOAD_NAME",         0, "n",  0, None, False),
-            I(0, "LOAD_CONST",        1,  5,   2, None, False),
-            I(0, "COMPARE_OP",        0, "<",  4, None, False),
-            I(0, "POP_JUMP_IF_FALSE", 14, 14,  6, None, False),
-            I(0, "LOAD_CONST",        2,  1,   8, None, False),
-            I(0, "STORE_NAME",        0, "n", 10, None, False),
-            I(0, "JUMP_ABSOLUTE",     0,  0,  12, None, False),
-            I(0, "RETURN_VALUE",      None, None, 14, None, True),
+            Instr(0, "LOAD_NAME",         0, "n",  0, None, False),
+            Instr(0, "LOAD_CONST",        1,  5,   2, None, False),
+            Instr(0, "COMPARE_OP",        0, "<",  4, None, False),
+            Instr(0, "POP_JUMP_IF_FALSE", 14, 14,  6, None, False),
+            Instr(0, "LOAD_CONST",        2,  1,   8, None, False),
+            Instr(0, "STORE_NAME",        0, "n", 10, None, False),
+            Instr(0, "JUMP_ABSOLUTE",     0,  0,  12, None, False),
+            Instr(0, "RETURN_VALUE",      None, None, 14, None, True),
         ])
         self.assertIn("while", out, f"Expected 'while', got:\n{out}")
         self.assertNotIn("if n", out,
@@ -1388,18 +1388,18 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
         _prescan_while_loops must detect the guard POP_JUMP_IF_FALSE even
         when the back-edge is JUMP_ABSOLUTE (not JUMP_BACKWARD).
         """
-        I = BytecodeInstruction
+        Instr = BytecodeInstruction
         code = compile("pass", "<test>", "exec")
         dec = Decompiler39(code)
         dec.instructions = [
-            I(0, "LOAD_NAME",         0, "n",  0, None, False),
-            I(0, "LOAD_CONST",        1,  5,   2, None, False),
-            I(0, "COMPARE_OP",        0, "<",  4, None, False),
-            I(0, "POP_JUMP_IF_FALSE", 14, 14,  6, None, False),
-            I(0, "LOAD_CONST",        2,  1,   8, None, False),
-            I(0, "STORE_NAME",        0, "n", 10, None, False),
-            I(0, "JUMP_ABSOLUTE",     0,  0,  12, None, False),
-            I(0, "RETURN_VALUE",      None, None, 14, None, True),
+            Instr(0, "LOAD_NAME",         0, "n",  0, None, False),
+            Instr(0, "LOAD_CONST",        1,  5,   2, None, False),
+            Instr(0, "COMPARE_OP",        0, "<",  4, None, False),
+            Instr(0, "POP_JUMP_IF_FALSE", 14, 14,  6, None, False),
+            Instr(0, "LOAD_CONST",        2,  1,   8, None, False),
+            Instr(0, "STORE_NAME",        0, "n", 10, None, False),
+            Instr(0, "JUMP_ABSOLUTE",     0,  0,  12, None, False),
+            Instr(0, "RETURN_VALUE",      None, None, 14, None, True),
         ]
         dec._while_body_offsets = set()
         dec._while_header_targets = {}
@@ -1416,19 +1416,19 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
         loop back-edge.  It should behave like JUMP_FORWARD — closing an
         if-block and not emitting 'while'.
         """
-        I = BytecodeInstruction
+        Instr = BytecodeInstruction
         # Simple if/else: condition -> if-body -> JUMP_ABSOLUTE(end) -> else-body
         out = self._run39([
-            I(0, "LOAD_CONST",        0, 1,    0, None, False),
-            I(0, "STORE_NAME",        0, "x",  2, None, False),
-            I(0, "LOAD_NAME",         0, "x",  4, None, False),
-            I(0, "LOAD_CONST",        1, 0,    6, None, False),
-            I(0, "COMPARE_OP",        4, ">",  8, None, False),
-            I(0, "POP_JUMP_IF_FALSE", 16, 16, 10, None, False),
-            I(0, "LOAD_CONST",        2, 1,   12, None, False),
-            I(0, "STORE_NAME",        1, "y", 14, None, False),
-            I(0, "JUMP_ABSOLUTE",     18, 18, 16, None, False),  # forward!
-            I(0, "RETURN_VALUE",      None, None, 18, None, True),
+            Instr(0, "LOAD_CONST",        0, 1,    0, None, False),
+            Instr(0, "STORE_NAME",        0, "x",  2, None, False),
+            Instr(0, "LOAD_NAME",         0, "x",  4, None, False),
+            Instr(0, "LOAD_CONST",        1, 0,    6, None, False),
+            Instr(0, "COMPARE_OP",        4, ">",  8, None, False),
+            Instr(0, "POP_JUMP_IF_FALSE", 16, 16, 10, None, False),
+            Instr(0, "LOAD_CONST",        2, 1,   12, None, False),
+            Instr(0, "STORE_NAME",        1, "y", 14, None, False),
+            Instr(0, "JUMP_ABSOLUTE",     18, 18, 16, None, False),  # forward!
+            Instr(0, "RETURN_VALUE",      None, None, 18, None, True),
         ])
         self.assertNotIn("while", out, f"Forward JUMP_ABSOLUTE should not produce 'while':\n{out}")
 
@@ -1461,15 +1461,15 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
         # Synthetic: inject instructions where POP_JUMP_IF_FALSE targets offset 8.
         # Use correct 3.9 opcode numbers so _disassemble() resolves them properly:
         #   LOAD_CONST=100, POP_JUMP_IF_FALSE=114, STORE_NAME=90, RETURN_VALUE=83
-        I = BytecodeInstruction
+        Instr = BytecodeInstruction
         code = compile("pass", "<test>", "exec")
         dec39 = Decompiler39(code)
         raw = [
-            I(100, "LOAD_CONST",        0, 1,    0, None, False),
-            I(114, "POP_JUMP_IF_FALSE", 8, 8,    2, None, False),
-            I(100, "LOAD_CONST",        1, 2,    4, None, False),
-            I(90,  "STORE_NAME",        0, "y",  6, None, False),
-            I(83,  "RETURN_VALUE",      None, None, 8, None, False),  # should become True
+            Instr(100, "LOAD_CONST",        0, 1,    0, None, False),
+            Instr(114, "POP_JUMP_IF_FALSE", 8, 8,    2, None, False),
+            Instr(100, "LOAD_CONST",        1, 2,    4, None, False),
+            Instr(90,  "STORE_NAME",        0, "y",  6, None, False),
+            Instr(83,  "RETURN_VALUE",      None, None, 8, None, False),  # should become True
         ]
         dec39.instructions = raw
         dec39.code_obj = type("C", (), {
@@ -1492,7 +1492,7 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
         self.assertIsNotNone(instr_at_8, "No instruction at offset 8")
         self.assertTrue(
             instr_at_8.is_jump_target,
-            f"Offset 8 (target of POP_JUMP_IF_FALSE) should be is_jump_target=True",
+            "Offset 8 (target of POP_JUMP_IF_FALSE) should be is_jump_target=True",
         )
 
     # ------------------------------------------------------------------
@@ -1504,24 +1504,24 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
         3.9 try/except ValueError (no binding) must emit 'except ValueError:'
         via the DUP_TOP + COMPARE_OP("exception match") handler.
         """
-        I = BytecodeInstruction
+        Instr = BytecodeInstruction
         out = self._run39([
-            I(0, "SETUP_FINALLY",    None, 16,  0, None, False),
-            I(0, "LOAD_CONST",       0,    42,  2, None, False),
-            I(0, "STORE_NAME",       0,    "x", 4, None, False),
-            I(0, "POP_BLOCK",        None, None,6, None, False),
-            I(0, "JUMP_FORWARD",     None, 32,  8, None, False),
+            Instr(0, "SETUP_FINALLY",    None, 16,  0, None, False),
+            Instr(0, "LOAD_CONST",       0,    42,  2, None, False),
+            Instr(0, "STORE_NAME",       0,    "x", 4, None, False),
+            Instr(0, "POP_BLOCK",        None, None,6, None, False),
+            Instr(0, "JUMP_FORWARD",     None, 32,  8, None, False),
             # Handler at offset 16:
-            I(0, "DUP_TOP",          None, None,16, None, True),
-            I(0, "LOAD_NAME",        1, "ValueError", 18, None, False),
-            I(0, "COMPARE_OP",       10, "exception match", 20, None, False),
-            I(0, "POP_JUMP_IF_FALSE",28, 28, 22, None, False),
-            I(0, "POP_TOP",          None, None, 24, None, False),  # exc type
-            I(0, "POP_TOP",          None, None, 26, None, False),  # traceback
-            I(0, "LOAD_CONST",       2, 0,     28, None, False),
-            I(0, "STORE_NAME",       0, "x",   30, None, False),
-            I(0, "POP_EXCEPT",       None, None, 32, None, False),
-            I(0, "RETURN_VALUE",     None, None, 34, None, False),
+            Instr(0, "DUP_TOP",          None, None,16, None, True),
+            Instr(0, "LOAD_NAME",        1, "ValueError", 18, None, False),
+            Instr(0, "COMPARE_OP",       10, "exception match", 20, None, False),
+            Instr(0, "POP_JUMP_IF_FALSE",28, 28, 22, None, False),
+            Instr(0, "POP_TOP",          None, None, 24, None, False),  # exc type
+            Instr(0, "POP_TOP",          None, None, 26, None, False),  # traceback
+            Instr(0, "LOAD_CONST",       2, 0,     28, None, False),
+            Instr(0, "STORE_NAME",       0, "x",   30, None, False),
+            Instr(0, "POP_EXCEPT",       None, None, 32, None, False),
+            Instr(0, "RETURN_VALUE",     None, None, 34, None, False),
         ])
         self.assertIn("try:", out, f"try: missing:\n{out}")
         self.assertIn("except ValueError:", out,
@@ -1534,24 +1534,24 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
         3.9 'except ValueError as e:' must bind the name correctly via the
         DUP_TOP pattern.  The STORE_NAME 'e' immediately follows the POPs.
         """
-        I = BytecodeInstruction
+        Instr = BytecodeInstruction
         out = self._run39([
-            I(0, "SETUP_FINALLY",    None, 16,  0, None, False),
-            I(0, "LOAD_CONST",       0,    42,  2, None, False),
-            I(0, "STORE_NAME",       0,    "x", 4, None, False),
-            I(0, "POP_BLOCK",        None, None,6, None, False),
-            I(0, "JUMP_FORWARD",     None, 36,  8, None, False),
+            Instr(0, "SETUP_FINALLY",    None, 16,  0, None, False),
+            Instr(0, "LOAD_CONST",       0,    42,  2, None, False),
+            Instr(0, "STORE_NAME",       0,    "x", 4, None, False),
+            Instr(0, "POP_BLOCK",        None, None,6, None, False),
+            Instr(0, "JUMP_FORWARD",     None, 36,  8, None, False),
             # Handler at offset 16:
-            I(0, "DUP_TOP",          None, None,16, None, True),
-            I(0, "LOAD_NAME",        1, "ValueError", 18, None, False),
-            I(0, "COMPARE_OP",       10, "exception match", 20, None, False),
-            I(0, "POP_JUMP_IF_FALSE",30, 30, 22, None, False),
-            I(0, "POP_TOP",          None, None, 24, None, False),  # exc type
-            I(0, "STORE_NAME",       2, "e",   26, None, False),   # 'as e' binding
-            I(0, "LOAD_CONST",       3, 0,     28, None, False),
-            I(0, "STORE_NAME",       0, "x",   30, None, False),
-            I(0, "POP_EXCEPT",       None, None, 32, None, False),
-            I(0, "RETURN_VALUE",     None, None, 34, None, False),
+            Instr(0, "DUP_TOP",          None, None,16, None, True),
+            Instr(0, "LOAD_NAME",        1, "ValueError", 18, None, False),
+            Instr(0, "COMPARE_OP",       10, "exception match", 20, None, False),
+            Instr(0, "POP_JUMP_IF_FALSE",30, 30, 22, None, False),
+            Instr(0, "POP_TOP",          None, None, 24, None, False),  # exc type
+            Instr(0, "STORE_NAME",       2, "e",   26, None, False),   # 'as e' binding
+            Instr(0, "LOAD_CONST",       3, 0,     28, None, False),
+            Instr(0, "STORE_NAME",       0, "x",   30, None, False),
+            Instr(0, "POP_EXCEPT",       None, None, 32, None, False),
+            Instr(0, "RETURN_VALUE",     None, None, 34, None, False),
         ])
         self.assertIn("except ValueError as e:", out,
                       f"'as e' binding missing:\n{out}")
@@ -1559,26 +1559,26 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
 
     def test_try_except_body_indented_correctly(self):
         """Handler body must be indented one level inside the except block."""
-        I = BytecodeInstruction
+        Instr = BytecodeInstruction
         out = self._run39([
-            I(0, "SETUP_FINALLY",    None, 12,  0, None, False),
-            I(0, "LOAD_CONST",       0, 99,     2, None, False),
-            I(0, "STORE_NAME",       0, "x",    4, None, False),
-            I(0, "POP_BLOCK",        None, None, 6, None, False),
-            I(0, "JUMP_FORWARD",     None, 28,   8, None, False),
-            I(0, "DUP_TOP",          None, None,12, None, True),
-            I(0, "LOAD_NAME",        1, "OSError",14, None, False),
-            I(0, "COMPARE_OP",       10, "exception match", 16, None, False),
-            I(0, "POP_JUMP_IF_FALSE",26, 26, 18, None, False),
-            I(0, "POP_TOP",          None, None, 20, None, False),
-            I(0, "POP_TOP",          None, None, 22, None, False),
-            I(0, "LOAD_CONST",       2, 0,      24, None, False),
-            I(0, "STORE_NAME",       0, "x",    26, None, False),
-            I(0, "POP_EXCEPT",       None, None, 28, None, False),
-            I(0, "RETURN_VALUE",     None, None, 30, None, False),
+            Instr(0, "SETUP_FINALLY",    None, 12,  0, None, False),
+            Instr(0, "LOAD_CONST",       0, 99,     2, None, False),
+            Instr(0, "STORE_NAME",       0, "x",    4, None, False),
+            Instr(0, "POP_BLOCK",        None, None, 6, None, False),
+            Instr(0, "JUMP_FORWARD",     None, 28,   8, None, False),
+            Instr(0, "DUP_TOP",          None, None,12, None, True),
+            Instr(0, "LOAD_NAME",        1, "OSError",14, None, False),
+            Instr(0, "COMPARE_OP",       10, "exception match", 16, None, False),
+            Instr(0, "POP_JUMP_IF_FALSE",26, 26, 18, None, False),
+            Instr(0, "POP_TOP",          None, None, 20, None, False),
+            Instr(0, "POP_TOP",          None, None, 22, None, False),
+            Instr(0, "LOAD_CONST",       2, 0,      24, None, False),
+            Instr(0, "STORE_NAME",       0, "x",    26, None, False),
+            Instr(0, "POP_EXCEPT",       None, None, 28, None, False),
+            Instr(0, "RETURN_VALUE",     None, None, 30, None, False),
         ])
         lines = out.splitlines()
-        body_lines = [l for l in lines if "x = 0" in l or "x = 99" in l]
+        body_lines = [line for line in lines if "x = 0" in line or "x = 99" in line]
         for line in body_lines:
             self.assertTrue(
                 line.startswith("    "),
@@ -1590,15 +1590,15 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
         A lone DUP_TOP not followed by COMPARE_OP('exception match')
         must NOT emit an except header — it should duplicate the stack top.
         """
-        I = BytecodeInstruction
+        Instr = BytecodeInstruction
         code = compile("pass", "<test>", "exec")
         dec = Decompiler39(code)
         dec.instructions = [
-            I(0, "LOAD_CONST", 0, 42,    0, None, False),
-            I(0, "DUP_TOP",    None, None, 2, None, False),
-            I(0, "STORE_NAME", 0, "x",   4, None, False),
-            I(0, "POP_TOP",    None, None, 6, None, False),
-            I(0, "RETURN_VALUE", None, None, 8, None, False),
+            Instr(0, "LOAD_CONST", 0, 42,    0, None, False),
+            Instr(0, "DUP_TOP",    None, None, 2, None, False),
+            Instr(0, "STORE_NAME", 0, "x",   4, None, False),
+            Instr(0, "POP_TOP",    None, None, 6, None, False),
+            Instr(0, "RETURN_VALUE", None, None, 8, None, False),
         ]
         dec._while_body_offsets = set()
         dec._while_header_targets = {}
@@ -1620,52 +1620,52 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
 
     def test_inplace_add_emits_augassign(self):
         """INPLACE_ADD followed by STORE_NAME must emit 'x += 3', not 'x = (x + 3)'."""
-        I = BytecodeInstruction
+        Instr = BytecodeInstruction
         out = self._run39([
-            I(0, "LOAD_CONST",   0,  1,   0, None, False),
-            I(0, "STORE_NAME",   0, "x",  2, None, False),
-            I(0, "LOAD_NAME",    0, "x",  4, None, False),
-            I(0, "LOAD_CONST",   1,  3,   6, None, False),
-            I(0, "INPLACE_ADD",  None, None, 8, None, False),
-            I(0, "STORE_NAME",   0, "x", 10, None, False),
-            I(0, "RETURN_VALUE", None, None, 12, None, False),
+            Instr(0, "LOAD_CONST",   0,  1,   0, None, False),
+            Instr(0, "STORE_NAME",   0, "x",  2, None, False),
+            Instr(0, "LOAD_NAME",    0, "x",  4, None, False),
+            Instr(0, "LOAD_CONST",   1,  3,   6, None, False),
+            Instr(0, "INPLACE_ADD",  None, None, 8, None, False),
+            Instr(0, "STORE_NAME",   0, "x", 10, None, False),
+            Instr(0, "RETURN_VALUE", None, None, 12, None, False),
         ])
         self.assertIn("x += 3", out, f"x += 3 not found:\n{out}")
         self.assertNotIn("x = (x", out, f"Wrong 'x = (x ...)' form present:\n{out}")
 
     def test_inplace_sub_emits_augassign(self):
         """INPLACE_SUBTRACT -> 'x -= 1'."""
-        I = BytecodeInstruction
+        Instr = BytecodeInstruction
         out = self._run39([
-            I(0, "LOAD_NAME",       0, "x",  0, None, False),
-            I(0, "LOAD_CONST",      0,  1,   2, None, False),
-            I(0, "INPLACE_SUBTRACT",None,None,4, None, False),
-            I(0, "STORE_NAME",      0, "x",  6, None, False),
-            I(0, "RETURN_VALUE",    None, None, 8, None, False),
+            Instr(0, "LOAD_NAME",       0, "x",  0, None, False),
+            Instr(0, "LOAD_CONST",      0,  1,   2, None, False),
+            Instr(0, "INPLACE_SUBTRACT",None,None,4, None, False),
+            Instr(0, "STORE_NAME",      0, "x",  6, None, False),
+            Instr(0, "RETURN_VALUE",    None, None, 8, None, False),
         ])
         self.assertIn("x -= 1", out, f"x -= 1 not found:\n{out}")
 
     def test_inplace_mul_emits_augassign(self):
         """INPLACE_MULTIPLY -> 'x *= 2'."""
-        I = BytecodeInstruction
+        Instr = BytecodeInstruction
         out = self._run39([
-            I(0, "LOAD_NAME",        0, "x",  0, None, False),
-            I(0, "LOAD_CONST",       0,  2,   2, None, False),
-            I(0, "INPLACE_MULTIPLY", None,None,4, None, False),
-            I(0, "STORE_NAME",       0, "x",  6, None, False),
-            I(0, "RETURN_VALUE",     None, None, 8, None, False),
+            Instr(0, "LOAD_NAME",        0, "x",  0, None, False),
+            Instr(0, "LOAD_CONST",       0,  2,   2, None, False),
+            Instr(0, "INPLACE_MULTIPLY", None,None,4, None, False),
+            Instr(0, "STORE_NAME",       0, "x",  6, None, False),
+            Instr(0, "RETURN_VALUE",     None, None, 8, None, False),
         ])
         self.assertIn("x *= 2", out, f"x *= 2 not found:\n{out}")
 
     def test_inplace_xor_emits_augassign(self):
         """INPLACE_XOR -> 'x ^= 5'. Regression guard against += mapping."""
-        I = BytecodeInstruction
+        Instr = BytecodeInstruction
         out = self._run39([
-            I(0, "LOAD_NAME",    0, "x",  0, None, False),
-            I(0, "LOAD_CONST",   0,  5,   2, None, False),
-            I(0, "INPLACE_XOR",  None,None,4, None, False),
-            I(0, "STORE_NAME",   0, "x",  6, None, False),
-            I(0, "RETURN_VALUE", None, None, 8, None, False),
+            Instr(0, "LOAD_NAME",    0, "x",  0, None, False),
+            Instr(0, "LOAD_CONST",   0,  5,   2, None, False),
+            Instr(0, "INPLACE_XOR",  None,None,4, None, False),
+            Instr(0, "STORE_NAME",   0, "x",  6, None, False),
+            Instr(0, "RETURN_VALUE", None, None, 8, None, False),
         ])
         self.assertIn("x ^= 5", out, f"x ^= 5 not found:\n{out}")
         self.assertNotIn("x += 5", out, f"INPLACE_XOR wrongly emitted +=:\n{out}")
@@ -1675,16 +1675,16 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
         INPLACE_* not followed by a matching STORE must push an expression
         string (not crash and not emit a bare statement).
         """
-        I = BytecodeInstruction
+        Instr = BytecodeInstruction
         code = compile("pass", "<test>", "exec")
         dec = Decompiler39(code)
         dec.instructions = [
-            I(0, "LOAD_NAME",    0, "x",  0, None, False),
-            I(0, "LOAD_CONST",   0,  1,   2, None, False),
-            I(0, "INPLACE_ADD",  None, None, 4, None, False),
+            Instr(0, "LOAD_NAME",    0, "x",  0, None, False),
+            Instr(0, "LOAD_CONST",   0,  1,   2, None, False),
+            Instr(0, "INPLACE_ADD",  None, None, 4, None, False),
             # No STORE_NAME — stack top is a different name
-            I(0, "STORE_NAME",   1, "y",  6, None, False),  # store to y, not x
-            I(0, "RETURN_VALUE", None, None, 8, None, False),
+            Instr(0, "STORE_NAME",   1, "y",  6, None, False),  # store to y, not x
+            Instr(0, "RETURN_VALUE", None, None, 8, None, False),
         ]
         dec._while_body_offsets = set()
         dec._while_header_targets = {}
@@ -1707,22 +1707,22 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
         End-to-end: 'n = 0; while n < 3: n += 1' with 3.9 bytecode.
         Guard (POP_JUMP_IF_FALSE) + back-edge (JUMP_ABSOLUTE) + INPLACE_ADD.
         """
-        I = BytecodeInstruction
+        Instr = BytecodeInstruction
         out = self._run39([
-            I(0, "LOAD_CONST",       0, 0,    0, None, False),
-            I(0, "STORE_NAME",       0, "n",  2, None, False),
+            Instr(0, "LOAD_CONST",       0, 0,    0, None, False),
+            Instr(0, "STORE_NAME",       0, "n",  2, None, False),
             # condition at offset 4 — JUMP_ABSOLUTE targets here
-            I(0, "LOAD_NAME",        0, "n",  4, None, False),
-            I(0, "LOAD_CONST",       1, 3,    6, None, False),
-            I(0, "COMPARE_OP",       0, "<",  8, None, False),
-            I(0, "POP_JUMP_IF_FALSE",18, 18, 10, None, False),
+            Instr(0, "LOAD_NAME",        0, "n",  4, None, False),
+            Instr(0, "LOAD_CONST",       1, 3,    6, None, False),
+            Instr(0, "COMPARE_OP",       0, "<",  8, None, False),
+            Instr(0, "POP_JUMP_IF_FALSE",18, 18, 10, None, False),
             # body at offset 12
-            I(0, "LOAD_NAME",        0, "n", 12, None, False),
-            I(0, "LOAD_CONST",       2, 1,   14, None, False),
-            I(0, "INPLACE_ADD",      None, None, 16, None, False),
-            I(0, "STORE_NAME",       0, "n", 18, None, False),
-            I(0, "JUMP_ABSOLUTE",    4, 4,   20, None, False),
-            I(0, "RETURN_VALUE",     None, None, 22, None, True),
+            Instr(0, "LOAD_NAME",        0, "n", 12, None, False),
+            Instr(0, "LOAD_CONST",       2, 1,   14, None, False),
+            Instr(0, "INPLACE_ADD",      None, None, 16, None, False),
+            Instr(0, "STORE_NAME",       0, "n", 18, None, False),
+            Instr(0, "JUMP_ABSOLUTE",    4, 4,   20, None, False),
+            Instr(0, "RETURN_VALUE",     None, None, 22, None, True),
         ])
         self.assertIn("n = 0", out, f"init missing:\n{out}")
         self.assertIn("while", out, f"while missing:\n{out}")
@@ -1733,24 +1733,24 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
         """
         End-to-end: 3.9-style try/except that sets x=42 in try, x=0 on error.
         """
-        I = BytecodeInstruction
+        Instr = BytecodeInstruction
         out = self._run39([
-            I(0, "SETUP_FINALLY",    None, 14,  0, None, False),
-            I(0, "LOAD_CONST",       0, 42,     2, None, False),
-            I(0, "STORE_NAME",       0, "x",    4, None, False),
-            I(0, "POP_BLOCK",        None, None, 6, None, False),
-            I(0, "JUMP_FORWARD",     None, 30,   8, None, False),
+            Instr(0, "SETUP_FINALLY",    None, 14,  0, None, False),
+            Instr(0, "LOAD_CONST",       0, 42,     2, None, False),
+            Instr(0, "STORE_NAME",       0, "x",    4, None, False),
+            Instr(0, "POP_BLOCK",        None, None, 6, None, False),
+            Instr(0, "JUMP_FORWARD",     None, 30,   8, None, False),
             # handler at 14:
-            I(0, "DUP_TOP",          None, None, 14, None, True),
-            I(0, "LOAD_NAME",        1, "ValueError", 16, None, False),
-            I(0, "COMPARE_OP",       10, "exception match", 18, None, False),
-            I(0, "POP_JUMP_IF_FALSE",28, 28, 20, None, False),
-            I(0, "POP_TOP",          None, None, 22, None, False),
-            I(0, "POP_TOP",          None, None, 24, None, False),
-            I(0, "LOAD_CONST",       2, 0,      26, None, False),
-            I(0, "STORE_NAME",       0, "x",    28, None, False),
-            I(0, "POP_EXCEPT",       None, None, 30, None, False),
-            I(0, "RETURN_VALUE",     None, None, 32, None, False),
+            Instr(0, "DUP_TOP",          None, None, 14, None, True),
+            Instr(0, "LOAD_NAME",        1, "ValueError", 16, None, False),
+            Instr(0, "COMPARE_OP",       10, "exception match", 18, None, False),
+            Instr(0, "POP_JUMP_IF_FALSE",28, 28, 20, None, False),
+            Instr(0, "POP_TOP",          None, None, 22, None, False),
+            Instr(0, "POP_TOP",          None, None, 24, None, False),
+            Instr(0, "LOAD_CONST",       2, 0,      26, None, False),
+            Instr(0, "STORE_NAME",       0, "x",    28, None, False),
+            Instr(0, "POP_EXCEPT",       None, None, 30, None, False),
+            Instr(0, "RETURN_VALUE",     None, None, 32, None, False),
         ])
         self.assertIn("try:", out)
         self.assertIn("except ValueError:", out)
