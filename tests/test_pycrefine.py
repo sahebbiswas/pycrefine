@@ -1225,3 +1225,544 @@ class TestDecompiler39Classes(unittest.TestCase):
         self.assertIn("class Foo:", out)
         self.assertNotIn("('class'", out)
         self.assertNotIn("__build_class__", out)
+
+
+
+# ---------------------------------------------------------------------------
+# Python 3.9 specific fixes
+# ---------------------------------------------------------------------------
+
+class TestDecompiler39Python39Fixes(unittest.TestCase):
+    """
+    White-box regression tests for all four Python 3.9 fixes:
+
+      Fix 1 - JUMP_ABSOLUTE recognised as backward jump (_is_backward_jump)
+      Fix 2 - is_jump_target populated correctly in _disassemble
+      Fix 3 - DUP_TOP + COMPARE_OP("exception match") pattern for try/except
+      Fix 4 - INPLACE_* ops peek ahead at STORE to emit augmented assignment
+
+    All tests use synthetic BytecodeInstruction lists injected directly into
+    Decompiler39 so they run correctly on any Python version (no 3.9 runtime
+    needed).  The helper _run39() bypasses _disassemble() and patches
+    is_jump_target from argval targets — matching what the real fix does.
+    """
+
+    # ------------------------------------------------------------------
+    # Shared helper
+    # ------------------------------------------------------------------
+
+    def _run39(self, instructions):
+        """
+        Run Decompiler39 on a synthetic instruction list.
+
+        Patches is_jump_target using argval of jump opcodes (replicating
+        the fix in Decompiler39._disassemble), then runs the prescan and
+        the main decode loop manually without calling _disassemble().
+        """
+        code = compile("pass", "<test>", "exec")
+        dec = Decompiler39(code)
+        dec.instructions = list(instructions)
+
+        # Patch is_jump_target from argval targets (Fix 2)
+        _JUMP_OPS = {
+            "FOR_ITER", "JUMP_FORWARD", "JUMP_ABSOLUTE",
+            "POP_JUMP_IF_FALSE", "POP_JUMP_IF_TRUE",
+            "JUMP_IF_FALSE_OR_POP", "JUMP_IF_TRUE_OR_POP",
+            "SETUP_FINALLY", "SETUP_WITH", "JUMP_IF_NOT_EXC_MATCH",
+        }
+        targets = set()
+        for ins in dec.instructions:
+            if ins.opname in _JUMP_OPS and isinstance(ins.argval, int):
+                targets.add(ins.argval)
+        dec.instructions = [
+            BytecodeInstruction(
+                ins.opcode, ins.opname, ins.arg, ins.argval,
+                ins.offset, ins.starts_line,
+                ins.offset in targets,
+            )
+            for ins in dec.instructions
+        ]
+
+        # Run prescan then main decode loop
+        dec.pc = 0
+        dec.blocks = []
+        dec._while_header_targets = {}
+        dec._while_body_offsets = set()
+        dec._while_true_ends = set()
+        dec._prescan_while_loops()
+
+        dec.pc = 0
+        dec.has_doc = False
+        while dec.pc < len(dec.instructions):
+            instr = dec.instructions[dec.pc]
+            # Close expired blocks
+            while dec.blocks and instr.offset >= dec.blocks[-1][0]:
+                _block_end, _block_type = dec.blocks.pop()
+                last_idx = len(dec.reconstructed) - 1
+                while last_idx >= 0 and not dec.reconstructed[last_idx].strip():
+                    last_idx -= 1
+                if last_idx >= 0 and dec.reconstructed[last_idx].strip().endswith(":"):
+                    dec._append_reconstructed("pass")
+                dec.indent_level -= 1
+            dec.pc += 1
+            dec._handle_instruction(instr)
+        # Drain any remaining blocks
+        while dec.blocks:
+            dec.blocks.pop()
+            dec.indent_level -= 1
+
+        return "\n".join(dec.reconstructed)
+
+    # ------------------------------------------------------------------
+    # Fix 1 — JUMP_ABSOLUTE recognised as backward jump
+    # ------------------------------------------------------------------
+
+    def test_is_backward_instruction_backward_jump_absolute(self):
+        """
+        _is_backward_instruction must return True for a JUMP_ABSOLUTE whose
+        target is at or before its own offset (a real loop back-edge).
+        """
+        code = compile("pass", "<test>", "exec")
+        dec = Decompiler39(code)
+        backward = BytecodeInstruction(
+            opcode=113, opname="JUMP_ABSOLUTE", arg=4, argval=4,
+            offset=10, starts_line=None, is_jump_target=False,
+        )
+        self.assertTrue(dec._is_backward_instruction(backward),
+                        "JUMP_ABSOLUTE with target(4) <= offset(10) is backward")
+
+    def test_is_backward_instruction_forward_jump_absolute_is_false(self):
+        """
+        _is_backward_instruction must return False for a JUMP_ABSOLUTE whose
+        target is ahead (a forward jump — not a loop back-edge).
+        """
+        code = compile("pass", "<test>", "exec")
+        dec = Decompiler39(code)
+        forward = BytecodeInstruction(
+            opcode=113, opname="JUMP_ABSOLUTE", arg=20, argval=20,
+            offset=10, starts_line=None, is_jump_target=False,
+        )
+        self.assertFalse(dec._is_backward_instruction(forward),
+                         "JUMP_ABSOLUTE with target(20) > offset(10) is NOT backward")
+
+    def test_is_backward_jump_jump_backward(self):
+        """_is_backward_jump still returns True for JUMP_BACKWARD (3.11+)."""
+        self.assertTrue(Decompiler39._is_backward_jump("JUMP_BACKWARD"))
+
+    def test_is_backward_jump_jump_forward_is_false(self):
+        """_is_backward_jump must NOT return True for JUMP_FORWARD."""
+        self.assertFalse(Decompiler39._is_backward_jump("JUMP_FORWARD"))
+
+    def test_while_loop_uses_jump_absolute_back_edge(self):
+        """
+        3.9 while loop: JUMP_ABSOLUTE targeting the condition start must
+        produce 'while' not 'if'.
+
+        Layout (3.9):
+            0  LOAD_NAME n
+            2  LOAD_CONST 5
+            4  COMPARE_OP <
+            6  POP_JUMP_IF_FALSE 14   <- guard
+            8  LOAD_CONST 1           <- body
+           10  STORE_NAME n
+           12  JUMP_ABSOLUTE 0        <- back-edge
+           14  RETURN_VALUE           <- loop exit (is_jump_target=True)
+        """
+        Instr = BytecodeInstruction
+        out = self._run39([
+            Instr(0, "LOAD_NAME",         0, "n",  0, None, False),
+            Instr(0, "LOAD_CONST",        1,  5,   2, None, False),
+            Instr(0, "COMPARE_OP",        0, "<",  4, None, False),
+            Instr(0, "POP_JUMP_IF_FALSE", 14, 14,  6, None, False),
+            Instr(0, "LOAD_CONST",        2,  1,   8, None, False),
+            Instr(0, "STORE_NAME",        0, "n", 10, None, False),
+            Instr(0, "JUMP_ABSOLUTE",     0,  0,  12, None, False),
+            Instr(0, "RETURN_VALUE",      None, None, 14, None, True),
+        ])
+        self.assertIn("while", out, f"Expected 'while', got:\n{out}")
+        self.assertNotIn("if n", out,
+                         f"'if n' should not appear (should be 'while'):\n{out}")
+
+    def test_while_loop_prescan_detects_guard_via_jump_absolute(self):
+        """
+        _prescan_while_loops must detect the guard POP_JUMP_IF_FALSE even
+        when the back-edge is JUMP_ABSOLUTE (not JUMP_BACKWARD).
+        """
+        Instr = BytecodeInstruction
+        code = compile("pass", "<test>", "exec")
+        dec = Decompiler39(code)
+        dec.instructions = [
+            Instr(0, "LOAD_NAME",         0, "n",  0, None, False),
+            Instr(0, "LOAD_CONST",        1,  5,   2, None, False),
+            Instr(0, "COMPARE_OP",        0, "<",  4, None, False),
+            Instr(0, "POP_JUMP_IF_FALSE", 14, 14,  6, None, False),
+            Instr(0, "LOAD_CONST",        2,  1,   8, None, False),
+            Instr(0, "STORE_NAME",        0, "n", 10, None, False),
+            Instr(0, "JUMP_ABSOLUTE",     0,  0,  12, None, False),
+            Instr(0, "RETURN_VALUE",      None, None, 14, None, True),
+        ]
+        dec._while_body_offsets = set()
+        dec._while_header_targets = {}
+        dec._while_true_ends = set()
+        dec._prescan_while_loops()
+        self.assertGreaterEqual(
+            len(dec._while_header_targets), 1,
+            f"No guard detected. targets={dec._while_header_targets}",
+        )
+
+    def test_forward_jump_absolute_treated_as_jump_forward(self):
+        """
+        A forward JUMP_ABSOLUTE (target > offset) must not be treated as a
+        loop back-edge.  It should behave like JUMP_FORWARD — closing an
+        if-block and not emitting 'while'.
+        """
+        Instr = BytecodeInstruction
+        # Simple if/else: condition -> if-body -> JUMP_ABSOLUTE(end) -> else-body
+        out = self._run39([
+            Instr(0, "LOAD_CONST",        0, 1,    0, None, False),
+            Instr(0, "STORE_NAME",        0, "x",  2, None, False),
+            Instr(0, "LOAD_NAME",         0, "x",  4, None, False),
+            Instr(0, "LOAD_CONST",        1, 0,    6, None, False),
+            Instr(0, "COMPARE_OP",        4, ">",  8, None, False),
+            Instr(0, "POP_JUMP_IF_FALSE", 16, 16, 10, None, False),
+            Instr(0, "LOAD_CONST",        2, 1,   12, None, False),
+            Instr(0, "STORE_NAME",        1, "y", 14, None, False),
+            Instr(0, "JUMP_ABSOLUTE",     18, 18, 16, None, False),  # forward!
+            Instr(0, "RETURN_VALUE",      None, None, 18, None, True),
+        ])
+        self.assertNotIn("while", out, f"Forward JUMP_ABSOLUTE should not produce 'while':\n{out}")
+
+    # ------------------------------------------------------------------
+    # Fix 2 — is_jump_target populated in _disassemble
+    # ------------------------------------------------------------------
+
+    def test_is_jump_target_set_correctly(self):
+        """
+        After _disassemble, instructions at jump targets must have
+        is_jump_target=True; all others must have is_jump_target=False.
+        """
+        import py_compile, tempfile, os
+
+        src = "x = 1\nif x > 0:\n    y = 2\n"
+        with tempfile.NamedTemporaryFile(suffix=".py", mode="w", delete=False) as f:
+            f.write(src)
+            sp = f.name
+        pp = sp + "c"
+        try:
+            py_compile.compile(sp, cfile=pp, doraise=True)
+            dec = get_decompiler(pp)
+            # get_decompiler returns the host-version decompiler, but we can
+            # verify Decompiler39's fix via the synthetic test below.
+        finally:
+            os.unlink(sp)
+            if os.path.exists(pp):
+                os.unlink(pp)
+
+        # Synthetic: inject instructions where POP_JUMP_IF_FALSE targets offset 8.
+        # Use correct 3.9 opcode numbers so _disassemble() resolves them properly:
+        #   LOAD_CONST=100, POP_JUMP_IF_FALSE=114, STORE_NAME=90, RETURN_VALUE=83
+        Instr = BytecodeInstruction
+        code = compile("pass", "<test>", "exec")
+        dec39 = Decompiler39(code)
+        raw = [
+            Instr(100, "LOAD_CONST",        0, 1,    0, None, False),
+            Instr(114, "POP_JUMP_IF_FALSE", 8, 8,    2, None, False),
+            Instr(100, "LOAD_CONST",        1, 2,    4, None, False),
+            Instr(90,  "STORE_NAME",        0, "y",  6, None, False),
+            Instr(83,  "RETURN_VALUE",      None, None, 8, None, False),  # should become True
+        ]
+        dec39.instructions = raw
+        dec39.code_obj = type("C", (), {
+            "co_code": bytes(
+                b for ins in raw
+                for b in [ins.opcode, ins.arg if ins.arg is not None else 0]
+            ),
+            "co_consts": (1, 2, None),
+            "co_names": ("y",),
+            "co_varnames": (),
+            "co_cellvars": (),
+            "co_freevars": (),
+        })()
+        dec39._disassemble()
+
+        # Find the instruction at offset 8
+        instr_at_8 = next(
+            (i for i in dec39.instructions if i.offset == 8), None
+        )
+        self.assertIsNotNone(instr_at_8, "No instruction at offset 8")
+        self.assertTrue(
+            instr_at_8.is_jump_target,
+            "Offset 8 (target of POP_JUMP_IF_FALSE) should be is_jump_target=True",
+        )
+
+    # ------------------------------------------------------------------
+    # Fix 3 — DUP_TOP + COMPARE_OP("exception match") try/except
+    # ------------------------------------------------------------------
+
+    def test_try_except_typed_no_as(self):
+        """
+        3.9 try/except ValueError (no binding) must emit 'except ValueError:'
+        via the DUP_TOP + COMPARE_OP("exception match") handler.
+        """
+        Instr = BytecodeInstruction
+        out = self._run39([
+            Instr(0, "SETUP_FINALLY",    None, 16,  0, None, False),
+            Instr(0, "LOAD_CONST",       0,    42,  2, None, False),
+            Instr(0, "STORE_NAME",       0,    "x", 4, None, False),
+            Instr(0, "POP_BLOCK",        None, None,6, None, False),
+            Instr(0, "JUMP_FORWARD",     None, 32,  8, None, False),
+            # Handler at offset 16:
+            Instr(0, "DUP_TOP",          None, None,16, None, True),
+            Instr(0, "LOAD_NAME",        1, "ValueError", 18, None, False),
+            Instr(0, "COMPARE_OP",       10, "exception match", 20, None, False),
+            Instr(0, "POP_JUMP_IF_FALSE",28, 28, 22, None, False),
+            Instr(0, "POP_TOP",          None, None, 24, None, False),  # exc type
+            Instr(0, "POP_TOP",          None, None, 26, None, False),  # traceback
+            Instr(0, "LOAD_CONST",       2, 0,     28, None, False),
+            Instr(0, "STORE_NAME",       0, "x",   30, None, False),
+            Instr(0, "POP_EXCEPT",       None, None, 32, None, False),
+            Instr(0, "RETURN_VALUE",     None, None, 34, None, False),
+        ])
+        self.assertIn("try:", out, f"try: missing:\n{out}")
+        self.assertIn("except ValueError:", out,
+                      f"except ValueError: missing:\n{out}")
+        self.assertNotIn("DUP_TOP", out,
+                         f"Raw DUP_TOP leaked into output:\n{out}")
+
+    def test_try_except_as_binding(self):
+        """
+        3.9 'except ValueError as e:' must bind the name correctly via the
+        DUP_TOP pattern.  The STORE_NAME 'e' immediately follows the POPs.
+        """
+        Instr = BytecodeInstruction
+        out = self._run39([
+            Instr(0, "SETUP_FINALLY",    None, 16,  0, None, False),
+            Instr(0, "LOAD_CONST",       0,    42,  2, None, False),
+            Instr(0, "STORE_NAME",       0,    "x", 4, None, False),
+            Instr(0, "POP_BLOCK",        None, None,6, None, False),
+            Instr(0, "JUMP_FORWARD",     None, 36,  8, None, False),
+            # Handler at offset 16:
+            Instr(0, "DUP_TOP",          None, None,16, None, True),
+            Instr(0, "LOAD_NAME",        1, "ValueError", 18, None, False),
+            Instr(0, "COMPARE_OP",       10, "exception match", 20, None, False),
+            Instr(0, "POP_JUMP_IF_FALSE",30, 30, 22, None, False),
+            Instr(0, "POP_TOP",          None, None, 24, None, False),  # exc type
+            Instr(0, "STORE_NAME",       2, "e",   26, None, False),   # 'as e' binding
+            Instr(0, "LOAD_CONST",       3, 0,     28, None, False),
+            Instr(0, "STORE_NAME",       0, "x",   30, None, False),
+            Instr(0, "POP_EXCEPT",       None, None, 32, None, False),
+            Instr(0, "RETURN_VALUE",     None, None, 34, None, False),
+        ])
+        self.assertIn("except ValueError as e:", out,
+                      f"'as e' binding missing:\n{out}")
+        self.assertNotIn("DUP_TOP", out, f"Raw DUP_TOP leaked:\n{out}")
+
+    def test_try_except_body_indented_correctly(self):
+        """Handler body must be indented one level inside the except block."""
+        Instr = BytecodeInstruction
+        out = self._run39([
+            Instr(0, "SETUP_FINALLY",    None, 12,  0, None, False),
+            Instr(0, "LOAD_CONST",       0, 99,     2, None, False),
+            Instr(0, "STORE_NAME",       0, "x",    4, None, False),
+            Instr(0, "POP_BLOCK",        None, None, 6, None, False),
+            Instr(0, "JUMP_FORWARD",     None, 28,   8, None, False),
+            Instr(0, "DUP_TOP",          None, None,12, None, True),
+            Instr(0, "LOAD_NAME",        1, "OSError",14, None, False),
+            Instr(0, "COMPARE_OP",       10, "exception match", 16, None, False),
+            Instr(0, "POP_JUMP_IF_FALSE",26, 26, 18, None, False),
+            Instr(0, "POP_TOP",          None, None, 20, None, False),
+            Instr(0, "POP_TOP",          None, None, 22, None, False),
+            Instr(0, "LOAD_CONST",       2, 0,      24, None, False),
+            Instr(0, "STORE_NAME",       0, "x",    26, None, False),
+            Instr(0, "POP_EXCEPT",       None, None, 28, None, False),
+            Instr(0, "RETURN_VALUE",     None, None, 30, None, False),
+        ])
+        lines = out.splitlines()
+        body_lines = [line for line in lines if "x = 0" in line or "x = 99" in line]
+        for line in body_lines:
+            self.assertTrue(
+                line.startswith("    "),
+                f"Body line not indented:\n  {line!r}\nFull output:\n{out}",
+            )
+
+    def test_dup_top_not_exception_match_falls_through(self):
+        """
+        A lone DUP_TOP not followed by COMPARE_OP('exception match')
+        must NOT emit an except header — it should duplicate the stack top.
+        """
+        Instr = BytecodeInstruction
+        code = compile("pass", "<test>", "exec")
+        dec = Decompiler39(code)
+        dec.instructions = [
+            Instr(0, "LOAD_CONST", 0, 42,    0, None, False),
+            Instr(0, "DUP_TOP",    None, None, 2, None, False),
+            Instr(0, "STORE_NAME", 0, "x",   4, None, False),
+            Instr(0, "POP_TOP",    None, None, 6, None, False),
+            Instr(0, "RETURN_VALUE", None, None, 8, None, False),
+        ]
+        dec._while_body_offsets = set()
+        dec._while_header_targets = {}
+        dec._while_true_ends = set()
+        # Run the handler manually
+        dec.pc = 1   # pointing at DUP_TOP
+        dec.stack = [42]
+        dup_instr = dec.instructions[1]
+        dec._handle_instruction(dup_instr)
+        # Stack should now have two copies of 42 (real DUP_TOP semantics)
+        self.assertGreaterEqual(len(dec.stack), 2,
+                                "DUP_TOP should duplicate the stack top")
+        self.assertNotIn("except", "\n".join(dec.reconstructed),
+                         "Spurious except header emitted by non-exception DUP_TOP")
+
+    # ------------------------------------------------------------------
+    # Fix 4 — INPLACE_* augmented assignment
+    # ------------------------------------------------------------------
+
+    def test_inplace_add_emits_augassign(self):
+        """INPLACE_ADD followed by STORE_NAME must emit 'x += 3', not 'x = (x + 3)'."""
+        Instr = BytecodeInstruction
+        out = self._run39([
+            Instr(0, "LOAD_CONST",   0,  1,   0, None, False),
+            Instr(0, "STORE_NAME",   0, "x",  2, None, False),
+            Instr(0, "LOAD_NAME",    0, "x",  4, None, False),
+            Instr(0, "LOAD_CONST",   1,  3,   6, None, False),
+            Instr(0, "INPLACE_ADD",  None, None, 8, None, False),
+            Instr(0, "STORE_NAME",   0, "x", 10, None, False),
+            Instr(0, "RETURN_VALUE", None, None, 12, None, False),
+        ])
+        self.assertIn("x += 3", out, f"x += 3 not found:\n{out}")
+        self.assertNotIn("x = (x", out, f"Wrong 'x = (x ...)' form present:\n{out}")
+
+    def test_inplace_sub_emits_augassign(self):
+        """INPLACE_SUBTRACT -> 'x -= 1'."""
+        Instr = BytecodeInstruction
+        out = self._run39([
+            Instr(0, "LOAD_NAME",       0, "x",  0, None, False),
+            Instr(0, "LOAD_CONST",      0,  1,   2, None, False),
+            Instr(0, "INPLACE_SUBTRACT",None,None,4, None, False),
+            Instr(0, "STORE_NAME",      0, "x",  6, None, False),
+            Instr(0, "RETURN_VALUE",    None, None, 8, None, False),
+        ])
+        self.assertIn("x -= 1", out, f"x -= 1 not found:\n{out}")
+
+    def test_inplace_mul_emits_augassign(self):
+        """INPLACE_MULTIPLY -> 'x *= 2'."""
+        Instr = BytecodeInstruction
+        out = self._run39([
+            Instr(0, "LOAD_NAME",        0, "x",  0, None, False),
+            Instr(0, "LOAD_CONST",       0,  2,   2, None, False),
+            Instr(0, "INPLACE_MULTIPLY", None,None,4, None, False),
+            Instr(0, "STORE_NAME",       0, "x",  6, None, False),
+            Instr(0, "RETURN_VALUE",     None, None, 8, None, False),
+        ])
+        self.assertIn("x *= 2", out, f"x *= 2 not found:\n{out}")
+
+    def test_inplace_xor_emits_augassign(self):
+        """INPLACE_XOR -> 'x ^= 5'. Regression guard against += mapping."""
+        Instr = BytecodeInstruction
+        out = self._run39([
+            Instr(0, "LOAD_NAME",    0, "x",  0, None, False),
+            Instr(0, "LOAD_CONST",   0,  5,   2, None, False),
+            Instr(0, "INPLACE_XOR",  None,None,4, None, False),
+            Instr(0, "STORE_NAME",   0, "x",  6, None, False),
+            Instr(0, "RETURN_VALUE", None, None, 8, None, False),
+        ])
+        self.assertIn("x ^= 5", out, f"x ^= 5 not found:\n{out}")
+        self.assertNotIn("x += 5", out, f"INPLACE_XOR wrongly emitted +=:\n{out}")
+
+    def test_inplace_without_matching_store_falls_back(self):
+        """
+        INPLACE_* not followed by a matching STORE must push an expression
+        string (not crash and not emit a bare statement).
+        """
+        Instr = BytecodeInstruction
+        code = compile("pass", "<test>", "exec")
+        dec = Decompiler39(code)
+        dec.instructions = [
+            Instr(0, "LOAD_NAME",    0, "x",  0, None, False),
+            Instr(0, "LOAD_CONST",   0,  1,   2, None, False),
+            Instr(0, "INPLACE_ADD",  None, None, 4, None, False),
+            # No STORE_NAME — stack top is a different name
+            Instr(0, "STORE_NAME",   1, "y",  6, None, False),  # store to y, not x
+            Instr(0, "RETURN_VALUE", None, None, 8, None, False),
+        ]
+        dec._while_body_offsets = set()
+        dec._while_header_targets = {}
+        dec._while_true_ends = set()
+        dec.pc = 2  # point at INPLACE_ADD
+        dec.stack = ["x", 1]
+        dec._handle_instruction(dec.instructions[2])
+        # Should have pushed a string expression, not crashed
+        self.assertEqual(len(dec.stack), 1,
+                         "INPLACE_ADD should leave exactly one item on stack")
+        self.assertIsInstance(dec.stack[-1], str,
+                              "Fallback should push a string expression")
+
+    # ------------------------------------------------------------------
+    # End-to-end: complete 3.9-style programs
+    # ------------------------------------------------------------------
+
+    def test_complete_while_with_augassign(self):
+        """
+        End-to-end: 'n = 0; while n < 3: n += 1' with 3.9 bytecode.
+        Guard (POP_JUMP_IF_FALSE) + back-edge (JUMP_ABSOLUTE) + INPLACE_ADD.
+        """
+        Instr = BytecodeInstruction
+        out = self._run39([
+            Instr(0, "LOAD_CONST",       0, 0,    0, None, False),
+            Instr(0, "STORE_NAME",       0, "n",  2, None, False),
+            # condition at offset 4 — JUMP_ABSOLUTE targets here
+            Instr(0, "LOAD_NAME",        0, "n",  4, None, False),
+            Instr(0, "LOAD_CONST",       1, 3,    6, None, False),
+            Instr(0, "COMPARE_OP",       0, "<",  8, None, False),
+            Instr(0, "POP_JUMP_IF_FALSE",18, 18, 10, None, False),
+            # body at offset 12
+            Instr(0, "LOAD_NAME",        0, "n", 12, None, False),
+            Instr(0, "LOAD_CONST",       2, 1,   14, None, False),
+            Instr(0, "INPLACE_ADD",      None, None, 16, None, False),
+            Instr(0, "STORE_NAME",       0, "n", 18, None, False),
+            Instr(0, "JUMP_ABSOLUTE",    4, 4,   20, None, False),
+            Instr(0, "RETURN_VALUE",     None, None, 22, None, True),
+        ])
+        self.assertIn("n = 0", out, f"init missing:\n{out}")
+        self.assertIn("while", out, f"while missing:\n{out}")
+        self.assertIn("n += 1", out, f"n += 1 missing:\n{out}")
+        self.assertNotIn("if n", out, f"'if n' should be 'while':\n{out}")
+
+    def test_complete_try_except_with_store(self):
+        """
+        End-to-end: 3.9-style try/except that sets x=42 in try, x=0 on error.
+        """
+        Instr = BytecodeInstruction
+        out = self._run39([
+            Instr(0, "SETUP_FINALLY",    None, 14,  0, None, False),
+            Instr(0, "LOAD_CONST",       0, 42,     2, None, False),
+            Instr(0, "STORE_NAME",       0, "x",    4, None, False),
+            Instr(0, "POP_BLOCK",        None, None, 6, None, False),
+            Instr(0, "JUMP_FORWARD",     None, 30,   8, None, False),
+            # handler at 14:
+            Instr(0, "DUP_TOP",          None, None, 14, None, True),
+            Instr(0, "LOAD_NAME",        1, "ValueError", 16, None, False),
+            Instr(0, "COMPARE_OP",       10, "exception match", 18, None, False),
+            Instr(0, "POP_JUMP_IF_FALSE",28, 28, 20, None, False),
+            Instr(0, "POP_TOP",          None, None, 22, None, False),
+            Instr(0, "POP_TOP",          None, None, 24, None, False),
+            Instr(0, "LOAD_CONST",       2, 0,      26, None, False),
+            Instr(0, "STORE_NAME",       0, "x",    28, None, False),
+            Instr(0, "POP_EXCEPT",       None, None, 30, None, False),
+            Instr(0, "RETURN_VALUE",     None, None, 32, None, False),
+        ])
+        self.assertIn("try:", out)
+        self.assertIn("except ValueError:", out)
+        self.assertIn("x = 42", out)
+        self.assertIn("x = 0", out)
+        self.assertNotIn("DUP_TOP", out)
+        self.assertNotIn("COMPARE_OP", out)
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
