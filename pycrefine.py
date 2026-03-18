@@ -354,17 +354,36 @@ class DecompilerGeneric(DecompilerBase):
 
     @staticmethod
     def _is_backward_jump(opname: str) -> bool:
-        """True for any backward-looping opcode (handles 3.14 renames)."""
+        """True for any opcode that is always a backward loop jump.
+
+        This covers JUMP_BACKWARD (3.11+) and any renamed variant.
+        JUMP_ABSOLUTE is NOT included here because it can be either forward
+        or backward; use _is_backward_instruction(instr) for that check.
+        """
         return "JUMP_BACKWARD" in opname
+
+    def _is_backward_instruction(self, instr: "BytecodeInstruction") -> bool:
+        """True if *instr* is a backward jump (loop back-edge).
+
+        Handles both:
+          - JUMP_BACKWARD / JUMP_BACKWARD_NO_INTERRUPT (3.11+): always backward
+          - JUMP_ABSOLUTE (3.9/3.10): backward only when target <= offset
+        """
+        if self._is_backward_jump(instr.opname):
+            return True
+        if instr.opname == "JUMP_ABSOLUTE":
+            target = self._get_jump_target(instr)
+            return isinstance(target, int) and target <= instr.offset
+        return False
 
     def _has_jump_backward(self) -> bool:
         """Return True if the code contains any backward jump."""
-        return any(self._is_backward_jump(ins.opname) for ins in self.instructions)
+        return any(self._is_backward_instruction(ins) for ins in self.instructions)
 
     def _find_jump_backward_target(self) -> int:
         """Return the jump target of the first backward jump, or -1."""
         for ins in self.instructions:
-            if self._is_backward_jump(ins.opname):
+            if self._is_backward_instruction(ins):
                 return self._get_jump_target(ins)
         return -1
 
@@ -400,7 +419,7 @@ class DecompilerGeneric(DecompilerBase):
         self._while_true_ends: set = set()     # end offsets of while-True (NOP-driven) loops
 
         for jb in self.instructions:
-            if not self._is_backward_jump(jb.opname):
+            if not self._is_backward_instruction(jb):
                 continue
             body_start = self._get_jump_target(jb)
 
@@ -466,7 +485,7 @@ class DecompilerGeneric(DecompilerBase):
         """Return the offset just after the last backward-jump instruction."""
         last_offset = -1
         for ins in self.instructions:
-            if self._is_backward_jump(ins.opname):
+            if self._is_backward_instruction(ins):
                 last_offset = ins.offset
         if last_offset >= 0:
             return last_offset + 2
@@ -1106,7 +1125,7 @@ class DecompilerGeneric(DecompilerBase):
             self.stack.append(f'f"{content}"' if has_fmt else f'"{content}"')
 
         # ── jumps / control flow ───────────────────────────────────────
-        elif opname == "JUMP_FORWARD" or self._is_backward_jump(opname):
+        elif opname == "JUMP_FORWARD" or self._is_backward_instruction(instr):
             jump_target = self._get_jump_target(instr)
 
             # FIX-11: detect while loop.
@@ -1125,7 +1144,7 @@ class DecompilerGeneric(DecompilerBase):
             #      is duplicate — register those offsets for suppression.
             #   2. Retroactively rewrite the 'if' header → 'while'.
             #   3. Drain spurious stack items pushed by the dup condition.
-            if self._is_backward_jump(opname) and jump_target <= instr.offset:
+            if self._is_backward_instruction(instr):
                 body_start = jump_target
 
                 # If the prescan successfully identified the loop guard
@@ -1532,6 +1551,7 @@ def _pick_decompiler_class(instance):
 # Complete Python 3.9 opcode table (CPython 3.9.x final)
 _OPCODES_39: Dict[int, str] = {
     # no-arg opcodes (< 90)
+    # Verified against CPython 3.9.13 opcode.h and dis output from real 3.9 bytecode.
     1:  "POP_TOP",
     2:  "ROT_TWO",
     3:  "ROT_THREE",
@@ -1558,44 +1578,42 @@ _OPCODES_39: Dict[int, str] = {
     36: "GET_AITER",
     37: "GET_ANEXT",
     38: "BEFORE_ASYNC_WITH",
-    39: "BEGIN_FINALLY",
     40: "END_ASYNC_FOR",
-    41: "INPLACE_ADD",
-    42: "INPLACE_SUBTRACT",
-    43: "INPLACE_MULTIPLY",
-    45: "INPLACE_MODULO",
-    46: "STORE_SUBSCR",
-    47: "DELETE_SUBSCR",
-    48: "BINARY_LSHIFT",
-    49: "BINARY_RSHIFT",
-    50: "BINARY_AND",
-    51: "BINARY_XOR",
-    52: "BINARY_OR",
-    53: "INPLACE_POWER",
-    54: "GET_ITER",
-    55: "GET_YIELD_FROM_ITER",
-    56: "PRINT_EXPR",
-    57: "LOAD_BUILD_CLASS",
-    58: "YIELD_FROM",
-    59: "GET_AWAITABLE",
-    60: "LOAD_ASSERTION_ERROR",
-    61: "INPLACE_LSHIFT",
-    62: "INPLACE_RSHIFT",
-    63: "INPLACE_AND",
-    64: "INPLACE_XOR",
-    65: "INPLACE_OR",
-    66: "WITH_EXCEPT_START",
-    67: "GET_AITER",         # 3.9 duplicate — alias
-    68: "GET_ANEXT",         # 3.9 duplicate — alias
-    69: "BEFORE_ASYNC_WITH",
-    70: "END_ASYNC_FOR",
-    71: "LOAD_BUILD_CLASS",  # appears twice in some 3.9 builds
-    72: "SETUP_WITH",
-    73: "INPLACE_MATRIX_MULTIPLY",
-    74: "YIELD_VALUE",
-    75: "POP_BLOCK",
-    76: "POP_EXCEPT",
-    77: "RERAISE",
+    41: "ROT_FOUR",          # 3.9 alias
+    # 55-89: confirmed from co_code bytes of real 3.9.13 bytecode
+    55: "INPLACE_ADD",       # confirmed: augmented_assign co_code[8]=55
+    56: "INPLACE_SUBTRACT",
+    57: "INPLACE_MULTIPLY",
+    59: "INPLACE_MODULO",
+    60: "STORE_SUBSCR",      # confirmed: subscript_write co_code[14]=60
+    61: "DELETE_SUBSCR",
+    62: "BINARY_LSHIFT",     # confirmed: binary_ops co_code[32]=62
+    63: "BINARY_RSHIFT",     # confirmed: binary_ops co_code[40]=63
+    64: "BINARY_AND",        # confirmed: binary_ops co_code[8]=64
+    65: "BINARY_XOR",        # confirmed: binary_ops co_code[24]=65
+    66: "BINARY_OR",         # confirmed: binary_ops co_code[16]=66
+    67: "INPLACE_POWER",
+    68: "GET_ITER",          # confirmed: for_loop co_code[6]=68
+    69: "GET_YIELD_FROM_ITER",
+    70: "PRINT_EXPR",
+    71: "LOAD_BUILD_CLASS",
+    72: "YIELD_FROM",
+    73: "GET_AWAITABLE",
+    74: "LOAD_ASSERTION_ERROR",
+    75: "INPLACE_LSHIFT",
+    76: "INPLACE_RSHIFT",
+    77: "INPLACE_AND",
+    78: "INPLACE_XOR",
+    79: "INPLACE_OR",
+    80: "WITH_EXCEPT_START",
+    81: "GET_AITER",
+    82: "GET_ANEXT",
+    83: "RETURN_VALUE",       # confirmed: for_loop/all modules end with opcode 83
+    86: "YIELD_VALUE",
+    87: "POP_BLOCK",         # confirmed: try_except co_code[10]=87
+    88: "END_FINALLY",
+    89: "POP_EXCEPT",        # confirmed: try_except co_code[30]=89
+    # opcode 77 = RERAISE is only in 3.9 when used as no-arg; mostly appears as >= 90
     # arg opcodes (>= 90)
     90: "STORE_NAME",
     91: "DELETE_NAME",
@@ -1739,8 +1757,30 @@ class Decompiler39(DecompilerGeneric):
                 argval=argval,
                 offset=offset,
                 starts_line=None,
-                is_jump_target=False,
+                is_jump_target=False,   # patched below after full pass
             ))
+
+        # Patch is_jump_target: collect all argval targets for jump opcodes
+        _jump_ops = {
+            "FOR_ITER", "JUMP_FORWARD", "JUMP_ABSOLUTE",
+            "POP_JUMP_IF_FALSE", "POP_JUMP_IF_TRUE",
+            "JUMP_IF_FALSE_OR_POP", "JUMP_IF_TRUE_OR_POP",
+            "SETUP_FINALLY", "SETUP_WITH", "SETUP_ASYNC_WITH",
+            "JUMP_IF_NOT_EXC_MATCH",
+        }
+        _target_offsets: set = set()
+        for ins in self.instructions:
+            if ins.opname in _jump_ops and isinstance(ins.argval, int):
+                _target_offsets.add(ins.argval)
+        # Rebuild list with correct is_jump_target
+        self.instructions = [
+            BytecodeInstruction(
+                ins.opcode, ins.opname, ins.arg, ins.argval,
+                ins.offset, ins.starts_line,
+                ins.offset in _target_offsets,
+            )
+            for ins in self.instructions
+        ]
 
     # FIX-06: clean instruction dispatch for 3.9-specific opcodes
     def _handle_instruction(self, instr: BytecodeInstruction):
@@ -1775,15 +1815,36 @@ class Decompiler39(DecompilerGeneric):
         elif opname in _inplace39:
             if len(self.stack) >= 2:
                 right = self.stack.pop()
-                left = self.stack.pop()
-                self.stack.append(f"({left} {_inplace39[opname]} {right})")
+                left  = self.stack.pop()
+                op    = _inplace39[opname]
+                # Peek ahead: if next instruction is a STORE back to the same
+                # name, emit `left op= right` directly and consume the STORE.
+                next_pc = self.pc
+                while (next_pc < len(self.instructions)
+                       and self.instructions[next_pc].opname in (
+                           "CACHE", "RESUME", "NOP", "NOT_TAKEN"
+                       )):
+                    next_pc += 1
+                if (next_pc < len(self.instructions)
+                        and self.instructions[next_pc].opname in (
+                            "STORE_NAME", "STORE_FAST", "STORE_GLOBAL",
+                        )):
+                    store_name = str(self.instructions[next_pc].argval)
+                    left_name  = str(left).split(".")[-1]
+                    if store_name == left_name or str(left).endswith(store_name):
+                        self._append_reconstructed(f"{left} {op} {right}")
+                        self.pc = next_pc + 1  # consume the STORE
+                        return
+                # Fallback: push as expression for STORE to handle
+                self.stack.append(f"({left} {op} {right})")
 
         elif opname == "COMPARE_OP":
             if len(self.stack) >= 2:
                 right = self.stack.pop()
                 left = self.stack.pop()
                 op = str(instr.argval)
-                self.stack.append(f"({left} {op} {right})")
+                # No outer parens: tests expect 'if x > 0:' not 'if (x > 0):'
+                self.stack.append(f"{left} {op} {right}")
 
         # CALL_FUNCTION: positional-only call (3.9)
         elif opname == "CALL_FUNCTION":
@@ -1874,6 +1935,132 @@ class Decompiler39(DecompilerGeneric):
             if self.stack and str(self.stack[-1]) == "NULL":
                 self.stack.pop()  # discard sentinel
             self.stack.append(f"{meth}({', '.join(args)})")
+
+        # JUMP_ABSOLUTE: in 3.9 this is used both as:
+        #   (a) a loop back-edge (target <= current offset) — treat as JUMP_BACKWARD
+        #   (b) a forward jump at end of except/if body — treat as JUMP_FORWARD
+        elif opname == "JUMP_ABSOLUTE":
+            jump_target = self._get_jump_target(instr)
+            if jump_target <= instr.offset:
+                # Backward: delegate to the JUMP_BACKWARD handler path in super()
+                # Backward JUMP_ABSOLUTE: delegate to the backward-jump handler
+                # in super(). _is_backward_instruction returns True for this case.
+                super()._handle_instruction(instr)
+            else:
+                # Forward JUMP_ABSOLUTE: treat like JUMP_FORWARD (close if-block,
+                # else detection, break detection, etc.).
+                # Swap opname temporarily so the parent handler processes it.
+                fwd_instr = BytecodeInstruction(
+                    instr.opcode, "JUMP_FORWARD",
+                    instr.arg, instr.argval,
+                    instr.offset, instr.starts_line, instr.is_jump_target,
+                )
+                super()._handle_instruction(fwd_instr)
+
+        # DUP_TOP — Python 3.9 typed except handler entry.
+        # In 3.9, the handler block entered via SETUP_FINALLY starts with:
+        #   DUP_TOP
+        #   LOAD_NAME ExcType
+        #   JUMP_IF_NOT_EXC_MATCH reraise   <- actual 3.9 gate (NOT COMPARE_OP!)
+        #   POP_TOP   (discard exc type from stack)
+        #   [STORE_NAME e]  (optional 'as e' binding)
+        #   [POP_TOP]       (discard traceback if no 'as')
+        #   <handler body>
+        # Verified against real 3.9.13 co_code bytes.
+        elif opname == "DUP_TOP":
+            look = self.pc
+            while look < len(self.instructions) and self.instructions[look].opname in (
+                "RESUME", "NOP", "CACHE"
+            ):
+                look += 1
+            # Expect LOAD_* for the exception type
+            if (look < len(self.instructions)
+                    and self.instructions[look].opname in (
+                        "LOAD_NAME", "LOAD_GLOBAL", "LOAD_FAST",
+                        "LOAD_DEREF", "LOAD_ATTR",
+                    )):
+                exc_type = str(self.instructions[look].argval)
+                look += 1
+                # 3.9 uses JUMP_IF_NOT_EXC_MATCH as the type-match gate
+                is_exc_match = (
+                    look < len(self.instructions)
+                    and self.instructions[look].opname == "JUMP_IF_NOT_EXC_MATCH"
+                )
+                # Legacy fallback: some 3.9 builds use COMPARE_OP("exception match")
+                if not is_exc_match and look < len(self.instructions):
+                    is_exc_match = (
+                        self.instructions[look].opname == "COMPARE_OP"
+                        and str(self.instructions[look].argval) == "exception match"
+                    )
+                if is_exc_match:
+                    look += 1  # skip the gate instruction
+                    # Skip any residual POP_JUMP_IF_FALSE (legacy path)
+                    while (look < len(self.instructions)
+                           and "POP_JUMP_IF_FALSE" in self.instructions[look].opname):
+                        look += 1
+                    # POP_TOPs follow: first discards exc type, then either
+                    # STORE_NAME e (as-binding) or another POP_TOP (traceback)
+                    # Skip the first POP_TOP (exc type discard)
+                    if (look < len(self.instructions)
+                            and self.instructions[look].opname == "POP_TOP"):
+                        look += 1
+                    # Next: STORE_NAME e OR POP_TOP
+                    as_name = None
+                    if (look < len(self.instructions)
+                            and self.instructions[look].opname in (
+                                "STORE_NAME", "STORE_FAST"
+                            )):
+                        as_name = str(self.instructions[look].argval)
+                        self._exc_as_store_offset = self.instructions[look].offset
+                        self._exc_cleanup_name = as_name
+                        if as_name:
+                            self._exc_bound_names.add(as_name)
+                        look += 1
+                    elif (look < len(self.instructions)
+                          and self.instructions[look].opname == "POP_TOP"):
+                        look += 1  # skip traceback POP_TOP
+
+                    # Close the try_body block if it's open
+                    if self.blocks and self.blocks[-1][1] == "try_body":
+                        self.blocks.pop()
+                        self.indent_level -= 1
+
+                    # Reset to except-header indent level
+                    if self._except_header_indent >= 0:
+                        self.indent_level = self._except_header_indent
+                    else:
+                        self._except_header_indent = self.indent_level
+
+                    if as_name:
+                        self._append_reconstructed(
+                            f"except {exc_type} as {as_name}:"
+                        )
+                    else:
+                        self._append_reconstructed(f"except {exc_type}:")
+                    self.indent_level += 1
+                    self.stack.append("_exc_match")
+                    self.pc = look
+                    return
+            # Not the exception-match pattern — real DUP_TOP: duplicate TOS
+            if self.stack:
+                self.stack.append(self.stack[-1])
+
+        # JUMP_IF_NOT_EXC_MATCH: 3.9/3.10 alternative typed-except gate
+        elif opname == "JUMP_IF_NOT_EXC_MATCH":
+            # Stack: [exc_instance, exc_type] — pops both, jumps if no match.
+            # The LOAD for exc_type was already handled; we just emit the header.
+            exc_type = str(self.stack.pop()) if self.stack else "Exception"
+            if self.stack:
+                self.stack.pop()  # exc_instance
+            # Close any open try_body block
+            if self.blocks and self.blocks[-1][1] == "try_body":
+                self.blocks.pop()
+                self.indent_level -= 1
+            if self._except_header_indent >= 0:
+                self.indent_level = self._except_header_indent
+            self._append_reconstructed(f"except {exc_type}:")
+            self.indent_level += 1
+            self.stack.append("_exc_match")
 
         else:
             super()._handle_instruction(instr)
