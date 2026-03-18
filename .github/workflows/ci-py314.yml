@@ -1,4 +1,4 @@
-name: Python 3.14
+name: Python 3.14 -
 
 on:
   push:
@@ -6,8 +6,6 @@ on:
   pull_request:
     branches: [ main ]
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   call-workflow:
