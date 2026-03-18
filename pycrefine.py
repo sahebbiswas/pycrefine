@@ -1584,11 +1584,12 @@ _OPCODES_39: Dict[int, str] = {
     27: "BINARY_TRUE_DIVIDE",
     28: "INPLACE_FLOOR_DIVIDE",
     29: "INPLACE_TRUE_DIVIDE",
-    36: "GET_AITER",
-    37: "GET_ANEXT",
-    38: "BEFORE_ASYNC_WITH",
-    40: "END_ASYNC_FOR",
-    41: "ROT_FOUR",          # 3.9 alias
+    48: "RERAISE",              # real 3.9: RERAISE=48 (no-arg!), not 119
+    49: "WITH_EXCEPT_START",   # real 3.9: WITH_EXCEPT_START=49, not 80
+    50: "GET_AITER",
+    51: "GET_ANEXT",
+    52: "BEFORE_ASYNC_WITH",
+    54: "END_ASYNC_FOR",
     # 55-89: confirmed from co_code bytes of real 3.9.13 bytecode
     55: "INPLACE_ADD",       # confirmed: augmented_assign co_code[8]=55
     56: "INPLACE_SUBTRACT",
@@ -1614,16 +1615,14 @@ _OPCODES_39: Dict[int, str] = {
     77: "INPLACE_AND",
     78: "INPLACE_XOR",
     79: "INPLACE_OR",
-    80: "WITH_EXCEPT_START",
-    81: "GET_AITER",
-    82: "GET_ANEXT",
-    83: "RETURN_VALUE",       # confirmed: for_loop/all modules end with opcode 83
+    82: "LIST_TO_TUPLE",     # real 3.9
+    83: "RETURN_VALUE",
+    84: "IMPORT_STAR",
+    85: "SETUP_ANNOTATIONS",
     86: "YIELD_VALUE",
-    87: "POP_BLOCK",         # confirmed: try_except co_code[10]=87
-    88: "END_FINALLY",
-    89: "POP_EXCEPT",        # confirmed: try_except co_code[30]=89
-    # opcode 77 = RERAISE is only in 3.9 when used as no-arg; mostly appears as >= 90
-    # arg opcodes (>= 90)
+    87: "POP_BLOCK",
+    89: "POP_EXCEPT",
+    # ── arg opcodes (>= 90) ──────────────────────────────────────────────
     90: "STORE_NAME",
     91: "DELETE_NAME",
     92: "UNPACK_SEQUENCE",
@@ -1652,14 +1651,11 @@ _OPCODES_39: Dict[int, str] = {
     116: "LOAD_GLOBAL",
     117: "IS_OP",
     118: "CONTAINS_OP",
-    119: "RERAISE",
-    120: "JUMP_IF_NOT_EXC_MATCH",
-    121: "SETUP_FINALLY",
-    122: "LOAD_FAST",       # NOTE: in 3.9 LOAD_FAST starts at 124; 122 reserved
-    124: "LOAD_FAST",
+    121: "JUMP_IF_NOT_EXC_MATCH",  # real 3.9: 121 (not 120!)
+    122: "SETUP_FINALLY",          # real 3.9: 122 (not 121!)
+    124: "LOAD_FAST",              # real 3.9: 124 (not 122!)
     125: "STORE_FAST",
     126: "DELETE_FAST",
-    127: "GEN_START",
     130: "RAISE_VARARGS",
     131: "CALL_FUNCTION",
     132: "MAKE_FUNCTION",
@@ -1681,8 +1677,7 @@ _OPCODES_39: Dict[int, str] = {
     155: "FORMAT_VALUE",
     156: "BUILD_CONST_KEY_MAP",
     157: "BUILD_STRING",
-    158: "LOAD_METHOD",
-    160: "LOAD_METHOD",      # alias seen in some builds
+    160: "LOAD_METHOD",
     161: "CALL_METHOD",
     162: "LIST_EXTEND",
     163: "SET_UPDATE",
@@ -2184,8 +2179,37 @@ class Decompiler39(DecompilerGeneric):
             else:
                 super()._handle_instruction(instr)
 
+        # POP_TOP at a handler jump-target: Python 3.9 bare except starts with
+        # three consecutive POP_TOPs (exc_type, exc_value, traceback) instead of
+        # DUP_TOP.  Detect when POP_TOP fires at the handler entry point.
+        elif opname == "POP_TOP" and instr.is_jump_target and self._except_header_indent >= 0:
+            # Skip the other two POP_TOPs that follow (they discard exc_value
+            # and traceback from the implicit exception tuple).
+            skip = self.pc
+            pops_skipped = 0
+            while (skip < len(self.instructions)
+                   and self.instructions[skip].opname == "POP_TOP"
+                   and pops_skipped < 2):
+                skip += 1
+                pops_skipped += 1
+            self.pc = skip
+            # Emit bare except header at the correct indent level
+            if self._except_header_indent >= 0:
+                self.indent_level = self._except_header_indent
+            self._append_reconstructed("except:")
+            self.indent_level += 1
+            self.stack.append("_exc_match")
+
+        # RERAISE (opcode 48 in 3.9, no-arg): re-raises the current exception.
+        # In handlers this appears after a failed JUMP_IF_NOT_EXC_MATCH as the
+        # fall-through re-raise.  Nothing to emit — the decompiler has already
+        # reached this via the jump target path, so just skip silently.
+        elif opname == "RERAISE":
+            pass  # already handled by the JUMP target structure; no source emission
+
         else:
             super()._handle_instruction(instr)
+
 
 
 # ---------------------------------------------------------------------------
