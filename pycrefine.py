@@ -480,6 +480,15 @@ class DecompilerGeneric(DecompilerBase):
                     guard_offset = ins.offset
             if guard_offset >= 0:
                 self._while_header_targets[body_start] = guard_offset
+            else:
+                # while-True pattern: no conventional guard found, but the
+                # back-edge target is a known jump target (loop start).
+                # Record sentinel -1 so _handle_instruction emits 'while True:'
+                body_instr = next(
+                    (ins for ins in self.instructions if ins.offset == body_start), None
+                )
+                if body_instr and body_instr.is_jump_target:
+                    self._while_header_targets[body_start] = -1
 
     def _find_jump_backward_end(self) -> int:
         """Return the offset just after the last backward-jump instruction."""
@@ -1806,6 +1815,60 @@ class Decompiler39(DecompilerGeneric):
             "INPLACE_MATRIX_MULTIPLY": "@=",
         }
 
+        # while-True header: if this instruction is the body_start of a while-True
+        # loop (sentinel guard_offset == -1), emit 'while True:' once and push a
+        # while block covering the loop back-edge.
+        # This fires on the very first instruction of the loop body.
+        _while_header_targets = getattr(self, "_while_header_targets", {})
+        _while_true_body_starts = {
+            bs for bs, go in _while_header_targets.items() if go == -1
+        }
+        if instr.offset in _while_true_body_starts and not any(
+            b[1] == "while" for b in self.blocks
+        ):
+            self._append_reconstructed("while True:")
+            self.indent_level += 1
+            # Find the loop end: offset just after the last backward jump that
+            # targets this body_start.
+            loop_end = instr.offset + 2
+            for ins in self.instructions:
+                if (self._is_backward_instruction(ins)
+                        and self._get_jump_target(ins) == instr.offset):
+                    loop_end = max(loop_end, ins.offset + 2)
+            self.blocks.append((loop_end, "while"))
+            _wte = getattr(self, "_while_true_ends", set())
+            _wte.add(loop_end)
+            self._while_true_ends = _wte
+
+        # POP_JUMP_IF_FALSE/TRUE with a BACKWARD target (target <= current offset):
+        # In a 3.9 while-True loop, this is the inner 'if cond: break' guard.
+        # The bytecode says "if the condition is FALSE, jump back to start" which is
+        # the NOT-break path (continue the loop).  The break path is a JUMP_ABSOLUTE
+        # forward.  Emit 'if <cond>:' (the break body is the following JUMP_ABSOLUTE).
+        if ("POP_JUMP_IF_FALSE" in opname or "POP_JUMP_IF_TRUE" in opname):
+            jump_target = self._get_jump_target(instr)
+            if (jump_target <= instr.offset  # backward target → inside while-True
+                    and any(b[1] == "while" for b in self.blocks)):
+                # This is the break-guard inside a while-True.
+                # Pop the condition and emit 'if <cond>:' (body = break stmt).
+                if self.stack:
+                    cond = self.stack.pop()
+                    if str(cond) != "_exc_match":
+                        is_true = "IF_TRUE" in opname
+                        if is_true:
+                            self._append_reconstructed(f"if not {cond}:")
+                        else:
+                            self._append_reconstructed(f"if {cond}:")
+                        self.indent_level += 1
+                        # The loop_end we tracked is where the while block closes.
+                        # The if-block closes at the same point.
+                        while_end = next(
+                            (b[0] for b in reversed(self.blocks) if b[1] == "while"), -1
+                        )
+                        if while_end > instr.offset:
+                            self.blocks.append((while_end, "if"))
+                return
+
         if opname in _bin39:
             if len(self.stack) >= 2:
                 right = self.stack.pop()
@@ -1936,44 +1999,69 @@ class Decompiler39(DecompilerGeneric):
                 self.stack.pop()  # discard sentinel
             self.stack.append(f"{meth}({', '.join(args)})")
 
+        # POP_BLOCK: marks the clean exit from a try body in Python 3.9.
+        # Close the try_body block and record the indent level for except headers.
+        elif opname == "POP_BLOCK":
+            if self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup"):
+                self.blocks.pop()
+                self.indent_level -= 1
+            # Record the indent level where except/finally headers should appear.
+            # Only set when not already inside an except handler.
+            if self._except_header_indent < 0:
+                self._except_header_indent = self.indent_level
+
         # JUMP_ABSOLUTE: in 3.9 this is used both as:
         #   (a) a loop back-edge (target <= current offset) — treat as JUMP_BACKWARD
         #   (b) a forward jump at end of except/if body — treat as JUMP_FORWARD
         elif opname == "JUMP_ABSOLUTE":
             jump_target = self._get_jump_target(instr)
             if jump_target <= instr.offset:
-                # Backward: delegate to the JUMP_BACKWARD handler path in super()
                 # Backward JUMP_ABSOLUTE: delegate to the backward-jump handler
                 # in super(). _is_backward_instruction returns True for this case.
                 super()._handle_instruction(instr)
             else:
-                # Forward JUMP_ABSOLUTE: treat like JUMP_FORWARD (close if-block,
-                # else detection, break detection, etc.).
-                # Swap opname temporarily so the parent handler processes it.
-                fwd_instr = BytecodeInstruction(
-                    instr.opcode, "JUMP_FORWARD",
-                    instr.arg, instr.argval,
-                    instr.offset, instr.starts_line, instr.is_jump_target,
-                )
-                super()._handle_instruction(fwd_instr)
+                # Forward JUMP_ABSOLUTE: in try/except context, suppress else-detection
+                # (same as JUMP_FORWARD suppression below).
+                if self._except_header_indent >= 0:
+                    pass  # skip else-detection inside try/except context
+                else:
+                    fwd_instr = BytecodeInstruction(
+                        instr.opcode, "JUMP_FORWARD",
+                        instr.arg, instr.argval,
+                        instr.offset, instr.starts_line, instr.is_jump_target,
+                    )
+                    super()._handle_instruction(fwd_instr)
 
-        # DUP_TOP — Python 3.9 typed except handler entry.
-        # In 3.9, the handler block entered via SETUP_FINALLY starts with:
+        # JUMP_FORWARD: in try/except context (after POP_BLOCK) suppress the
+        # if/else detection logic in the parent handler — it would create spurious
+        # else blocks around the exception handler body.
+        elif opname == "JUMP_FORWARD":
+            if self._except_header_indent >= 0:
+                pass  # suppress else-detection inside try/except context
+            else:
+                super()._handle_instruction(instr)
+
+        # DUP_TOP — Python 3.9 typed/bare except handler entry.
+        #
+        # Real 3.9.13 bytecode layout for typed except (from dis_out_39.txt):
         #   DUP_TOP
         #   LOAD_NAME ExcType
-        #   JUMP_IF_NOT_EXC_MATCH reraise   <- actual 3.9 gate (NOT COMPARE_OP!)
-        #   POP_TOP   (discard exc type from stack)
-        #   [STORE_NAME e]  (optional 'as e' binding)
-        #   [POP_TOP]       (discard traceback if no 'as')
+        #   JUMP_IF_NOT_EXC_MATCH reraise_offset
+        #   POP_TOP   } stack holds (exc_type, exc_value, traceback)
+        #   POP_TOP   } discard all three
+        #   POP_TOP   }
+        #   [STORE_NAME e]  ← only present for 'except X as e:'
         #   <handler body>
-        # Verified against real 3.9.13 co_code bytes.
+        #
+        # For bare except, DUP_TOP is followed immediately by the handler body
+        # (no LOAD_NAME/type-check sequence).
         elif opname == "DUP_TOP":
             look = self.pc
             while look < len(self.instructions) and self.instructions[look].opname in (
                 "RESUME", "NOP", "CACHE"
             ):
                 look += 1
-            # Expect LOAD_* for the exception type
+            # --- Typed except: LOAD_NAME ExcType follows ---
             if (look < len(self.instructions)
                     and self.instructions[look].opname in (
                         "LOAD_NAME", "LOAD_GLOBAL", "LOAD_FAST",
@@ -1981,31 +2069,41 @@ class Decompiler39(DecompilerGeneric):
                     )):
                 exc_type = str(self.instructions[look].argval)
                 look += 1
-                # 3.9 uses JUMP_IF_NOT_EXC_MATCH as the type-match gate
+                # 3.9 type-match gate: JUMP_IF_NOT_EXC_MATCH or COMPARE_OP
                 is_exc_match = (
                     look < len(self.instructions)
-                    and self.instructions[look].opname == "JUMP_IF_NOT_EXC_MATCH"
-                )
-                # Legacy fallback: some 3.9 builds use COMPARE_OP("exception match")
-                if not is_exc_match and look < len(self.instructions):
-                    is_exc_match = (
-                        self.instructions[look].opname == "COMPARE_OP"
-                        and str(self.instructions[look].argval) == "exception match"
+                    and self.instructions[look].opname in (
+                        "JUMP_IF_NOT_EXC_MATCH", "COMPARE_OP"
                     )
+                    and (
+                        self.instructions[look].opname == "JUMP_IF_NOT_EXC_MATCH"
+                        or str(self.instructions[look].argval) == "exception match"
+                    )
+                )
                 if is_exc_match:
-                    look += 1  # skip the gate instruction
-                    # Skip any residual POP_JUMP_IF_FALSE (legacy path)
+                    look += 1  # skip the gate
+                    # Skip any residual POP_JUMP_IF_FALSE (legacy COMPARE_OP path)
                     while (look < len(self.instructions)
                            and "POP_JUMP_IF_FALSE" in self.instructions[look].opname):
                         look += 1
-                    # POP_TOPs follow: first discards exc type, then either
-                    # STORE_NAME e (as-binding) or another POP_TOP (traceback)
-                    # Skip the first POP_TOP (exc type discard)
-                    if (look < len(self.instructions)
-                            and self.instructions[look].opname == "POP_TOP"):
-                        look += 1
-                    # Next: STORE_NAME e OR POP_TOP
+                    # Skip ALL consecutive POP_TOPs (exc_type, exc_value, traceback).
+                    # Stop early if a STORE_NAME immediately follows a POP_TOP
+                    # — that STORE_NAME is the 'as e' binding and must NOT be skipped.
                     as_name = None
+                    while (look < len(self.instructions)
+                           and self.instructions[look].opname == "POP_TOP"):
+                        # Peek one ahead: if the very next instruction is STORE_NAME/FAST,
+                        # the current POP_TOP discards the exc_type result (not the
+                        # binding), so we skip this POP_TOP and then pick up STORE_NAME.
+                        nxt = look + 1
+                        if (nxt < len(self.instructions)
+                                and self.instructions[nxt].opname in (
+                                    "STORE_NAME", "STORE_FAST"
+                                )):
+                            look += 1  # skip this POP_TOP
+                            break      # next iteration: handle STORE_NAME below
+                        look += 1  # skip POP_TOP with no binding after it
+                    # Now check for 'as e' STORE_NAME
                     if (look < len(self.instructions)
                             and self.instructions[look].opname in (
                                 "STORE_NAME", "STORE_FAST"
@@ -2016,44 +2114,56 @@ class Decompiler39(DecompilerGeneric):
                         if as_name:
                             self._exc_bound_names.add(as_name)
                         look += 1
-                    elif (look < len(self.instructions)
-                          and self.instructions[look].opname == "POP_TOP"):
-                        look += 1  # skip traceback POP_TOP
 
-                    # Close the try_body block if it's open
-                    if self.blocks and self.blocks[-1][1] == "try_body":
+                    # Close any still-open try_body block
+                    if self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup"):
                         self.blocks.pop()
                         self.indent_level -= 1
 
-                    # Reset to except-header indent level
+                    # Reset indent to except-header level
                     if self._except_header_indent >= 0:
                         self.indent_level = self._except_header_indent
                     else:
                         self._except_header_indent = self.indent_level
 
                     if as_name:
-                        self._append_reconstructed(
-                            f"except {exc_type} as {as_name}:"
-                        )
+                        self._append_reconstructed(f"except {exc_type} as {as_name}:")
                     else:
                         self._append_reconstructed(f"except {exc_type}:")
                     self.indent_level += 1
                     self.stack.append("_exc_match")
                     self.pc = look
                     return
-            # Not the exception-match pattern — real DUP_TOP: duplicate TOS
+            # --- Bare except: DUP_TOP not followed by a LOAD (no type check) ---
+            # In this case DUP_TOP is just the handler entry for a bare 'except:'.
+            if self._except_header_indent >= 0 or (
+                self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup")
+            ):
+                if self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup"):
+                    self.blocks.pop()
+                    self.indent_level -= 1
+                if self._except_header_indent >= 0:
+                    self.indent_level = self._except_header_indent
+                else:
+                    self._except_header_indent = self.indent_level
+                self._append_reconstructed("except:")
+                self.indent_level += 1
+                self.stack.append("_exc_match")
+                return
+            # Not an exception-match pattern — real DUP_TOP: duplicate TOS
             if self.stack:
                 self.stack.append(self.stack[-1])
 
-        # JUMP_IF_NOT_EXC_MATCH: 3.9/3.10 alternative typed-except gate
+        # JUMP_IF_NOT_EXC_MATCH: 3.9/3.10 typed-except gate.
+        # This fires when DUP_TOP already consumed the LOAD+JUMP_IF_NOT_EXC_MATCH
+        # sequence and advanced pc past it (pc = look after the gate).
+        # If it arrives here, it means the DUP_TOP pattern didn't fire
+        # (shouldn't happen in well-formed 3.9 bytecode, but handle gracefully).
         elif opname == "JUMP_IF_NOT_EXC_MATCH":
-            # Stack: [exc_instance, exc_type] — pops both, jumps if no match.
-            # The LOAD for exc_type was already handled; we just emit the header.
             exc_type = str(self.stack.pop()) if self.stack else "Exception"
             if self.stack:
                 self.stack.pop()  # exc_instance
-            # Close any open try_body block
-            if self.blocks and self.blocks[-1][1] == "try_body":
+            if self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup"):
                 self.blocks.pop()
                 self.indent_level -= 1
             if self._except_header_indent >= 0:
@@ -2061,6 +2171,18 @@ class Decompiler39(DecompilerGeneric):
             self._append_reconstructed(f"except {exc_type}:")
             self.indent_level += 1
             self.stack.append("_exc_match")
+
+        # SETUP_FINALLY inside an except handler: Python 3.9 wraps the 'as e'
+        # cleanup in a nested SETUP_FINALLY to guarantee 'e = None; del e' runs
+        # on both normal and reraise paths.  We must NOT emit a second 'try:' here.
+        elif opname in ("SETUP_FINALLY", "SETUP_EXCEPT"):
+            if self._except_header_indent >= 0:
+                # Inside an except handler — suppress 'try:' and just track boundary
+                jump_target = self._get_jump_target(instr)
+                self.blocks.append((jump_target, "exc_cleanup"))
+                self.indent_level += 1
+            else:
+                super()._handle_instruction(instr)
 
         else:
             super()._handle_instruction(instr)
