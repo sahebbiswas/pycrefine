@@ -14,6 +14,7 @@ import py_compile
 import re
 import sys
 import tempfile
+import tokenize
 from pathlib import Path
 
 _DEBUG = Path(__file__).parent
@@ -50,13 +51,13 @@ def compute_edit_ratio(seq1, seq2) -> float:
     sm = difflib.SequenceMatcher(None, seq1, seq2)
     return sm.ratio()
 
-def get_hamming_distance_for_file(source_path: str, verbose: bool = False) -> None:
+def get_hamming_distance_for_file(source_path: str, verbose: bool = False) -> int:
     source_path = str(source_path)
     if not os.path.exists(source_path):
         print(f"Error: file not found: {source_path}", file=sys.stderr)
-        return
+        return 2
 
-    with open(source_path, 'r', encoding='utf-8') as f:
+    with tokenize.open(source_path) as f:
         original_text = f.read()
 
     with tempfile.NamedTemporaryFile(suffix='.pyc', delete=False) as tf:
@@ -65,9 +66,9 @@ def get_hamming_distance_for_file(source_path: str, verbose: bool = False) -> No
     try:
         py_compile.compile(source_path, cfile=pyc_path, doraise=True)
         decompiled_text = get_decompiler(pyc_path).decompile()
-    except Exception as e:
+    except (FileNotFoundError, OSError, py_compile.PyCompileError, SyntaxError) as e:
         print(f"Error during compilation or decompilation: {e}", file=sys.stderr)
-        return
+        return 3
     finally:
         if os.path.exists(pyc_path):
             os.unlink(pyc_path)
@@ -97,7 +98,7 @@ def get_hamming_distance_for_file(source_path: str, verbose: bool = False) -> No
     print(f"  Character-level : {hamming_char_pct:.1f}%")
     print(f"  Token-level     : {hamming_word_pct:.1f}%")
     print()
-    print("Edit/Levenshtein Similarity (Robust to inserts/deletes):")
+    print("SequenceMatcher Similarity (Robust to inserts/deletes):")
     print(f"  Character-level : {edit_ratio_char:.1f}%")
     print(f"  Line-level      : {edit_ratio_lines:.1f}%")
     
@@ -107,12 +108,14 @@ def get_hamming_distance_for_file(source_path: str, verbose: bool = False) -> No
         print("\nDecompiled Normalized Sample (first 500 chars):")
         print(dec_str[:500])
 
-def main():
+    return 0
+
+def main() -> int:
     parser = argparse.ArgumentParser(description="Compute Hamming distance between original and decompiled source.")
     parser.add_argument("source", nargs="?", default=str(_HERE / "pycrefine.py"), help="Python source file to score")
     parser.add_argument("-v", "--verbose", action="store_true", help="Print verbose output")
     args = parser.parse_args()
-    get_hamming_distance_for_file(args.source, args.verbose)
+    return get_hamming_distance_for_file(args.source, args.verbose)
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
