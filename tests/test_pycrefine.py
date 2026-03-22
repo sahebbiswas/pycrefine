@@ -313,8 +313,7 @@ class TestImports(unittest.TestCase):
 
     def test_from_import_multi(self):
         out = decompile("from os.path import join, exists\n")
-        assert_contains(out, "from os.path import join")
-        assert_contains(out, "from os.path import exists")
+        assert_contains(out, "from os.path import join, exists")
 
     def test_import_does_not_emit_raw_name(self):
         """'argv' must not appear as a bare assignment `argv = argv`."""
@@ -1297,7 +1296,7 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
             instr = dec.instructions[dec.pc]
             # Close expired blocks
             while dec.blocks and instr.offset >= dec.blocks[-1][0]:
-                _block_end, _block_type = dec.blocks.pop()
+                block_end, block_type = dec.blocks.pop()
                 last_idx = len(dec.reconstructed) - 1
                 while last_idx >= 0 and not dec.reconstructed[last_idx].strip():
                     last_idx -= 1
@@ -1368,16 +1367,16 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
            12  JUMP_ABSOLUTE 0        <- back-edge
            14  RETURN_VALUE           <- loop exit (is_jump_target=True)
         """
-        Instr = BytecodeInstruction
+        I = BytecodeInstruction
         out = self._run39([
-            Instr(0, "LOAD_NAME",         0, "n",  0, None, False),
-            Instr(0, "LOAD_CONST",        1,  5,   2, None, False),
-            Instr(0, "COMPARE_OP",        0, "<",  4, None, False),
-            Instr(0, "POP_JUMP_IF_FALSE", 14, 14,  6, None, False),
-            Instr(0, "LOAD_CONST",        2,  1,   8, None, False),
-            Instr(0, "STORE_NAME",        0, "n", 10, None, False),
-            Instr(0, "JUMP_ABSOLUTE",     0,  0,  12, None, False),
-            Instr(0, "RETURN_VALUE",      None, None, 14, None, True),
+            I(0, "LOAD_NAME",         0, "n",  0, None, False),
+            I(0, "LOAD_CONST",        1,  5,   2, None, False),
+            I(0, "COMPARE_OP",        0, "<",  4, None, False),
+            I(0, "POP_JUMP_IF_FALSE", 14, 14,  6, None, False),
+            I(0, "LOAD_CONST",        2,  1,   8, None, False),
+            I(0, "STORE_NAME",        0, "n", 10, None, False),
+            I(0, "JUMP_ABSOLUTE",     0,  0,  12, None, False),
+            I(0, "RETURN_VALUE",      None, None, 14, None, True),
         ])
         self.assertIn("while", out, f"Expected 'while', got:\n{out}")
         self.assertNotIn("if n", out,
@@ -1388,18 +1387,18 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
         _prescan_while_loops must detect the guard POP_JUMP_IF_FALSE even
         when the back-edge is JUMP_ABSOLUTE (not JUMP_BACKWARD).
         """
-        Instr = BytecodeInstruction
+        I = BytecodeInstruction
         code = compile("pass", "<test>", "exec")
         dec = Decompiler39(code)
         dec.instructions = [
-            Instr(0, "LOAD_NAME",         0, "n",  0, None, False),
-            Instr(0, "LOAD_CONST",        1,  5,   2, None, False),
-            Instr(0, "COMPARE_OP",        0, "<",  4, None, False),
-            Instr(0, "POP_JUMP_IF_FALSE", 14, 14,  6, None, False),
-            Instr(0, "LOAD_CONST",        2,  1,   8, None, False),
-            Instr(0, "STORE_NAME",        0, "n", 10, None, False),
-            Instr(0, "JUMP_ABSOLUTE",     0,  0,  12, None, False),
-            Instr(0, "RETURN_VALUE",      None, None, 14, None, True),
+            I(0, "LOAD_NAME",         0, "n",  0, None, False),
+            I(0, "LOAD_CONST",        1,  5,   2, None, False),
+            I(0, "COMPARE_OP",        0, "<",  4, None, False),
+            I(0, "POP_JUMP_IF_FALSE", 14, 14,  6, None, False),
+            I(0, "LOAD_CONST",        2,  1,   8, None, False),
+            I(0, "STORE_NAME",        0, "n", 10, None, False),
+            I(0, "JUMP_ABSOLUTE",     0,  0,  12, None, False),
+            I(0, "RETURN_VALUE",      None, None, 14, None, True),
         ]
         dec._while_body_offsets = set()
         dec._while_header_targets = {}
@@ -1416,19 +1415,19 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
         loop back-edge.  It should behave like JUMP_FORWARD — closing an
         if-block and not emitting 'while'.
         """
-        Instr = BytecodeInstruction
+        I = BytecodeInstruction
         # Simple if/else: condition -> if-body -> JUMP_ABSOLUTE(end) -> else-body
         out = self._run39([
-            Instr(0, "LOAD_CONST",        0, 1,    0, None, False),
-            Instr(0, "STORE_NAME",        0, "x",  2, None, False),
-            Instr(0, "LOAD_NAME",         0, "x",  4, None, False),
-            Instr(0, "LOAD_CONST",        1, 0,    6, None, False),
-            Instr(0, "COMPARE_OP",        4, ">",  8, None, False),
-            Instr(0, "POP_JUMP_IF_FALSE", 16, 16, 10, None, False),
-            Instr(0, "LOAD_CONST",        2, 1,   12, None, False),
-            Instr(0, "STORE_NAME",        1, "y", 14, None, False),
-            Instr(0, "JUMP_ABSOLUTE",     18, 18, 16, None, False),  # forward!
-            Instr(0, "RETURN_VALUE",      None, None, 18, None, True),
+            I(0, "LOAD_CONST",        0, 1,    0, None, False),
+            I(0, "STORE_NAME",        0, "x",  2, None, False),
+            I(0, "LOAD_NAME",         0, "x",  4, None, False),
+            I(0, "LOAD_CONST",        1, 0,    6, None, False),
+            I(0, "COMPARE_OP",        4, ">",  8, None, False),
+            I(0, "POP_JUMP_IF_FALSE", 16, 16, 10, None, False),
+            I(0, "LOAD_CONST",        2, 1,   12, None, False),
+            I(0, "STORE_NAME",        1, "y", 14, None, False),
+            I(0, "JUMP_ABSOLUTE",     18, 18, 16, None, False),  # forward!
+            I(0, "RETURN_VALUE",      None, None, 18, None, True),
         ])
         self.assertNotIn("while", out, f"Forward JUMP_ABSOLUTE should not produce 'while':\n{out}")
 
@@ -1461,15 +1460,15 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
         # Synthetic: inject instructions where POP_JUMP_IF_FALSE targets offset 8.
         # Use correct 3.9 opcode numbers so _disassemble() resolves them properly:
         #   LOAD_CONST=100, POP_JUMP_IF_FALSE=114, STORE_NAME=90, RETURN_VALUE=83
-        Instr = BytecodeInstruction
+        I = BytecodeInstruction
         code = compile("pass", "<test>", "exec")
         dec39 = Decompiler39(code)
         raw = [
-            Instr(100, "LOAD_CONST",        0, 1,    0, None, False),
-            Instr(114, "POP_JUMP_IF_FALSE", 8, 8,    2, None, False),
-            Instr(100, "LOAD_CONST",        1, 2,    4, None, False),
-            Instr(90,  "STORE_NAME",        0, "y",  6, None, False),
-            Instr(83,  "RETURN_VALUE",      None, None, 8, None, False),  # should become True
+            I(100, "LOAD_CONST",        0, 1,    0, None, False),
+            I(114, "POP_JUMP_IF_FALSE", 8, 8,    2, None, False),
+            I(100, "LOAD_CONST",        1, 2,    4, None, False),
+            I(90,  "STORE_NAME",        0, "y",  6, None, False),
+            I(83,  "RETURN_VALUE",      None, None, 8, None, False),  # should become True
         ]
         dec39.instructions = raw
         dec39.code_obj = type("C", (), {
@@ -1492,7 +1491,7 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
         self.assertIsNotNone(instr_at_8, "No instruction at offset 8")
         self.assertTrue(
             instr_at_8.is_jump_target,
-            "Offset 8 (target of POP_JUMP_IF_FALSE) should be is_jump_target=True",
+            f"Offset 8 (target of POP_JUMP_IF_FALSE) should be is_jump_target=True",
         )
 
     # ------------------------------------------------------------------
@@ -1504,24 +1503,24 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
         3.9 try/except ValueError (no binding) must emit 'except ValueError:'
         via the DUP_TOP + COMPARE_OP("exception match") handler.
         """
-        Instr = BytecodeInstruction
+        I = BytecodeInstruction
         out = self._run39([
-            Instr(0, "SETUP_FINALLY",    None, 16,  0, None, False),
-            Instr(0, "LOAD_CONST",       0,    42,  2, None, False),
-            Instr(0, "STORE_NAME",       0,    "x", 4, None, False),
-            Instr(0, "POP_BLOCK",        None, None,6, None, False),
-            Instr(0, "JUMP_FORWARD",     None, 32,  8, None, False),
+            I(0, "SETUP_FINALLY",    None, 16,  0, None, False),
+            I(0, "LOAD_CONST",       0,    42,  2, None, False),
+            I(0, "STORE_NAME",       0,    "x", 4, None, False),
+            I(0, "POP_BLOCK",        None, None,6, None, False),
+            I(0, "JUMP_FORWARD",     None, 32,  8, None, False),
             # Handler at offset 16:
-            Instr(0, "DUP_TOP",          None, None,16, None, True),
-            Instr(0, "LOAD_NAME",        1, "ValueError", 18, None, False),
-            Instr(0, "COMPARE_OP",       10, "exception match", 20, None, False),
-            Instr(0, "POP_JUMP_IF_FALSE",28, 28, 22, None, False),
-            Instr(0, "POP_TOP",          None, None, 24, None, False),  # exc type
-            Instr(0, "POP_TOP",          None, None, 26, None, False),  # traceback
-            Instr(0, "LOAD_CONST",       2, 0,     28, None, False),
-            Instr(0, "STORE_NAME",       0, "x",   30, None, False),
-            Instr(0, "POP_EXCEPT",       None, None, 32, None, False),
-            Instr(0, "RETURN_VALUE",     None, None, 34, None, False),
+            I(0, "DUP_TOP",          None, None,16, None, True),
+            I(0, "LOAD_NAME",        1, "ValueError", 18, None, False),
+            I(0, "COMPARE_OP",       10, "exception match", 20, None, False),
+            I(0, "POP_JUMP_IF_FALSE",28, 28, 22, None, False),
+            I(0, "POP_TOP",          None, None, 24, None, False),  # exc type
+            I(0, "POP_TOP",          None, None, 26, None, False),  # traceback
+            I(0, "LOAD_CONST",       2, 0,     28, None, False),
+            I(0, "STORE_NAME",       0, "x",   30, None, False),
+            I(0, "POP_EXCEPT",       None, None, 32, None, False),
+            I(0, "RETURN_VALUE",     None, None, 34, None, False),
         ])
         self.assertIn("try:", out, f"try: missing:\n{out}")
         self.assertIn("except ValueError:", out,
@@ -1534,24 +1533,24 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
         3.9 'except ValueError as e:' must bind the name correctly via the
         DUP_TOP pattern.  The STORE_NAME 'e' immediately follows the POPs.
         """
-        Instr = BytecodeInstruction
+        I = BytecodeInstruction
         out = self._run39([
-            Instr(0, "SETUP_FINALLY",    None, 16,  0, None, False),
-            Instr(0, "LOAD_CONST",       0,    42,  2, None, False),
-            Instr(0, "STORE_NAME",       0,    "x", 4, None, False),
-            Instr(0, "POP_BLOCK",        None, None,6, None, False),
-            Instr(0, "JUMP_FORWARD",     None, 36,  8, None, False),
+            I(0, "SETUP_FINALLY",    None, 16,  0, None, False),
+            I(0, "LOAD_CONST",       0,    42,  2, None, False),
+            I(0, "STORE_NAME",       0,    "x", 4, None, False),
+            I(0, "POP_BLOCK",        None, None,6, None, False),
+            I(0, "JUMP_FORWARD",     None, 36,  8, None, False),
             # Handler at offset 16:
-            Instr(0, "DUP_TOP",          None, None,16, None, True),
-            Instr(0, "LOAD_NAME",        1, "ValueError", 18, None, False),
-            Instr(0, "COMPARE_OP",       10, "exception match", 20, None, False),
-            Instr(0, "POP_JUMP_IF_FALSE",30, 30, 22, None, False),
-            Instr(0, "POP_TOP",          None, None, 24, None, False),  # exc type
-            Instr(0, "STORE_NAME",       2, "e",   26, None, False),   # 'as e' binding
-            Instr(0, "LOAD_CONST",       3, 0,     28, None, False),
-            Instr(0, "STORE_NAME",       0, "x",   30, None, False),
-            Instr(0, "POP_EXCEPT",       None, None, 32, None, False),
-            Instr(0, "RETURN_VALUE",     None, None, 34, None, False),
+            I(0, "DUP_TOP",          None, None,16, None, True),
+            I(0, "LOAD_NAME",        1, "ValueError", 18, None, False),
+            I(0, "COMPARE_OP",       10, "exception match", 20, None, False),
+            I(0, "POP_JUMP_IF_FALSE",30, 30, 22, None, False),
+            I(0, "POP_TOP",          None, None, 24, None, False),  # exc type
+            I(0, "STORE_NAME",       2, "e",   26, None, False),   # 'as e' binding
+            I(0, "LOAD_CONST",       3, 0,     28, None, False),
+            I(0, "STORE_NAME",       0, "x",   30, None, False),
+            I(0, "POP_EXCEPT",       None, None, 32, None, False),
+            I(0, "RETURN_VALUE",     None, None, 34, None, False),
         ])
         self.assertIn("except ValueError as e:", out,
                       f"'as e' binding missing:\n{out}")
@@ -1559,26 +1558,26 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
 
     def test_try_except_body_indented_correctly(self):
         """Handler body must be indented one level inside the except block."""
-        Instr = BytecodeInstruction
+        I = BytecodeInstruction
         out = self._run39([
-            Instr(0, "SETUP_FINALLY",    None, 12,  0, None, False),
-            Instr(0, "LOAD_CONST",       0, 99,     2, None, False),
-            Instr(0, "STORE_NAME",       0, "x",    4, None, False),
-            Instr(0, "POP_BLOCK",        None, None, 6, None, False),
-            Instr(0, "JUMP_FORWARD",     None, 28,   8, None, False),
-            Instr(0, "DUP_TOP",          None, None,12, None, True),
-            Instr(0, "LOAD_NAME",        1, "OSError",14, None, False),
-            Instr(0, "COMPARE_OP",       10, "exception match", 16, None, False),
-            Instr(0, "POP_JUMP_IF_FALSE",26, 26, 18, None, False),
-            Instr(0, "POP_TOP",          None, None, 20, None, False),
-            Instr(0, "POP_TOP",          None, None, 22, None, False),
-            Instr(0, "LOAD_CONST",       2, 0,      24, None, False),
-            Instr(0, "STORE_NAME",       0, "x",    26, None, False),
-            Instr(0, "POP_EXCEPT",       None, None, 28, None, False),
-            Instr(0, "RETURN_VALUE",     None, None, 30, None, False),
+            I(0, "SETUP_FINALLY",    None, 12,  0, None, False),
+            I(0, "LOAD_CONST",       0, 99,     2, None, False),
+            I(0, "STORE_NAME",       0, "x",    4, None, False),
+            I(0, "POP_BLOCK",        None, None, 6, None, False),
+            I(0, "JUMP_FORWARD",     None, 28,   8, None, False),
+            I(0, "DUP_TOP",          None, None,12, None, True),
+            I(0, "LOAD_NAME",        1, "OSError",14, None, False),
+            I(0, "COMPARE_OP",       10, "exception match", 16, None, False),
+            I(0, "POP_JUMP_IF_FALSE",26, 26, 18, None, False),
+            I(0, "POP_TOP",          None, None, 20, None, False),
+            I(0, "POP_TOP",          None, None, 22, None, False),
+            I(0, "LOAD_CONST",       2, 0,      24, None, False),
+            I(0, "STORE_NAME",       0, "x",    26, None, False),
+            I(0, "POP_EXCEPT",       None, None, 28, None, False),
+            I(0, "RETURN_VALUE",     None, None, 30, None, False),
         ])
         lines = out.splitlines()
-        body_lines = [line for line in lines if "x = 0" in line or "x = 99" in line]
+        body_lines = [l for l in lines if "x = 0" in l or "x = 99" in l]
         for line in body_lines:
             self.assertTrue(
                 line.startswith("    "),
@@ -1590,15 +1589,15 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
         A lone DUP_TOP not followed by COMPARE_OP('exception match')
         must NOT emit an except header — it should duplicate the stack top.
         """
-        Instr = BytecodeInstruction
+        I = BytecodeInstruction
         code = compile("pass", "<test>", "exec")
         dec = Decompiler39(code)
         dec.instructions = [
-            Instr(0, "LOAD_CONST", 0, 42,    0, None, False),
-            Instr(0, "DUP_TOP",    None, None, 2, None, False),
-            Instr(0, "STORE_NAME", 0, "x",   4, None, False),
-            Instr(0, "POP_TOP",    None, None, 6, None, False),
-            Instr(0, "RETURN_VALUE", None, None, 8, None, False),
+            I(0, "LOAD_CONST", 0, 42,    0, None, False),
+            I(0, "DUP_TOP",    None, None, 2, None, False),
+            I(0, "STORE_NAME", 0, "x",   4, None, False),
+            I(0, "POP_TOP",    None, None, 6, None, False),
+            I(0, "RETURN_VALUE", None, None, 8, None, False),
         ]
         dec._while_body_offsets = set()
         dec._while_header_targets = {}
@@ -1620,52 +1619,52 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
 
     def test_inplace_add_emits_augassign(self):
         """INPLACE_ADD followed by STORE_NAME must emit 'x += 3', not 'x = (x + 3)'."""
-        Instr = BytecodeInstruction
+        I = BytecodeInstruction
         out = self._run39([
-            Instr(0, "LOAD_CONST",   0,  1,   0, None, False),
-            Instr(0, "STORE_NAME",   0, "x",  2, None, False),
-            Instr(0, "LOAD_NAME",    0, "x",  4, None, False),
-            Instr(0, "LOAD_CONST",   1,  3,   6, None, False),
-            Instr(0, "INPLACE_ADD",  None, None, 8, None, False),
-            Instr(0, "STORE_NAME",   0, "x", 10, None, False),
-            Instr(0, "RETURN_VALUE", None, None, 12, None, False),
+            I(0, "LOAD_CONST",   0,  1,   0, None, False),
+            I(0, "STORE_NAME",   0, "x",  2, None, False),
+            I(0, "LOAD_NAME",    0, "x",  4, None, False),
+            I(0, "LOAD_CONST",   1,  3,   6, None, False),
+            I(0, "INPLACE_ADD",  None, None, 8, None, False),
+            I(0, "STORE_NAME",   0, "x", 10, None, False),
+            I(0, "RETURN_VALUE", None, None, 12, None, False),
         ])
         self.assertIn("x += 3", out, f"x += 3 not found:\n{out}")
         self.assertNotIn("x = (x", out, f"Wrong 'x = (x ...)' form present:\n{out}")
 
     def test_inplace_sub_emits_augassign(self):
         """INPLACE_SUBTRACT -> 'x -= 1'."""
-        Instr = BytecodeInstruction
+        I = BytecodeInstruction
         out = self._run39([
-            Instr(0, "LOAD_NAME",       0, "x",  0, None, False),
-            Instr(0, "LOAD_CONST",      0,  1,   2, None, False),
-            Instr(0, "INPLACE_SUBTRACT",None,None,4, None, False),
-            Instr(0, "STORE_NAME",      0, "x",  6, None, False),
-            Instr(0, "RETURN_VALUE",    None, None, 8, None, False),
+            I(0, "LOAD_NAME",       0, "x",  0, None, False),
+            I(0, "LOAD_CONST",      0,  1,   2, None, False),
+            I(0, "INPLACE_SUBTRACT",None,None,4, None, False),
+            I(0, "STORE_NAME",      0, "x",  6, None, False),
+            I(0, "RETURN_VALUE",    None, None, 8, None, False),
         ])
         self.assertIn("x -= 1", out, f"x -= 1 not found:\n{out}")
 
     def test_inplace_mul_emits_augassign(self):
         """INPLACE_MULTIPLY -> 'x *= 2'."""
-        Instr = BytecodeInstruction
+        I = BytecodeInstruction
         out = self._run39([
-            Instr(0, "LOAD_NAME",        0, "x",  0, None, False),
-            Instr(0, "LOAD_CONST",       0,  2,   2, None, False),
-            Instr(0, "INPLACE_MULTIPLY", None,None,4, None, False),
-            Instr(0, "STORE_NAME",       0, "x",  6, None, False),
-            Instr(0, "RETURN_VALUE",     None, None, 8, None, False),
+            I(0, "LOAD_NAME",        0, "x",  0, None, False),
+            I(0, "LOAD_CONST",       0,  2,   2, None, False),
+            I(0, "INPLACE_MULTIPLY", None,None,4, None, False),
+            I(0, "STORE_NAME",       0, "x",  6, None, False),
+            I(0, "RETURN_VALUE",     None, None, 8, None, False),
         ])
         self.assertIn("x *= 2", out, f"x *= 2 not found:\n{out}")
 
     def test_inplace_xor_emits_augassign(self):
         """INPLACE_XOR -> 'x ^= 5'. Regression guard against += mapping."""
-        Instr = BytecodeInstruction
+        I = BytecodeInstruction
         out = self._run39([
-            Instr(0, "LOAD_NAME",    0, "x",  0, None, False),
-            Instr(0, "LOAD_CONST",   0,  5,   2, None, False),
-            Instr(0, "INPLACE_XOR",  None,None,4, None, False),
-            Instr(0, "STORE_NAME",   0, "x",  6, None, False),
-            Instr(0, "RETURN_VALUE", None, None, 8, None, False),
+            I(0, "LOAD_NAME",    0, "x",  0, None, False),
+            I(0, "LOAD_CONST",   0,  5,   2, None, False),
+            I(0, "INPLACE_XOR",  None,None,4, None, False),
+            I(0, "STORE_NAME",   0, "x",  6, None, False),
+            I(0, "RETURN_VALUE", None, None, 8, None, False),
         ])
         self.assertIn("x ^= 5", out, f"x ^= 5 not found:\n{out}")
         self.assertNotIn("x += 5", out, f"INPLACE_XOR wrongly emitted +=:\n{out}")
@@ -1675,16 +1674,16 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
         INPLACE_* not followed by a matching STORE must push an expression
         string (not crash and not emit a bare statement).
         """
-        Instr = BytecodeInstruction
+        I = BytecodeInstruction
         code = compile("pass", "<test>", "exec")
         dec = Decompiler39(code)
         dec.instructions = [
-            Instr(0, "LOAD_NAME",    0, "x",  0, None, False),
-            Instr(0, "LOAD_CONST",   0,  1,   2, None, False),
-            Instr(0, "INPLACE_ADD",  None, None, 4, None, False),
+            I(0, "LOAD_NAME",    0, "x",  0, None, False),
+            I(0, "LOAD_CONST",   0,  1,   2, None, False),
+            I(0, "INPLACE_ADD",  None, None, 4, None, False),
             # No STORE_NAME — stack top is a different name
-            Instr(0, "STORE_NAME",   1, "y",  6, None, False),  # store to y, not x
-            Instr(0, "RETURN_VALUE", None, None, 8, None, False),
+            I(0, "STORE_NAME",   1, "y",  6, None, False),  # store to y, not x
+            I(0, "RETURN_VALUE", None, None, 8, None, False),
         ]
         dec._while_body_offsets = set()
         dec._while_header_targets = {}
@@ -1707,22 +1706,22 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
         End-to-end: 'n = 0; while n < 3: n += 1' with 3.9 bytecode.
         Guard (POP_JUMP_IF_FALSE) + back-edge (JUMP_ABSOLUTE) + INPLACE_ADD.
         """
-        Instr = BytecodeInstruction
+        I = BytecodeInstruction
         out = self._run39([
-            Instr(0, "LOAD_CONST",       0, 0,    0, None, False),
-            Instr(0, "STORE_NAME",       0, "n",  2, None, False),
+            I(0, "LOAD_CONST",       0, 0,    0, None, False),
+            I(0, "STORE_NAME",       0, "n",  2, None, False),
             # condition at offset 4 — JUMP_ABSOLUTE targets here
-            Instr(0, "LOAD_NAME",        0, "n",  4, None, False),
-            Instr(0, "LOAD_CONST",       1, 3,    6, None, False),
-            Instr(0, "COMPARE_OP",       0, "<",  8, None, False),
-            Instr(0, "POP_JUMP_IF_FALSE",18, 18, 10, None, False),
+            I(0, "LOAD_NAME",        0, "n",  4, None, False),
+            I(0, "LOAD_CONST",       1, 3,    6, None, False),
+            I(0, "COMPARE_OP",       0, "<",  8, None, False),
+            I(0, "POP_JUMP_IF_FALSE",18, 18, 10, None, False),
             # body at offset 12
-            Instr(0, "LOAD_NAME",        0, "n", 12, None, False),
-            Instr(0, "LOAD_CONST",       2, 1,   14, None, False),
-            Instr(0, "INPLACE_ADD",      None, None, 16, None, False),
-            Instr(0, "STORE_NAME",       0, "n", 18, None, False),
-            Instr(0, "JUMP_ABSOLUTE",    4, 4,   20, None, False),
-            Instr(0, "RETURN_VALUE",     None, None, 22, None, True),
+            I(0, "LOAD_NAME",        0, "n", 12, None, False),
+            I(0, "LOAD_CONST",       2, 1,   14, None, False),
+            I(0, "INPLACE_ADD",      None, None, 16, None, False),
+            I(0, "STORE_NAME",       0, "n", 18, None, False),
+            I(0, "JUMP_ABSOLUTE",    4, 4,   20, None, False),
+            I(0, "RETURN_VALUE",     None, None, 22, None, True),
         ])
         self.assertIn("n = 0", out, f"init missing:\n{out}")
         self.assertIn("while", out, f"while missing:\n{out}")
@@ -1733,24 +1732,24 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
         """
         End-to-end: 3.9-style try/except that sets x=42 in try, x=0 on error.
         """
-        Instr = BytecodeInstruction
+        I = BytecodeInstruction
         out = self._run39([
-            Instr(0, "SETUP_FINALLY",    None, 14,  0, None, False),
-            Instr(0, "LOAD_CONST",       0, 42,     2, None, False),
-            Instr(0, "STORE_NAME",       0, "x",    4, None, False),
-            Instr(0, "POP_BLOCK",        None, None, 6, None, False),
-            Instr(0, "JUMP_FORWARD",     None, 30,   8, None, False),
+            I(0, "SETUP_FINALLY",    None, 14,  0, None, False),
+            I(0, "LOAD_CONST",       0, 42,     2, None, False),
+            I(0, "STORE_NAME",       0, "x",    4, None, False),
+            I(0, "POP_BLOCK",        None, None, 6, None, False),
+            I(0, "JUMP_FORWARD",     None, 30,   8, None, False),
             # handler at 14:
-            Instr(0, "DUP_TOP",          None, None, 14, None, True),
-            Instr(0, "LOAD_NAME",        1, "ValueError", 16, None, False),
-            Instr(0, "COMPARE_OP",       10, "exception match", 18, None, False),
-            Instr(0, "POP_JUMP_IF_FALSE",28, 28, 20, None, False),
-            Instr(0, "POP_TOP",          None, None, 22, None, False),
-            Instr(0, "POP_TOP",          None, None, 24, None, False),
-            Instr(0, "LOAD_CONST",       2, 0,      26, None, False),
-            Instr(0, "STORE_NAME",       0, "x",    28, None, False),
-            Instr(0, "POP_EXCEPT",       None, None, 30, None, False),
-            Instr(0, "RETURN_VALUE",     None, None, 32, None, False),
+            I(0, "DUP_TOP",          None, None, 14, None, True),
+            I(0, "LOAD_NAME",        1, "ValueError", 16, None, False),
+            I(0, "COMPARE_OP",       10, "exception match", 18, None, False),
+            I(0, "POP_JUMP_IF_FALSE",28, 28, 20, None, False),
+            I(0, "POP_TOP",          None, None, 22, None, False),
+            I(0, "POP_TOP",          None, None, 24, None, False),
+            I(0, "LOAD_CONST",       2, 0,      26, None, False),
+            I(0, "STORE_NAME",       0, "x",    28, None, False),
+            I(0, "POP_EXCEPT",       None, None, 30, None, False),
+            I(0, "RETURN_VALUE",     None, None, 32, None, False),
         ])
         self.assertIn("try:", out)
         self.assertIn("except ValueError:", out)
@@ -1758,6 +1757,722 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
         self.assertIn("x = 0", out)
         self.assertNotIn("DUP_TOP", out)
         self.assertNotIn("COMPARE_OP", out)
+
+
+# ---------------------------------------------------------------------------
+# Token Hamming distance (check_coherency.py)
+# ---------------------------------------------------------------------------
+
+class TestTokenHamming(unittest.TestCase):
+    """
+    Unit tests for the Token Hamming distance dimension added to
+    check_coherency.py.
+
+    These tests import the helpers directly and exercise them with
+    controlled synthetic inputs so we can assert exact expected values
+    without compiling/decompiling any real .pyc files.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        """Import check_coherency as a module via sys.path."""
+        import sys, importlib, os
+        cc_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),"..", "debug")
+        if cc_dir not in sys.path:
+            sys.path.insert(0, cc_dir)
+        cls.cc = importlib.import_module("check_coherency")
+
+    # ------------------------------------------------------------------
+    # _line_tokenise
+    # ------------------------------------------------------------------
+
+    def test_line_tokenise_identifiers_and_operators(self):
+        """Basic identifiers, operators, and literals are all captured."""
+        toks = self.cc._line_tokenise("x = y + 1")
+        self.assertEqual(toks, ["x", "=", "y", "+", "1"])
+
+    def test_line_tokenise_multichar_operators(self):
+        """Multi-char operators like += >> ** are kept as single tokens."""
+        toks = self.cc._line_tokenise("x += y >> 2")
+        self.assertIn("+=", toks)
+        self.assertIn(">>", toks)
+
+    def test_line_tokenise_string_literal(self):
+        """A quoted string is a single token."""
+        toks = self.cc._line_tokenise('name = "hello"')
+        self.assertIn('"hello"', toks)
+        # Should not be split into individual characters
+        self.assertNotIn("h", toks)
+
+    def test_line_tokenise_empty_and_comment(self):
+        """Empty string returns empty list."""
+        self.assertEqual(self.cc._line_tokenise(""), [])
+
+    def test_line_tokenise_keyword(self):
+        """Python keywords are captured as tokens."""
+        toks = self.cc._line_tokenise("if x > 0:")
+        self.assertIn("if", toks)
+        self.assertIn("x", toks)
+        self.assertIn(">", toks)
+
+    # ------------------------------------------------------------------
+    # _hamming_score_line_aligned — core metric
+    # ------------------------------------------------------------------
+
+    def test_identical_lines_score_one(self):
+        """Identical normalised line lists must give score = 1.0."""
+        lines = ["x = 1", "y = x + 2", "return y"]
+        score, matched, total, flips, _ = self.cc._hamming_score_line_aligned(
+            lines, lines
+        )
+        self.assertEqual(score, 1.0)
+        self.assertEqual(flips, 0)
+        self.assertEqual(matched, total)
+
+    def test_empty_orig_gives_one(self):
+        """Empty original → perfect score (nothing to flip)."""
+        score, matched, total, flips, _ = self.cc._hamming_score_line_aligned(
+            [], ["x = 1"]
+        )
+        self.assertEqual(score, 1.0)
+        self.assertEqual(total, 0)
+
+    def test_empty_dec_gives_zero(self):
+        """No decompiled output → every original token is a flip → score 0."""
+        score, _, total, flips, _ = self.cc._hamming_score_line_aligned(
+            ["x = 1", "y = 2"], []
+        )
+        self.assertEqual(score, 0.0)
+        self.assertEqual(flips, total)
+
+    def test_single_token_substitution(self):
+        """Replacing one name token lowers the score below 1.0."""
+        orig = ["result = compute(x, y)"]
+        dec  = ["result = compute(a, y)"]   # 'x' replaced by 'a'
+        score, _, total, flips, _ = self.cc._hamming_score_line_aligned(orig, dec)
+        self.assertLess(score, 1.0)
+        self.assertGreater(score, 0.5, "One flip out of many tokens should not tank score")
+        self.assertEqual(flips, 1, "Exactly one token should be flipped")
+
+    def test_extra_parens_are_zero_cost(self):
+        """
+        Decompiler-inserted grouping parens must not penalise the score.
+
+        orig:  y = x + 1
+        dec:   y = (x + 1)    <- extra ( and ) inserted by decompiler
+
+        The extra ( and ) are insertions into the dec stream; the LCS still
+        matches all 5 original tokens, so flips == 0.
+        """
+        orig = ["y = x + 1"]
+        dec  = ["y = (x + 1)"]
+        score, _, total, flips, _ = self.cc._hamming_score_line_aligned(orig, dec)
+        self.assertEqual(flips, 0, "Extra grouping parens must not flip any original token")
+        self.assertEqual(score, 1.0)
+
+    def test_pass_insertion_is_zero_cost(self):
+        """A 'pass' line added by the decompiler should not cost any flips."""
+        orig = ["class Foo:"]
+        dec  = ["class Foo:", "pass"]
+        score, _, total, flips, _ = self.cc._hamming_score_line_aligned(orig, dec)
+        self.assertEqual(flips, 0)
+        self.assertEqual(score, 1.0)
+
+    def test_half_lines_missing_scores_below_half(self):
+        """Dropping half the lines should give a score significantly below 1.0."""
+        orig = ["x = 1", "y = 2", "z = 3", "w = 4"]
+        dec  = ["x = 1", "y = 2"]                    # half dropped
+        score, _, _, _, _ = self.cc._hamming_score_line_aligned(orig, dec)
+        self.assertLess(score, 0.75)
+
+    def test_flip_sample_populated_on_mismatch(self):
+        """flip_sample must be non-empty when there are genuine mismatches."""
+        orig = ["foo = bar(x, y, z)"]
+        dec  = ["baz = qux(a, b, c)"]    # all names wrong
+        _, _, _, flips, flip_sample = self.cc._hamming_score_line_aligned(orig, dec)
+        self.assertGreater(flips, 0)
+        self.assertGreater(len(flip_sample), 0)
+
+    def test_score_monotone_with_accuracy(self):
+        """
+        More accurately decompiled code must score higher than less accurate.
+
+        perfect ≥ two_errors ≥ many_errors (strictly for these examples).
+        """
+        orig = ["result = compute_value(alpha, beta, gamma)"]
+        perfect     = ["result = compute_value(alpha, beta, gamma)"]
+        two_errors  = ["result = compute_value(alpha, XXXX, gamma)"]
+        many_errors = ["result = YYYYY(alpha, XXXX, ZZZZ)"]
+
+        def s(dec):
+            score, *_ = self.cc._hamming_score_line_aligned(orig, dec)
+            return score
+
+        self.assertGreater(s(perfect), s(two_errors))
+        self.assertGreater(s(two_errors), s(many_errors))
+
+    # ------------------------------------------------------------------
+    # score_token_hamming — DimensionResult wrapper
+    # ------------------------------------------------------------------
+
+    def test_dimension_name_and_weight(self):
+        """DimensionResult must have the expected name and weight."""
+        result = self.cc.score_token_hamming("x = 1\n", "x = 1\n")
+        self.assertEqual(result.name, "Token Hamming")
+        self.assertAlmostEqual(result.weight, 0.12, places=5)
+
+    def test_identical_source_perfect_score(self):
+        """Identical original and decompiled text must produce score == 1.0."""
+        src = "def f(x):\n    return x + 1\n"
+        result = self.cc.score_token_hamming(src, src)
+        self.assertEqual(result.score, 1.0)
+        self.assertIn("perfect", result.detail)
+
+    def test_completely_different_source_low_score(self):
+        """Completely unrelated output must score well below 0.5."""
+        orig = "def compute(x, y):\n    return x * y + x - y\n"
+        dec  = "import os\nfoo = bar\n"
+        result = self.cc.score_token_hamming(orig, dec)
+        self.assertLess(result.score, 0.5)
+
+    def test_score_in_unit_interval(self):
+        """Score must always be in [0.0, 1.0]."""
+        pairs = [
+            ("x = 1\n", "x = 1\n"),
+            ("x = 1\n", "y = 2\n"),
+            ("def f():\n    pass\n", ""),
+            ("", "x = 1\n"),
+        ]
+        for orig, dec in pairs:
+            result = self.cc.score_token_hamming(orig, dec)
+            self.assertGreaterEqual(result.score, 0.0,
+                                    f"Score below 0 for {orig!r} vs {dec!r}")
+            self.assertLessEqual(result.score, 1.0,
+                                 f"Score above 1 for {orig!r} vs {dec!r}")
+
+    def test_empty_original_returns_perfect(self):
+        """No tokens to compare → score 1.0 (vacuously perfect)."""
+        result = self.cc.score_token_hamming("", "x = 1\ny = 2\n")
+        self.assertEqual(result.score, 1.0)
+
+    def test_quote_normalisation_is_zero_cost(self):
+        """
+        Single-quote to double-quote conversion must not flip any tokens.
+        Both are normalised to double quotes before tokenising.
+        """
+        orig = "name = 'hello'\n"
+        dec  = 'name = "hello"\n'
+        result = self.cc.score_token_hamming(orig, dec)
+        self.assertEqual(result.score, 1.0,
+                         "Quote normalisation must not count as a flip")
+
+    def test_detail_contains_flip_count(self):
+        """Detail string for a mismatching pair must mention flip count."""
+        orig = "def add(x, y):\n    return x + y\n"
+        dec  = "def add(a, b):\n    return a + b\n"    # x→a, y→b everywhere
+        result = self.cc.score_token_hamming(orig, dec)
+        if result.score < 1.0:
+            self.assertIn("flip", result.detail)
+
+    def test_extra_parens_in_full_text(self):
+        """
+        End-to-end check: a decompiler that wraps expressions in parens
+        must not be penalised.
+        """
+        orig = "x = 1\ny = x + 2\nz = y * 3\n"
+        dec  = "x = 1\ny = (x + 2)\nz = (y * 3)\n"
+        result = self.cc.score_token_hamming(orig, dec)
+        self.assertEqual(result.score, 1.0,
+                         "Grouping parens must not reduce Hamming score")
+
+    def test_annotation_stripping_is_zero_cost(self):
+        """
+        Type annotations stripped from function signatures must not
+        produce any flips against a decompiled output that lacks them.
+        """
+        orig = "def greet(name: str) -> str:\n    return name\n"
+        dec  = "def greet(name):\n    return name\n"
+        result = self.cc.score_token_hamming(orig, dec)
+        self.assertEqual(result.score, 1.0,
+                         "Annotation removal must not count as flips")
+
+    # ------------------------------------------------------------------
+    # Integration: weight sum consistency
+    # ------------------------------------------------------------------
+
+    def test_all_dimension_weights_sum_to_one(self):
+        """
+        All nine scoring dimensions must have weights that sum to exactly 1.0.
+        This guards against future rebalancing mistakes.
+        """
+        import py_compile, tempfile, os, textwrap
+        src = textwrap.dedent("""\
+            x = 1
+            y = x + 2
+        """)
+        with tempfile.NamedTemporaryFile(suffix=".py", mode="w", delete=False) as f:
+            f.write(src)
+            sp = f.name
+        try:
+            report = self.cc.score(sp)
+        finally:
+            os.unlink(sp)
+        total = sum(d.weight for d in report.dimensions)
+        self.assertAlmostEqual(total, 1.0, places=9,
+                               msg=f"Weights sum to {total}, not 1.0")
+
+    def test_hamming_dimension_present_in_report(self):
+        """
+        CoherencyReport must include a dimension named 'Token Hamming'.
+        """
+        import py_compile, tempfile, os
+        src = "x = 1\n"
+        with tempfile.NamedTemporaryFile(suffix=".py", mode="w", delete=False) as f:
+            f.write(src)
+            sp = f.name
+        try:
+            report = self.cc.score(sp)
+        finally:
+            os.unlink(sp)
+        names = [d.name for d in report.dimensions]
+        self.assertIn("Token Hamming", names)
+
+    def test_nine_dimensions_total(self):
+        """There must be exactly nine scoring dimensions in every report."""
+        import tempfile, os
+        src = "x = 1\n"
+        with tempfile.NamedTemporaryFile(suffix=".py", mode="w", delete=False) as f:
+            f.write(src)
+            sp = f.name
+        try:
+            report = self.cc.score(sp)
+        finally:
+            os.unlink(sp)
+        self.assertEqual(len(report.dimensions), 9,
+                         f"Expected 9 dimensions, got {len(report.dimensions)}: "
+                         f"{[d.name for d in report.dimensions]}")
+
+
+
+# ---------------------------------------------------------------------------
+# Output cleanliness and genexpr rendering
+# ---------------------------------------------------------------------------
+
+class TestOutputCleanliness(unittest.TestCase):
+    """
+    Tests for _strip_string_literals and score_cleanliness in check_coherency.
+
+    These tests import helpers directly from check_coherency so they exercise
+    the live implementation without any .pyc round-trip.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import sys, importlib, os
+        cc_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "debug"
+        )
+        if cc_dir not in sys.path:
+            sys.path.insert(0, cc_dir)
+        if "check_coherency" in sys.modules:
+            del sys.modules["check_coherency"]
+        cls.cc = importlib.import_module("check_coherency")
+
+    # ------------------------------------------------------------------
+    # _strip_string_literals
+    # ------------------------------------------------------------------
+
+    def test_strip_single_quote_content(self):
+        """Content inside single-quoted strings is blanked."""
+        result = self.cc._strip_string_literals("x = '_exc_match'")
+        self.assertNotIn("_exc_match", result)
+
+    def test_strip_double_quote_content(self):
+        """Content inside double-quoted strings is blanked."""
+        result = self.cc._strip_string_literals('x = "__build_class__"')
+        self.assertNotIn("__build_class__", result)
+
+    def test_strip_triple_quote_content(self):
+        """Content inside triple-quoted strings is blanked."""
+        result = self.cc._strip_string_literals('"""_exc_info is bad"""')
+        self.assertNotIn("_exc_info", result)
+
+    def test_strip_preserves_code_outside_strings(self):
+        """Tokens outside string literals are left intact."""
+        result = self.cc._strip_string_literals("if x == _exc_match:")
+        self.assertIn("_exc_match", result)
+        self.assertIn("if", result)
+
+    def test_strip_empty_passthrough(self):
+        """Empty input returns empty output."""
+        self.assertEqual(self.cc._strip_string_literals(""), "")
+
+    def test_strip_no_strings_passthrough(self):
+        """Text without string literals is returned unchanged."""
+        code = "if x > 0:\n    return x\n"
+        self.assertEqual(self.cc._strip_string_literals(code), code)
+
+    def test_strip_leaves_surrounding_structure(self):
+        """Brackets and operators outside the string content remain."""
+        result = self.cc._strip_string_literals("func('_exc_match', x)")
+        self.assertIn("func(", result)
+        self.assertIn(", x)", result)
+        self.assertNotIn("_exc_match", result)
+
+    # ------------------------------------------------------------------
+    # score_cleanliness — word-boundary matching for identifiers
+    # ------------------------------------------------------------------
+
+    def test_exc_match_bare_identifier_penalised(self):
+        """_exc_match as a standalone identifier triggers a penalty."""
+        dec = "x = _exc_match\nif _exc_match:\n    pass\n"
+        result = self.cc.score_cleanliness(dec, "")
+        self.assertLess(result.score, 1.0)
+        self.assertIn("_exc_match", result.detail)
+
+    def test_exc_match_as_substring_of_longer_name_not_penalised(self):
+        """
+        _exc_match embedded inside a longer identifier such as
+        _has_exc_match_handler must NOT trigger a word-boundary penalty.
+        """
+        dec = "def _has_exc_match_handler(self):\n    return False\n"
+        result = self.cc.score_cleanliness(dec, "")
+        self.assertNotIn("_exc_match", result.detail,
+                         f"Substring false positive: {result.detail}")
+
+    def test_exc_info_in_longer_method_name_not_penalised(self):
+        """
+        _exc_info inside _find_push_exc_info_offset is a legitimate method
+        name, not a decompiler artefact.  Word-boundary matching must
+        distinguish them.
+        """
+        dec = "def _find_push_exc_info_offset(self):\n    return -1\n"
+        result = self.cc.score_cleanliness(dec, "")
+        self.assertNotIn("_exc_info", result.detail,
+                         f"Substring false positive from method name: {result.detail}")
+
+    def test_build_class_in_string_literal_not_penalised(self):
+        """
+        __build_class__ inside a quoted string is legitimate comparison code
+        and must NOT be penalised.
+        """
+        dec = "if func == '__build_class__':\n    pass\n"
+        result = self.cc.score_cleanliness(dec, "")
+        self.assertNotIn("__build_class__", result.detail,
+                         f"String-literal false positive: {result.detail}")
+
+    def test_build_class_bare_identifier_penalised(self):
+        """__build_class__ as an unquoted code identifier is real leakage."""
+        dec = "self.stack.append(__build_class__)\n"
+        result = self.cc.score_cleanliness(dec, "")
+        self.assertLess(result.score, 1.0)
+        self.assertIn("__build_class__", result.detail)
+
+    def test_func_tuple_leak_penalised(self):
+        """A ('func', ...) tuple in assignment position is penalised."""
+        dec = "result = ('func', 'def f():\\n    pass')()\n"
+        result = self.cc.score_cleanliness(dec, "")
+        self.assertLess(result.score, 1.0)
+        self.assertIn("raw-tuple leak", result.detail)
+
+    def test_class_tuple_leak_penalised(self):
+        """A ('class', ...) tuple in assignment position is penalised."""
+        dec = "Foo = ('class', 'class Foo: pass')()\n"
+        result = self.cc.score_cleanliness(dec, "")
+        self.assertLess(result.score, 1.0)
+        self.assertIn("raw-tuple leak", result.detail)
+
+    def test_clean_output_scores_one(self):
+        """Completely clean decompiled output scores exactly 1.0."""
+        dec = "x = 1\ny = x + 2\n\ndef f(a, b):\n    return a + b\n"
+        result = self.cc.score_cleanliness(dec, "")
+        self.assertEqual(result.score, 1.0)
+        self.assertEqual(result.detail, "No artefacts found")
+
+    def test_multiple_artefacts_accumulate(self):
+        """Each distinct artefact compounds the penalty additively."""
+        dec = (
+            "x = __build_class__\n"
+            "y = ('func', 'def f(): pass')()\n"
+        )
+        result = self.cc.score_cleanliness(dec, "")
+        # __build_class__(0.15) + raw-tuple leak(0.20) = 0.35 penalty -> score 0.65
+        self.assertAlmostEqual(result.score, 0.65, places=5)
+
+    def test_score_floor_is_zero(self):
+        """Score must never go below 0.0 even with many simultaneous artefacts."""
+        dec = (
+            "__build_class__\n"
+            "a = ('func', 'x')()\n"   # assignment position — triggers raw-tuple leak
+            "_exc_match\n"
+            "_exc_info\n"
+        )
+        result = self.cc.score_cleanliness(dec, "")
+        self.assertGreaterEqual(result.score, 0.0)
+
+    def test_genexpr_comment_in_string_not_penalised(self):
+        """
+        The string '# <genexpr/lambda' appearing as a value inside an f-string
+        or regular string literal in the decompiled source is legitimate code
+        (e.g. the post_process_source function itself contains this string as
+        part of a replacement template).  It must NOT trigger a penalty.
+        """
+        dec = 'return f"# <genexpr/lambda{kind} — not reconstructable>"\n'
+        result = self.cc.score_cleanliness(dec, "")
+        self.assertNotIn("# <genexpr/lambda", result.detail,
+                         f"String-literal false positive: {result.detail}")
+        self.assertEqual(result.score, 1.0)
+
+    def test_genexpr_comment_as_bare_comment_penalised(self):
+        """
+        '# <genexpr/lambda ...' appearing as a real bare comment line IS a
+        genuine post_process_source fallback placeholder and must be penalised.
+        """
+        dec = "# <genexpr/lambda — not reconstructable>\nx = None\n"
+        result = self.cc.score_cleanliness(dec, "")
+        self.assertIn("# <genexpr/lambda", result.detail)
+        self.assertLess(result.score, 1.0)
+
+    def test_class_comment_as_bare_comment_penalised(self):
+        """
+        '# <class ...' appearing as a bare comment line IS a genuine placeholder
+        and must be penalised.
+        """
+        dec = "# <class — not reconstructable>\nPoint = None\n"
+        result = self.cc.score_cleanliness(dec, "")
+        self.assertIn("# <class", result.detail)
+        self.assertLess(result.score, 1.0)
+
+    def test_class_comment_in_string_not_penalised(self):
+        """
+        '# <class' inside a string literal must not trigger a penalty.
+        """
+        dec = 'msg = "# <class body not reconstructable>"\n'
+        result = self.cc.score_cleanliness(dec, "")
+        self.assertNotIn("# <class", result.detail,
+                         f"String-literal false positive: {result.detail}")
+
+    def test_tuple_leak_in_assignment_penalised(self):
+        """
+        A ('func', ...) or ('class', ...) tuple in assignment position is
+        real leakage and must trigger the 'raw-tuple leak' penalty.
+        """
+        dec_func  = "x = ('func', 'def f(): pass')()\n"
+        dec_class = "Foo = ('class', 'class Foo: pass')()\n"
+        for dec in (dec_func, dec_class):
+            result = self.cc.score_cleanliness(dec, "")
+            self.assertIn("raw-tuple leak", result.detail,
+                          f"Expected raw-tuple leak for: {dec!r}")
+
+    def test_tuple_in_stack_append_not_penalised(self):
+        """
+        ('func', ...) inside stack.append(...) is legitimate decompiler source
+        code and must NOT trigger the tuple-leak penalty.
+        """
+        dec = "self.stack.append(('func', f'def {name}:'))\n"
+        result = self.cc.score_cleanliness(dec, "")
+        self.assertNotIn("raw-tuple leak", result.detail,
+                         f"False positive on stack.append: {result.detail}")
+        self.assertEqual(result.score, 1.0)
+
+
+
+
+    def test_dimension_name_and_weight(self):
+        """DimensionResult must have the correct name and weight."""
+        result = self.cc.score_cleanliness("x = 1\n", "x = 1\n")
+        self.assertEqual(result.name, "Output cleanliness")
+        self.assertAlmostEqual(result.weight, 0.05, places=5)
+
+
+class TestGenexprRendering(unittest.TestCase):
+    """
+    Tests for the _render_func_tuple helper in pycrefine.py and the end-to-end
+    genexpr / lambda decompilation behaviour after the fix.
+    """
+
+    def _decompile(self, src: str) -> str:
+        pyc = _compile(src)
+        try:
+            return get_decompiler(pyc).decompile()
+        finally:
+            if os.path.exists(pyc):
+                os.unlink(pyc)
+
+    # ------------------------------------------------------------------
+    # _render_func_tuple unit tests
+    # ------------------------------------------------------------------
+
+    def test_simple_genexpr_renders_inline(self):
+        """Basic genexpr body renders as (expr for x in iterable)."""
+        from pycrefine import _render_func_tuple
+        body = "def <genexpr>(.0):\n    for x in .0:\n        yield x * 2\n"
+        out = _render_func_tuple(body, ["items"])
+        self.assertEqual(out, "(x * 2 for x in items)")
+
+    def test_genexpr_with_if_clause(self):
+        """Filtered genexpr includes the if-clause."""
+        from pycrefine import _render_func_tuple
+        body = (
+            "def <genexpr>(.0):\n"
+            "    for x in .0:\n"
+            "        if x > 0:\n"
+            "            yield x\n"
+        )
+        out = _render_func_tuple(body, ["xs"])
+        self.assertIn("for x in xs", out)
+        self.assertIn("if x > 0", out)
+
+    def test_trailing_empty_call_suffix_stripped(self):
+        """
+        A trailing '()' from a CALL-0 misfire on GET_ITER is removed from
+        the iterator argument — but only the trailing '()', not interior
+        parentheses (so range(10) must not be mangled to range(10).
+        """
+        from pycrefine import _render_func_tuple
+        body = "def <genexpr>(.0):\n    for x in .0:\n        yield x\n"
+        # Misfire case: 'items()' -> stripped to 'items'
+        out_misfire = _render_func_tuple(body, ["items()"])
+        self.assertIn("for x in items", out_misfire)
+        self.assertNotIn("items()", out_misfire)
+        # Range case: 'range(10)' -> must stay as 'range(10)'
+        out_range = _render_func_tuple(body, ["range(10)"])
+        self.assertIn("for x in range(10)", out_range)
+
+    def test_genexpr_wrapped_in_parens(self):
+        """The rendered genexpr must be wrapped in outer parentheses."""
+        from pycrefine import _render_func_tuple
+        body = "def <genexpr>(.0):\n    for s in .0:\n        yield str(s)\n"
+        out = _render_func_tuple(body, ["items"])
+        self.assertTrue(out.startswith("("), f"Missing opening paren: {out!r}")
+        self.assertTrue(out.endswith(")"),   f"Missing closing paren: {out!r}")
+
+    def test_listcomp_body_treated_same_as_genexpr(self):
+        """<listcomp> body renders correctly as a generator expression."""
+        from pycrefine import _render_func_tuple
+        body = "def <listcomp>(.0):\n    for x in .0:\n        yield x + 1\n"
+        out = _render_func_tuple(body, ["data"])
+        self.assertIn("for x in data", out)
+        self.assertIn("x + 1", out)
+
+    def test_lambda_one_param(self):
+        """Lambda with one parameter renders as 'lambda p: expr'."""
+        from pycrefine import _render_func_tuple
+        body = "def <lambda>(x):\n    return x * 2\n"
+        self.assertEqual(_render_func_tuple(body, []), "lambda x: x * 2")
+
+    def test_lambda_zero_params(self):
+        """Lambda with no parameters renders as 'lambda: expr'."""
+        from pycrefine import _render_func_tuple
+        body = "def <lambda>():\n    return 42\n"
+        self.assertEqual(_render_func_tuple(body, []), "lambda: 42")
+
+    def test_lambda_multiple_params(self):
+        """Lambda with multiple parameters includes all of them."""
+        from pycrefine import _render_func_tuple
+        body = "def <lambda>(x, y):\n    return x + y\n"
+        out = _render_func_tuple(body, [])
+        self.assertIn("lambda x, y:", out)
+        self.assertIn("x + y", out)
+
+    def test_empty_body_gives_placeholder(self):
+        """Empty body produces a safe <func>() placeholder, not a crash."""
+        from pycrefine import _render_func_tuple
+        out = _render_func_tuple("", ["x"])
+        self.assertIn("<func>", out)
+
+    def test_unknown_body_gives_placeholder(self):
+        """Unrecognised anonymous function falls back to <func>() placeholder."""
+        from pycrefine import _render_func_tuple
+        body = "def <unknown>():\n    return 1\n"
+        out = _render_func_tuple(body, [])
+        self.assertIn("<func>", out)
+
+    # ------------------------------------------------------------------
+    # End-to-end: decompile sources containing genexprs / lambdas
+    # ------------------------------------------------------------------
+
+    def test_any_genexpr_no_tuple_leakage(self):
+        """any(... for ...) must not produce a raw ('func', ...) tuple."""
+        out = self._decompile("def f(items): return any(x > 0 for x in items)\n")
+        self.assertNotIn("('func',", out)
+        self.assertNotIn("('class',", out)
+
+    def test_sum_genexpr_correct_and_clean(self):
+        """sum(x**2 for x in range(10)) must be clean and contain the iterator."""
+        out = self._decompile("result = sum(x**2 for x in range(10))\n")
+        self.assertNotIn("('func',", out)
+        # The iterator range(10) must appear in the output.
+        # The exact loop variable name may vary across Python versions
+        # (some emit 'x', some '_item' before the FOR_ITER peek fix),
+        # but the iterator expression is always `range(10)`.
+        self.assertIn("range(10)", out)
+        self.assertIn("for", out)
+
+    def test_join_genexpr_no_tuple_leakage(self):
+        """str.join(... for ...) must not produce tuple leakage."""
+        out = self._decompile('result = "_".join(str(s) for s in items)\n')
+        self.assertNotIn("('func',", out)
+
+    def test_genexpr_parens_not_stripped_by_post_process(self):
+        """
+        The 'for' keyword inside the genexpr expression must prevent
+        post_process_source from stripping its required outer parentheses.
+
+        The exact rendering varies by Python version — 3.12 produces an inline
+        genexpr while 3.14 may produce a different structure — so we assert
+        only that:
+          1. No raw ('func', tuple leaks into the output.
+          2. If a genexpr line with 'for ... in items' IS present, its parens
+             were not stripped (the line contains an opening paren).
+        """
+        out = self._decompile("def f(items): return any(x > 0 for x in items)\n")
+        self.assertNotIn("('func',", out)
+        # If the output contains an inline genexpr, its parens must be intact.
+        for line in out.splitlines():
+            # A genexpr line: contains both 'for' and 'in items' and 'yield' or '>' etc.
+            if " for " in line and "in items" in line and "yield" not in line:
+                stripped = line.strip()
+                # The line must contain '(' somewhere (genexpr or function call)
+                self.assertIn(
+                    "(", stripped,
+                    f"genexpr parens appear to have been stripped: {line!r}\nFull output:\n{out}",
+                )
+
+    def test_dataclass_produces_no_class_tuple_leakage(self):
+        """@dataclass class body must not reach output as a ('class', ...) tuple."""
+        src = (
+            "from dataclasses import dataclass\n"
+            "@dataclass\nclass Point:\n    x: int\n    y: int\n"
+        )
+        out = self._decompile(src)
+        self.assertNotIn("('class',", out)
+        self.assertNotIn("('func',", out)
+
+    def test_if_parens_still_stripped(self):
+        """Redundant parens around a plain if-condition are still removed."""
+        out = self._decompile("x = 1\nif x > 0:\n    y = 2\n")
+        for line in out.splitlines():
+            if "if" in line and "x > 0" in line:
+                self.assertNotIn(
+                    "if (x > 0):", line,
+                    "Redundant if-parens should still be stripped",
+                )
+
+    def test_return_tuple_parens_preserved(self):
+        """Parens around a tuple return must NOT be stripped."""
+        out = self._decompile("def f():\n    return (1, 2)\n")
+        self.assertIn("(1, 2)", out)
+
+    def test_return_single_expr_parens_stripped(self):
+        """Parens around a single scalar return expression ARE stripped."""
+        out = self._decompile("def f(x):\n    return (x + 1)\n")
+        for line in out.splitlines():
+            if "return" in line and "x" in line:
+                self.assertNotIn(
+                    "(x + 1)", line,
+                    "Single-expression return parens should be stripped",
+                )
 
 
 # ---------------------------------------------------------------------------
