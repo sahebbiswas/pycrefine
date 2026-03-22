@@ -119,6 +119,118 @@ from typing import List, Optional, Any, Dict, Union, Tuple
 from dataclasses import dataclass
 
 
+def post_process_source(source: str) -> str:
+    """Clean up decompiled output to be more Pythonic."""
+    lines = source.split('\n')
+    out_lines = []
+    
+    current_imports = []
+    current_froms = {}
+    current_indent = None
+    
+    def flush_imports():
+        nonlocal current_imports, current_froms, current_indent
+        if current_imports:
+            unique_mods = []
+            for m in current_imports:
+                if m not in unique_mods:
+                    unique_mods.append(m)
+            for m in unique_mods:
+                out_lines.append(f"{current_indent}import {m}")
+            current_imports.clear()
+            
+        for mod, syms in current_froms.items():
+            unique_syms = []
+            for s in syms:
+                if s not in unique_syms:
+                    unique_syms.append(s)
+            out_lines.append(f"{current_indent}from {mod} import {', '.join(unique_syms)}")
+        current_froms.clear()
+        current_indent = None
+
+    # Parens-stripping regexes.
+    # The inner-expression pattern deliberately excludes lines that contain
+    # 'for', 'if', ':=', or 'lambda' because those keywords indicate that the
+    # outer parens are *required* (genexpr, conditional expr, walrus, lambda)
+    # rather than redundant grouping added by the decompiler.
+    _NO_KW = r'(?![^()]*\b(?:for|lambda)\b)'  # negative lookahead: no for/lambda inside
+    assignment_parens_re = re.compile(
+        r'^(\s*[A-Za-z_][A-Za-z0-9_.]*\s*(?:\+|-|\*|/|//|%|&|\||\^|<<|>>)?=\s*)'
+        r'\(' + _NO_KW + r'([^,()]+)\)$'
+    )
+    return_parens_re = re.compile(
+        r'^(\s*return\s+)\(' + _NO_KW + r'([^,()]+)\)$'
+    )
+    if_parens_re = re.compile(
+        r'^(\s*(?:if|elif)\s+)\(' + _NO_KW + r'([^,()]+)\):$'
+    )
+    while_parens_re = re.compile(
+        r'^(\s*while\s+)\(' + _NO_KW + r'([^,()]+)\):$'
+    )
+    
+    for line in lines:
+        imp_m = re.match(r'^([ \t]*)import\s+(.+)$', line)
+        from_m = re.match(r'^([ \t]*)from\s+([A-Za-z0-9_.]+)\s+import\s+(.+)$', line)
+        
+        handled = False
+        if imp_m:
+            indent, mods = imp_m.groups()
+            mods_list = [m.strip() for m in mods.split(',')]
+            if indent == current_indent and not current_froms:
+                current_imports.extend(mods_list)
+                handled = True
+            elif current_indent is None:
+                current_indent = indent
+                current_imports.extend(mods_list)
+                handled = True
+                
+        elif from_m:
+            indent, mod, syms = from_m.groups()
+            sym_list = [s.strip() for s in syms.split(',')]
+            if indent == current_indent and not current_imports:
+                current_froms.setdefault(mod, []).extend(sym_list)
+                handled = True
+            elif current_indent is None:
+                current_indent = indent
+                current_froms.setdefault(mod, []).extend(sym_list)
+                handled = True
+                
+        if not handled:
+            flush_imports()
+            if imp_m:
+                indent, mods = imp_m.groups()
+                current_indent = indent
+                current_imports.extend([m.strip() for m in mods.split(',')])
+            elif from_m:
+                indent, mod, syms = from_m.groups()
+                current_indent = indent
+                current_froms.setdefault(mod, []).extend([s.strip() for s in syms.split(',')])
+            else:
+                line = assignment_parens_re.sub(r'\1\2', line)
+                line = return_parens_re.sub(r'\1\2', line)
+                line = if_parens_re.sub(r'\1\2:', line)
+                line = while_parens_re.sub(r'\1\2:', line)
+                out_lines.append(line)
+                
+    flush_imports()
+    
+    text = '\n'.join(out_lines)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+
+    # ── Final cleanup: suppress raw decompiler-tuple leakage ─────────────
+    # If any ('func', ...) or ('class', ...) tuples slipped through to an
+    # assignment RHS or statement position, replace the ENTIRE statement
+    # (to end-of-line) with a comment + None so the output stays valid Python.
+    text = re.sub(
+        r"([ \t]*)([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*\('(func|class)',[^\n]*",
+        lambda m: (
+            f"{m.group(1)}# <{'genexpr/lambda' if m.group(3) == 'func' else 'class'}"
+            f" \u2014 not reconstructable>\n{m.group(1)}{m.group(2)} = None"
+        ),
+        text,
+    )
+    return text.strip('\r\n') + '\n'
+
 # ---------------------------------------------------------------------------
 # Data model
 # ---------------------------------------------------------------------------
@@ -133,6 +245,94 @@ class BytecodeInstruction:
     starts_line: Optional[int]
     is_jump_target: bool
 
+
+
+def _render_func_tuple(body_text: str, args: List[str]) -> str:
+    """
+    Convert a raw ('func', body_text) decompiler tuple into a clean Python
+    expression.  Called when a code object created by MAKE_FUNCTION is
+    immediately called (genexpr, lambda, comprehension helper, etc.) instead
+    of being stored under a name.
+
+    Three cases handled:
+    1. Generator expression — ``def <genexpr>(.0): for x in .0: yield expr``
+       → rendered as ``(expr for x in iterable [if cond])``
+    2. Lambda — ``def <lambda>(params): return expr``
+       → rendered as ``lambda params: expr``
+    3. Anything else (unknown inner function) → ``<func>(args)`` placeholder.
+    """
+    lines = [line.strip() for line in body_text.strip().splitlines() if line.strip()]
+    if not lines:
+        return f"<func>({', '.join(args)})"
+
+    # ── Case 1: comprehensions (genexpr / listcomp / setcomp / dictcomp) ───────
+    _comp_names = ("<genexpr>", "<listcomp>", "<setcomp>", "<dictcomp>")
+    if any(name in lines[0] for name in _comp_names):
+        # Choose the correct bracket style for each comprehension type.
+        if "<listcomp>" in lines[0]:
+            wrapper_open, wrapper_close = "[", "]"
+        elif "<setcomp>" in lines[0] or "<dictcomp>" in lines[0]:
+            wrapper_open, wrapper_close = "{", "}"
+        else:  # genexpr
+            wrapper_open, wrapper_close = "(", ")"
+
+        for_clause = None
+        if_clause  = None
+        yield_expr = None
+
+        for line in lines[1:]:
+            # Skip structural wrappers that appear in some versions:
+            # 3.9 wraps the genexpr body in 'while True:' before the for loop.
+            if line in ("while True:", "while True"):
+                continue
+            if line.startswith("for "):
+                fc = line.rstrip(":")
+                # Replace the implicit .0 parameter with the actual iterable arg
+                if args:
+                    # Strip a trailing "()" suffix that may have been added by a
+                    # preceding CALL-0 misfire (GET_ITER treated as a no-arg call).
+                    # Use removesuffix rather than rstrip so we only strip exactly
+                    # one trailing "()" and never mangle expressions like range(10).
+                    actual_iter = str(args[0])
+                    if actual_iter.endswith("()"):
+                        actual_iter = actual_iter[:-2]
+                    fc = fc.replace(".0", actual_iter)
+                for_clause = fc
+            elif line.startswith("if "):
+                if_clause = line.rstrip(":")
+            elif line.startswith("yield "):
+                yield_expr = line[6:].strip()
+
+        if for_clause and yield_expr is not None:
+            result = wrapper_open + yield_expr + " " + for_clause
+            if if_clause:
+                result += " " + if_clause
+            result += wrapper_close
+            return result
+
+    # ── Case 2: lambda ───────────────────────────────────────────────────
+    if "<lambda>" in lines[0]:
+        # Extract params from 'def <lambda>(params):'
+        import re as _re
+        m = _re.match(r"def\s+<lambda>\s*\(([^)]*)\):", lines[0])
+        params = m.group(1).strip() if m else ""
+        # Find return expression
+        ret_expr = None
+        for line in lines[1:]:
+            if line.startswith("return "):
+                ret_expr = line[7:].strip()
+                break
+        if ret_expr is not None:
+            return f"lambda {params}: {ret_expr}" if params else f"lambda: {ret_expr}"
+
+    # ── Case 3: fallback — extract function name if recognisable ─────────
+    # e.g. 'def _find_something(...)' used as a first-class callback
+    import re as _re
+    m = _re.match(r"def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", lines[0])
+    if m and "<" not in m.group(1):
+        return m.group(1)
+
+    return f"<func>({', '.join(args)})"
 
 # ---------------------------------------------------------------------------
 # Base
@@ -302,7 +502,8 @@ class DecompilerGeneric(DecompilerBase):
                 self.pc += 1
                 self._handle_instruction(instr)
 
-        return "\n".join(str(s) for s in self.reconstructed).rstrip()
+        raw_source = "\n".join(str(s) for s in self.reconstructed).rstrip()
+        return post_process_source(raw_source)
 
     # ------------------------------------------------------------------
     # Output helpers
@@ -1037,6 +1238,15 @@ class DecompilerGeneric(DecompilerBase):
             if str(func_val) == "None" and self.stack:
                 func_val = self.stack.pop()
 
+            # ── ('func', body) called directly: genexpr / lambda ─────────
+            # This happens when MAKE_FUNCTION pushes a code object that is
+            # immediately called (generator expression, lambda, comprehension)
+            # rather than stored under a name by STORE_NAME.
+            if isinstance(func_val, tuple) and func_val[0] == "func":
+                rendered = _render_func_tuple(str(func_val[1]), final_args)
+                self.stack.append(rendered)
+                return
+
             func = str(func_val)
             if " + NULL" in func or "|NULL" in func:
                 func = func.split(" + ")[0].split("|")[0]
@@ -1400,25 +1610,34 @@ class DecompilerGeneric(DecompilerBase):
             if self.stack:
                 iterator = self.stack.pop()
                 var_name = "_item"
-                # Peek ahead for STORE_* or UNPACK_SEQUENCE to get var name(s)
+                # Peek ahead for STORE_* or UNPACK_SEQUENCE to get var name(s).
+                # Skip no-op / hint instructions that may appear between FOR_ITER
+                # and the STORE in some Python versions (e.g. NOT_TAKEN on 3.14).
+                _SKIP_OPS = frozenset({"RESUME", "CACHE", "NOP", "NOT_TAKEN",
+                                       "COPY_FREE_VARS"})
                 if self.pc < len(self.instructions):
-                    next_instr = self.instructions[self.pc]
-                    if next_instr.opname in ("STORE_NAME", "STORE_FAST"):
-                        var_name = str(next_instr.argval)
-                    elif next_instr.opname == "UNPACK_SEQUENCE":
-                        count = int(next_instr.arg) if next_instr.arg else 2
-                        names = []
-                        look = self.pc + 1
-                        while look < len(self.instructions) and len(names) < count:
-                            li = self.instructions[look]
-                            if li.opname in ("STORE_NAME", "STORE_FAST"):
-                                names.append(str(li.argval))
-                                look += 1
-                            else:
-                                break
-                        if len(names) == count:
-                            var_name = ", ".join(names)
-                            self.pc = look  # skip the stores we peeked
+                    peek_pc = self.pc
+                    while (peek_pc < len(self.instructions)
+                           and self.instructions[peek_pc].opname in _SKIP_OPS):
+                        peek_pc += 1
+                    if peek_pc < len(self.instructions):
+                        next_instr = self.instructions[peek_pc]
+                        if next_instr.opname in ("STORE_NAME", "STORE_FAST"):
+                            var_name = str(next_instr.argval)
+                        elif next_instr.opname == "UNPACK_SEQUENCE":
+                            count = int(next_instr.arg) if next_instr.arg else 2
+                            names = []
+                            look = peek_pc + 1
+                            while look < len(self.instructions) and len(names) < count:
+                                li = self.instructions[look]
+                                if li.opname in ("STORE_NAME", "STORE_FAST"):
+                                    names.append(str(li.argval))
+                                    look += 1
+                                else:
+                                    break
+                            if len(names) == count:
+                                var_name = ", ".join(names)
+                                self.pc = look  # skip the stores we peeked
                 self._append_reconstructed(f"for {var_name} in {iterator}:")
                 self.indent_level += 1
                 jump_target = self._get_jump_target(instr)
@@ -1918,6 +2137,17 @@ class Decompiler39(DecompilerGeneric):
                 if self.stack:
                     raw_args.insert(0, self.stack.pop())
             func_val = self.stack.pop() if self.stack else "func"
+
+            # ── ('func', body) called directly: genexpr / lambda ─────────
+            # Same logic as the generic CALL handler: when MAKE_FUNCTION pushes
+            # a code object that is immediately called (generator expression,
+            # lambda) the tuple is the function, not the function name.
+            if isinstance(func_val, tuple) and func_val[0] == "func":
+                str_args = [str(a) for a in raw_args]
+                rendered = _render_func_tuple(str(func_val[1]), str_args)
+                self.stack.append(rendered)
+                return
+
             func = str(func_val)
 
             # Class builder: LOAD_BUILD_CLASS pushes '__build_class__', then
@@ -2305,7 +2535,8 @@ class Decompiler311Plus(DecompilerGeneric):
                 elif bin_op:
                     self.stack.append(f"({left} {bin_op} {right})")
                 else:
-                    self.stack.append(f"({left} <op:{op_idx}> {right})")
+                    # Unknown BINARY_OP index — use ? as a safe placeholder
+                    self.stack.append(f"({left} ? {right})")
         else:
             super()._handle_instruction(instr)
 
