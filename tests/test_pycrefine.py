@@ -217,8 +217,8 @@ class TestControlFlow(unittest.TestCase):
     def test_while_conditional_no_stray_if(self):
         """The while-loop guard must not also appear as a bare 'if' block."""
         out = decompile("n = 0\nwhile n < 5:\n    n += 1\n")
-        lines = [l.strip() for l in out.splitlines() if l.strip()]
-        cond_headers = [l for l in lines if l in ("while n < 5:", "if n < 5:")]
+        lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+        cond_headers = [ln for ln in lines if ln in ("while n < 5:", "if n < 5:")]
         self.assertEqual(
             len(cond_headers), 1,
             f"Expected exactly one while/if header, got {cond_headers!r}\n{out}",
@@ -367,7 +367,7 @@ class TestFunctions(unittest.TestCase):
     def test_function_body_indented(self):
         out = decompile("def f(x):\n    y = x * 2\n    return y\n")
         lines = out.splitlines()
-        body_lines = [l for l in lines if "y = " in l or "return" in l]
+        body_lines = [ln for ln in lines if "y = " in ln or "return" in ln]
         for line in body_lines:
             self.assertTrue(
                 line.startswith("    "),
@@ -482,8 +482,8 @@ class TestExceptions(unittest.TestCase):
         )
         out = decompile(src)
         lines = out.splitlines()
-        exc_lines = [l for l in lines if l.lstrip().startswith("except")]
-        indents = {len(l) - len(l.lstrip()) for l in exc_lines}
+        exc_lines = [ln for ln in lines if ln.lstrip().startswith("except")]
+        indents = {len(ln) - len(ln.lstrip()) for ln in exc_lines}
         self.assertEqual(
             len(indents), 1,
             f"Multiple except clauses have different indents {indents}:\n{out}",
@@ -551,8 +551,8 @@ class TestNoneGuards(unittest.TestCase):
             out = decompile(src)
             self.assertGreater(len(out.strip()), 0, f"Empty output for {src!r}")
             if_headers = [
-                l for l in out.splitlines()
-                if l.strip().startswith("if ") and l.strip().endswith(":")
+                ln for ln in out.splitlines()
+                if ln.strip().startswith("if ") and ln.strip().endswith(":")
             ]
             self.assertGreaterEqual(
                 len(if_headers), 1, f"No if-header in output:\n{out}"
@@ -1013,7 +1013,7 @@ class TestWhilePrescan(unittest.TestCase):
         if dec._has_jump_backward():
             self.assertGreaterEqual(
                 len(dec._while_header_targets), 1,
-                f"JUMP_BACKWARD found but no guard detected; "
+                "JUMP_BACKWARD found but no guard detected; "
                 f"targets: {dec._while_header_targets}",
             )
 
@@ -1491,7 +1491,7 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
         self.assertIsNotNone(instr_at_8, "No instruction at offset 8")
         self.assertTrue(
             instr_at_8.is_jump_target,
-            f"Offset 8 (target of POP_JUMP_IF_FALSE) should be is_jump_target=True",
+            "Offset 8 (target of POP_JUMP_IF_FALSE) should be is_jump_target=True",
         )
 
     # ------------------------------------------------------------------
@@ -1577,7 +1577,7 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
             I(0, "RETURN_VALUE",     None, None, 30, None, False),
         ])
         lines = out.splitlines()
-        body_lines = [l for l in lines if "x = 0" in l or "x = 99" in l]
+        body_lines = [ln for ln in lines if "x = 0" in ln or "x = 99" in ln]
         for line in body_lines:
             self.assertTrue(
                 line.startswith("    "),
@@ -1914,6 +1914,25 @@ class TestTokenHamming(unittest.TestCase):
     # ------------------------------------------------------------------
     # score_token_hamming — DimensionResult wrapper
     # ------------------------------------------------------------------
+
+    def test_artefact_in_orig_not_penalised(self):
+        """
+        Diff-based logic: if the artefact already exists in the original
+        source at least as often as in the decompiled output, no penalty
+        is added -- prevents false positives on pycrefine self-decompilation.
+        """
+        shared = "if func == \'__build_class__\': pass\n"
+        result = self.cc.score_cleanliness(shared, shared)
+        self.assertEqual(result.score, 1.0,
+                         "Identical text should score 1.0 (no excess artefacts)")
+
+    def test_excess_artefact_penalised(self):
+        """New bare artefact in dec (not in orig) is penalised."""
+        orig = "if func == \'__build_class__\': pass\n"
+        dec  = "__build_class__\nif func == \'__build_class__\': pass\n"
+        result = self.cc.score_cleanliness(dec, orig)
+        self.assertLess(result.score, 1.0)
+        self.assertIn("__build_class__", result.detail)
 
     def test_dimension_name_and_weight(self):
         """DimensionResult must have the expected name and weight."""
@@ -2346,14 +2365,25 @@ class TestGenexprRendering(unittest.TestCase):
         out = _render_func_tuple(body, ["items"])
         self.assertTrue(out.startswith("("), f"Missing opening paren: {out!r}")
         self.assertTrue(out.endswith(")"),   f"Missing closing paren: {out!r}")
+    def test_setcomp_uses_curly_braces(self):
+        """<setcomp> body renders as {expr for x in iter} with curly braces."""
+        from pycrefine import _render_func_tuple
+        body = "def <setcomp>(.0):\n    for x in .0:\n        yield x\n"
+        out = _render_func_tuple(body, ["vals"])
+        self.assertIn("for x in vals", out)
+        self.assertTrue(out.startswith("{") and out.endswith("}"),
+                        f"setcomp must use curly braces: {out!r}")
 
-    def test_listcomp_body_treated_same_as_genexpr(self):
-        """<listcomp> body renders correctly as a generator expression."""
+
+    def test_listcomp_body_uses_square_brackets(self):
+        """<listcomp> body renders as [expr for x in iter] with square brackets."""
         from pycrefine import _render_func_tuple
         body = "def <listcomp>(.0):\n    for x in .0:\n        yield x + 1\n"
         out = _render_func_tuple(body, ["data"])
         self.assertIn("for x in data", out)
         self.assertIn("x + 1", out)
+        self.assertTrue(out.startswith("[") and out.endswith("]"),
+                        f"listcomp must use square brackets: {out!r}")
 
     def test_lambda_one_param(self):
         """Lambda with one parameter renders as 'lambda p: expr'."""

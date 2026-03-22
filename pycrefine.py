@@ -261,12 +261,21 @@ def _render_func_tuple(body_text: str, args: List[str]) -> str:
        → rendered as ``lambda params: expr``
     3. Anything else (unknown inner function) → ``<func>(args)`` placeholder.
     """
-    lines = [l.strip() for l in body_text.strip().splitlines() if l.strip()]
+    lines = [line.strip() for line in body_text.strip().splitlines() if line.strip()]
     if not lines:
         return f"<func>({', '.join(args)})"
 
-    # ── Case 1: generator expression ─────────────────────────────────────
-    if "<genexpr>" in lines[0] or "<listcomp>" in lines[0] or "<setcomp>" in lines[0] or "<dictcomp>" in lines[0]:
+    # ── Case 1: comprehensions (genexpr / listcomp / setcomp / dictcomp) ───────
+    _comp_names = ("<genexpr>", "<listcomp>", "<setcomp>", "<dictcomp>")
+    if any(name in lines[0] for name in _comp_names):
+        # Choose the correct bracket style for each comprehension type.
+        if "<listcomp>" in lines[0]:
+            wrapper_open, wrapper_close = "[", "]"
+        elif "<setcomp>" in lines[0] or "<dictcomp>" in lines[0]:
+            wrapper_open, wrapper_close = "{", "}"
+        else:  # genexpr
+            wrapper_open, wrapper_close = "(", ")"
+
         for_clause = None
         if_clause  = None
         yield_expr = None
@@ -295,11 +304,10 @@ def _render_func_tuple(body_text: str, args: List[str]) -> str:
                 yield_expr = line[6:].strip()
 
         if for_clause and yield_expr is not None:
-            expr = yield_expr
-            result = f"({expr} {for_clause}"
+            result = wrapper_open + yield_expr + " " + for_clause
             if if_clause:
-                result += f" {if_clause}"
-            result += ")"
+                result += " " + if_clause
+            result += wrapper_close
             return result
 
     # ── Case 2: lambda ───────────────────────────────────────────────────

@@ -48,7 +48,7 @@ from typing import Dict, List, Optional, Tuple
 # ---------------------------------------------------------------------------
 # This file lives in debug/ (one level below the project root).
 # _DEBUG  = .../pycrefine/debug/
-# _HERE   = .../pycrefine/          (project root — where pycrefine.py lives)
+# _HERE   = .../pycrefine/          (project root -- where pycrefine.py lives)
 _DEBUG = Path(__file__).parent
 _HERE  = _DEBUG.parent
 sys.path.insert(0, str(_HERE))
@@ -98,7 +98,7 @@ def normalise_line(raw: str) -> Optional[str]:
 
     Transformations applied:
       - Strip inline and full-line comments
-      - Drop decorator lines (@...) — not reconstructable
+      - Drop decorator lines (@...) -- not reconstructable
       - Strip type annotations from function signatures
       - Normalise quote style (single -> double)
       - Collapse internal whitespace
@@ -196,7 +196,7 @@ def keyword_frequencies(lines: List[str]) -> Dict[str, int]:
 @dataclass
 class DimensionResult:
     name: str
-    score: float          # 0.0 – 1.0
+    score: float          # 0.0 - 1.0
     weight: float
     detail: str           # human-readable explanation
 
@@ -259,7 +259,7 @@ def score_imports(orig: str, dec: str) -> DimensionResult:
     score = len(found) / len(o)
     detail = f"{len(found)}/{len(o)} modules"
     if missed:
-        detail += f" — missing: {', '.join(sorted(missed)[:5])}"
+        detail += f" -- missing: {', '.join(sorted(missed)[:5])}"
     return DimensionResult("Import recall", score, 0.08, detail)
 
 
@@ -275,7 +275,7 @@ def score_def_names(orig: str, dec: str) -> DimensionResult:
     score = len(found) / len(o)
     detail = f"{len(found)}/{len(o)} functions"
     if missed:
-        detail += f" — missing: {', '.join(sorted(missed)[:5])}"
+        detail += f" -- missing: {', '.join(sorted(missed)[:5])}"
     return DimensionResult("Function name recall", score, 0.18, detail)
 
 
@@ -291,7 +291,7 @@ def score_class_names(orig: str, dec: str) -> DimensionResult:
     score = len(found) / len(o)
     detail = f"{len(found)}/{len(o)} classes"
     if missed:
-        detail += f" — missing: {', '.join(sorted(missed)[:5])}"
+        detail += f" -- missing: {', '.join(sorted(missed)[:5])}"
     return DimensionResult("Class name recall", score, 0.08, detail)
 
 
@@ -302,7 +302,7 @@ def score_token_recall(orig_lines: List[str], dec_lines: List[str]) -> Dimension
     """
     o = extract_tokens(orig_lines)
     d = extract_tokens(dec_lines)
-    # Exclude Python keywords from this count — they're ubiquitous and not
+    # Exclude Python keywords from this count -- they're ubiquitous and not
     # informative about decompiler quality.
     kw_set = set(_KEYWORDS) | {
         'True', 'False', 'None', 'self', 'cls', 'args', 'kwargs',
@@ -323,7 +323,7 @@ def score_token_recall(orig_lines: List[str], dec_lines: List[str]) -> Dimension
 def _build_trigram_index(lines: List[str]) -> Dict[str, List[int]]:
     """
     Build a character-trigram inverted index over *lines* for fast candidate
-    lookup before running the expensive SequenceMatcher, reducing O(n²) work
+    lookup before running the expensive SequenceMatcher, reducing O(n^2) work
     to roughly O(n log n).
     """
     index: Dict[str, List[int]] = {}
@@ -374,8 +374,8 @@ def _best_match(query: str,
 
 def score_line_recall(orig_lines: List[str], dec_lines: List[str]) -> DimensionResult:
     """
-    Fraction of normalised original lines that are present in — or closely
-    similar to — at least one line in the decompiled output.
+    Fraction of normalised original lines that are present in -- or closely
+    similar to -- at least one line in the decompiled output.
 
     Uses exact match first, then trigram-indexed fuzzy match at 0.82 similarity.
     """
@@ -432,7 +432,7 @@ def score_keyword_coverage(orig_lines: List[str], dec_lines: List[str]) -> Dimen
     worst = [(kw, o, d) for kw, o, d in kw_pairs if d < o][:4]
     detail = f"{score*100:.0f}% avg frequency match"
     if worst:
-        detail += " — under-represented: " + ", ".join(
+        detail += " -- under-represented: " + ", ".join(
             f"{kw}({d}/{o})" for kw, o, d in worst
         )
     return DimensionResult("Keyword coverage", score, 0.10, detail)
@@ -443,7 +443,7 @@ def score_keyword_coverage(orig_lines: List[str], dec_lines: List[str]) -> Dimen
 def score_line_fidelity(orig_lines: List[str], dec_lines: List[str]) -> DimensionResult:
     """
     For every original line, find its closest match in the decompiled output
-    and record the character-level similarity ratio (0.0 – 1.0).
+    and record the character-level similarity ratio (0.0 - 1.0).
 
     Unlike *line_recall* (which is binary: matched or not), this dimension
     measures HOW WELL matched lines are reproduced.
@@ -452,7 +452,7 @@ def score_line_fidelity(orig_lines: List[str], dec_lines: List[str]) -> Dimensio
     Longer lines contain more information and should influence the score more
     than single-token lines like ``pass`` or ``return``.
 
-    Uses a trigram index for fast candidate lookup (O(n log n) instead of O(n²)).
+    Uses a trigram index for fast candidate lookup (O(n log n) instead of O(n^2)).
     """
     if not orig_lines:
         return DimensionResult("Line fidelity", 1.0, 0.15,
@@ -505,7 +505,7 @@ def score_line_fidelity(orig_lines: List[str], dec_lines: List[str]) -> Dimensio
     n       = len(orig_lines)
 
     detail = (
-        f"length-weighted mean {score*100:.1f}% — "
+        f"length-weighted mean {score*100:.1f}% -- "
         f"perfect {perfect} ({perfect*100//n}%), "
         f"high {high} ({high*100//n}%), "
         f"good {good} ({good*100//n}%), "
@@ -566,7 +566,7 @@ def _strip_string_literals(text: str) -> str:
 
 def score_cleanliness(dec_text: str, orig_text: str) -> DimensionResult:
     """
-    Penalise output that contains known decompiler artefacts — raw tuples,
+    Penalise output that contains known decompiler artefacts -- raw tuples,
     __build_class__ leakage, internal sentinel strings, etc.
 
     Returns a score close to 1.0 for clean output, lower for noisy output.
@@ -576,49 +576,32 @@ def score_cleanliness(dec_text: str, orig_text: str) -> DimensionResult:
     --------------------
     1. String-literal contents are blanked out first (via
        ``_strip_string_literals``) so that artefact names that appear as
-       *values* inside quotes — e.g. pycrefine's own source legitimately
-       compares ``func == '__build_class__'`` — do not trigger false positives.
+       *values* inside quotes do not trigger false positives.
 
-    2. Identifier-like artefacts (``__build_class__``, ``_exc_match``,
-       ``_exc_info``) are matched with **word-boundary anchors** so that a
-       longer identifier such as ``_find_push_exc_info_offset`` (which contains
-       ``_exc_info`` as a substring) does not trigger a penalty.
+    2. Each artefact is counted in *both* the decompiled text and the
+       original source.  Only the *excess* occurrences introduced by the
+       decompiler are penalised -- this avoids false positives when
+       decompiling a file like pycrefine itself that legitimately references
+       these strings as identifiers or string literals.
 
-    3. Structural artefacts that are not bare identifiers — raw tuple prefixes
-       such as ``('func',`` and ``('class',``, and comment placeholders emitted
-       by the post-processor — are matched with plain substring search because
-       they cannot appear as coincidental substrings of normal identifiers.
+    3. Identifier-like artefacts are matched with word-boundary anchors.
+
+    4. Structural tuple-leakage uses an assignment/return-anchored regex
+       applied to both texts; a penalty fires only when dec_text has more
+       matches than orig_text.
     """
-    # String-literal contents blanked: artefact identifiers inside quoted
-    # strings are legitimate code (e.g. comparing func == '__build_class__')
-    # and must not be penalised.  Only bare-identifier occurrences should fire.
-    scanned = _strip_string_literals(dec_text)
+    scanned      = _strip_string_literals(dec_text)
+    scanned_orig = _strip_string_literals(orig_text)
 
-    # Identifier artefacts: only match whole tokens via word-boundary anchors.
-    # Searched in *scanned* (string-literal contents removed) to avoid hitting
-    # occurrences inside quoted strings.
+    # Identifier artefacts: word-boundary match, string-stripped text.
     _ident_artefacts: Dict[str, float] = {
         '__build_class__': 0.15,
         '_exc_match':      0.05,
         '_exc_info':       0.05,
     }
 
-    # Structural artefacts — raw ('func', ...) / ('class', ...) tuples.
-    #
-    # The challenge: both strings appear *legitimately* inside pycrefine's own
-    # decompiled source as function-call arguments:
-    #   self.stack.append(('func', f"def {name}:..."))   <- correct code
-    #   if val[0] in ('func', 'class'):                  <- correct code
-    #
-    # They only indicate leakage when a tuple with that key appears in an
-    # *output context*: as the RHS of an assignment, or in a return/yield.
-    #   result = ('func', '...')(args)   <- leaked
-    #   x = ('class', '...')(args)       <- leaked
-    #   return ('func', body)            <- leaked (before fix; guarded anyway)
-    #
-    # Use an assignment/return-anchored regex on the *original* dec_text.
-    # The string-key contents ('func', 'class') would be blanked by
-    # _strip_string_literals so we must search the original here.
+    # Assignment/return-anchored regex for raw ('func',...) / ('class',...) leakage.
+    # Applied to original dec_text because _strip_string_literals blanks the key strings.
     _TUPLE_LEAK_RE = re.compile(
         r"(?:^|\n)[ \t]*(?:[A-Za-z_][A-Za-z0-9_.]*[ \t]*=[ \t]*"
         r"|return[ \t]+|yield[ \t]+)"
@@ -626,16 +609,9 @@ def score_cleanliness(dec_text: str, orig_text: str) -> DimensionResult:
         re.MULTILINE,
     )
 
-    # Comment placeholders emitted by post_process_source when a class or
-    # function body is genuinely not reconstructable.  These are real failures
-    # so they DO merit a (small) cleanliness penalty.
-    #
-    # Searched in *scanned* (string-literal contents blanked) because the
-    # decompiled source of pycrefine itself contains these strings inside
-    # f-string literals as part of the post_process_source implementation
-    # (e.g.  f"# <genexpr/lambda..." ).  A bare comment line like
-    # "# <class — not reconstructable>" is NOT inside a string and survives
-    # stripping correctly.
+    # Comment placeholders from post_process_source.
+    # Searched in *scanned* so that f-string literals containing these strings
+    # (e.g. in post_process_source itself) are ignored.
     _COMMENT_ARTEFACTS: Dict[str, float] = {
         '# <genexpr/lambda': 0.05,
         '# <class':          0.05,
@@ -644,20 +620,27 @@ def score_cleanliness(dec_text: str, orig_text: str) -> DimensionResult:
     total_penalty   = 0.0
     found_artefacts: List[str] = []
 
-    # 1. Identifier artefacts (word-boundary, string-stripped text)
+    # 1. Identifier artefacts -- only penalise excess over original
     for token, penalty in _ident_artefacts.items():
-        if re.search(r'\b' + re.escape(token) + r'\b', scanned):
+        pat = r'\b' + re.escape(token) + r'\b'
+        dec_count  = len(re.findall(pat, scanned))
+        orig_count = len(re.findall(pat, scanned_orig))
+        if dec_count > orig_count:
             total_penalty += penalty
             found_artefacts.append(token)
 
-    # 2. Tuple-leakage artefacts (assignment-anchored, original text)
-    if _TUPLE_LEAK_RE.search(dec_text):
-        total_penalty += 0.20          # combined penalty covers both func+class
+    # 2. Tuple-leakage -- only penalise when dec has more matches than orig
+    dec_leaks  = len(_TUPLE_LEAK_RE.findall(dec_text))
+    orig_leaks = len(_TUPLE_LEAK_RE.findall(orig_text))
+    if dec_leaks > orig_leaks:
+        total_penalty += 0.20
         found_artefacts.append("raw-tuple leak")
 
-    # 3. Comment placeholders (plain substring, string-stripped text)
+    # 3. Comment placeholders -- only penalise excess over original
     for substr, penalty in _COMMENT_ARTEFACTS.items():
-        if substr in scanned:
+        dec_count  = scanned.count(substr)
+        orig_count = scanned_orig.count(substr)
+        if dec_count > orig_count:
             total_penalty += penalty
             found_artefacts.append(substr)
 
@@ -680,8 +663,8 @@ _TOKEN_RE = re.compile(
     r'"[^"\\]*(?:\\.[^"\\]*)*"'      # double-quoted string literals
     r'|[A-Za-z_]\w*'                  # identifiers and keywords
     r'|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?'  # integer and float literals
-    r'|//=|//|\*\*=|\*\*|<<=|>>=|>>|<<|!=|==|<=|>=|\+=|-=|\*=|/=|%=|&=|\|=|\^='
-    r'|[-+*/%&|^~<>!]'
+    r'|//=|//|\*\*=|\*\*|<<=|>>=|>>|<<|@=|!=|==|<=|>=|\+=|-=|\*=|/=|%=|&=|\|=|\^=|:='
+    r'|[@\-+*/%&|^~<>!]'
     r'|[=:,\[\](){}.]'
 )
 
@@ -715,18 +698,18 @@ def _hamming_score_line_aligned(
     1. For each normalised original line find its closest match in the
        decompiled output using the trigram index (already built for
        line_fidelity, reused here).
-    2. Run SequenceMatcher on just that pair's token lists (~5–20 tokens
+    2. Run SequenceMatcher on just that pair's token lists (~5-20 tokens
        each), counting LCS token matches.
     3. Accumulate: total_matched / total_orig_tokens = Hamming score.
 
-    Complexity: O(n_lines × avg_tokens_per_line²) — two orders of magnitude
+    Complexity: O(n_lines * avg_tokens_per_line^2) -- two orders of magnitude
     faster than the naïve single-sequence approach, with negligible accuracy
     loss (<1 percentage point on benchmarks).
 
     Returns
     -------
     (score, total_matched, total_orig_tokens, total_flips, flipped_tokens)
-        flipped_tokens  — sample of unmatched original tokens (for detail str)
+        flipped_tokens  -- sample of unmatched original tokens (for detail str)
     """
     if not orig_lines:
         return 1.0, 0, 0, 0, []
@@ -748,7 +731,7 @@ def _hamming_score_line_aligned(
         total_orig += len(o_toks)
 
         if ol in dec_set:
-            # Exact line match — every token agrees
+            # Exact line match -- every token agrees
             total_match += len(o_toks)
         else:
             best_line, _ = _best_match(ol, dec_lines, dec_index, cutoff=0.30)
@@ -765,7 +748,7 @@ def _hamming_score_line_aligned(
                         if tag in ('replace', 'delete'):
                             flip_sample.extend(o_toks[i1:i2])
             else:
-                # No close match at all — every token in this line is a flip
+                # No close match at all -- every token in this line is a flip
                 flip_sample.extend(o_toks)
 
     flips = total_orig - total_match
@@ -789,19 +772,19 @@ def score_token_hamming(orig_text: str, dec_text: str) -> DimensionResult:
          appears in the correct relative position inside its best-matched
          decompiled line?"
 
-    A token is a minimal semantic unit — identifier, keyword, operator, or
+    A token is a minimal semantic unit -- identifier, keyword, operator, or
     literal.  Whitespace, comments, type annotations, and decorators are
     stripped before comparison so the score is not diluted by structural
     boilerplate the decompiler cannot reproduce.
 
-    Hamming distance — generalised to variable-length sequences
+    Hamming distance -- generalised to variable-length sequences
     -----------------------------------------------------------
     Classical Hamming distance counts differing positions between two strings
     of **equal** length.  Here both sequences can differ in length, so we
     use the **LCS (longest common subsequence)** length as the agreement
     measure, applied *per aligned line pair*:
 
-        hamming_flips(line_pair) = len(orig_toks) − LCS(orig_toks, dec_toks)
+        hamming_flips(line_pair) = len(orig_toks) - LCS(orig_toks, dec_toks)
         score = Σ LCS(pair) / Σ len(orig_toks)   over all aligned pairs
 
     Properties:
@@ -810,7 +793,7 @@ def score_token_hamming(orig_text: str, dec_text: str) -> DimensionResult:
     - A token present in the original but absent or reordered in the matched
       line contributes 0 (one flip).
     - Extra tokens **inserted** by the decompiler (extra parens, ``pass``,
-      boilerplate) are LCS insertions — they never flip an original token.
+      boilerplate) are LCS insertions -- they never flip an original token.
 
     Allowed mutations (zero Hamming cost)
     -------------------------------------
@@ -842,13 +825,13 @@ def score_token_hamming(orig_text: str, dec_text: str) -> DimensionResult:
     if total == 0:
         detail = "No tokens to compare"
     elif flips == 0:
-        detail = f"LCS {matched}/{total} tokens — perfect token agreement"
+        detail = f"LCS {matched}/{total} tokens -- perfect token agreement"
     else:
         top = Counter(flip_sample).most_common(5)
-        top_str = ', '.join(f'{t!r}×{c}' for t, c in top)
+        top_str = ', '.join(f'{t!r}x{c}' for t, c in top)
         detail = (
             f"LCS {matched}/{total} tokens  ({flips} flips, "
-            f"{score*100:.1f}% agreement) — "
+            f"{score*100:.1f}% agreement) -- "
             f"top flipped: {top_str}"
         )
 
