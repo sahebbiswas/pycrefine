@@ -401,6 +401,7 @@ class DecompilerGeneric(DecompilerBase):
         self.blocks = []
         self._while_header_targets = {}
         self._prescan_while_loops()
+        self._prescan_ternaries()
 
         # Check for docstring.
         # co_consts[0] is a docstring ONLY if the first meaningful instruction
@@ -589,6 +590,332 @@ class DecompilerGeneric(DecompilerBase):
                 return self._get_jump_target(ins)
         return -1
 
+
+    def _prescan_ternaries(self) -> None:
+        """
+        Pre-scan all POP_JUMP_IF_* instructions to identify ternary expressions.
+
+        Two bytecode patterns both encode ``x = A if cond else B``:
+
+        Pattern A (diamond, then-branch ends with RETURN/fall-through):
+            POP_JUMP_IF_*(else_start)
+            <A-expr>  STORE_* x  RETURN_CONST
+            >> <B-expr>  STORE_* x     [else_start]
+
+        Pattern B (JUMP_FORWARD, used when more code follows the ternary):
+            POP_JUMP_IF_*(else_start)
+            <A-expr>  JUMP_FORWARD(store_offset)
+            >> <B-expr>               [else_start]
+            >> STORE_* x              [store_offset]
+
+        Disambiguation from a real if/else block:
+          - Exactly ONE STORE in the then-branch with the same name as the
+            first STORE in the else-branch.
+          - No POP_TOP (discarded call result = side-effect statement).
+          - No nested POP_JUMP_IF (no inner if in the branch).
+          - All non-STORE instructions before the then-STORE are pure
+            expression-builders (no control flow, no side effects).
+
+        Populates:
+          _ternary_jumps   {pop_jump_offset: (store_name, then_instrs,
+                                              else_instrs, is_true_jump)}
+          _ternary_suppress  set of offsets to skip in normal processing
+        """
+        STORES = frozenset(("STORE_FAST", "STORE_NAME", "STORE_GLOBAL"))
+        SKIP   = frozenset(("CACHE", "RESUME", "NOT_TAKEN", "COPY_FREE_VARS"))
+        # Return/fallthrough terminators that may appear at the end of a then-branch
+        # in Pattern A — treated as no-ops for purity checking purposes.
+        TERM   = frozenset(("RETURN_CONST", "RETURN_VALUE"))
+        PURE   = frozenset((
+            "LOAD_FAST", "LOAD_NAME", "LOAD_GLOBAL", "LOAD_CONST", "LOAD_DEREF",
+            "LOAD_SMALL_INT", "LOAD_GLOBAL_MODULE", "LOAD_ATTR", "LOAD_METHOD",
+            "GET_ATTR",
+            # 3.14 borrow-semantics load variants
+            "LOAD_FAST_BORROW", "LOAD_FAST_BORROW_LOAD_FAST_BORROW",
+            "LOAD_CONST_BORROW",
+            "CALL", "CALL_FUNCTION", "CALL_METHOD",
+            "COMPARE_OP", "BINARY_OP", "IS_OP", "CONTAINS_OP",
+            "UNARY_NOT", "UNARY_NEGATIVE", "UNARY_POSITIVE", "UNARY_INVERT",
+            "BUILD_TUPLE", "BUILD_LIST", "BUILD_SET", "BUILD_MAP",
+            "PRECALL", "PUSH_NULL",
+            "FORMAT_VALUE", "FORMAT_SIMPLE", "BUILD_STRING",
+            "BINARY_SUBSCR",
+            "TO_BOOL",  # 3.14 explicit bool conversion — pure, stack-only
+        )) | SKIP | TERM
+
+        self._ternary_jumps: dict = {}
+        self._ternary_suppress: set = set()
+
+        offset_to_idx = {ins.offset: i for i, ins in enumerate(self.instructions)}
+
+        for idx, ins in enumerate(self.instructions):
+            if "POP_JUMP_IF_FALSE" not in ins.opname and "POP_JUMP_IF_TRUE" not in ins.opname:
+                continue
+            jump_target = self._get_jump_target(ins)
+            t_idx = offset_to_idx.get(jump_target)
+            if t_idx is None or t_idx <= idx:
+                continue  # backward jump
+
+            # ── Collect then-branch instructions ─────────────────────────
+            then_raw = self.instructions[idx + 1 : t_idx]
+            then_sig = [x for x in then_raw if x.opname not in SKIP]
+
+            if not then_sig:
+                continue
+
+            # Detect Pattern B: then-branch contains a forward jump that skips
+            # the else-expression and lands directly at the STORE instruction.
+            # On 3.12 this is JUMP_FORWARD; on 3.14 it may be a different opcode
+            # (e.g. JUMP_FORWARD still, but with a different encoding).  Match any
+            # opcode whose name contains "FORWARD" or "JUMP" (but not backward/IF).
+            _FWD_JUMP = lambda op: (
+                "FORWARD" in op
+                or (op == "JUMP" and "BACKWARD" not in op and "IF" not in op)
+            )
+            jf_in_then = [
+                x for x in then_sig
+                if _FWD_JUMP(x.opname) and "IF" not in x.opname
+            ]
+            if jf_in_then:
+                # Pattern B: then-branch contains a forward jump.
+                # Two sub-variants:
+                #
+                # B1 (3.12 standard):  then-EXPR  JUMP_FORWARD(store)  >> else-EXPR  >> STORE
+                # B2 (3.14 possible):  then-EXPR  STORE  JUMP_FORWARD(after)  >> else-EXPR  >> STORE
+                #
+                # Detect B2 first (then-STORE exists before the jump).
+                jf = jf_in_then[-1]
+                jf_pos = next(
+                    (i for i, x in enumerate(then_sig) if x.offset == jf.offset),
+                    None,
+                )
+                if jf_pos is None:
+                    continue
+                before_jf = then_sig[:jf_pos]
+
+                then_stores_before_jf = [x for x in before_jf if x.opname in STORES]
+
+                if then_stores_before_jf:
+                    # ── B2: then-STORE is before the jump ────────────────
+                    then_s = then_stores_before_jf[-1]
+                    store_target = self._get_jump_target(jf)
+                    st_idx = offset_to_idx.get(store_target)
+                    if st_idx is None:
+                        for fi in range(t_idx, min(t_idx + 20, len(self.instructions))):
+                            if self.instructions[fi].opname in STORES:
+                                st_idx = fi
+                                break
+                    if st_idx is None:
+                        continue
+                    store_instr = self.instructions[st_idx]
+                    if store_instr.opname not in STORES:
+                        continue
+                    if then_s.argval != store_instr.argval:
+                        continue
+                    ts_pos = next(
+                        i for i, x in enumerate(before_jf)
+                        if x.offset == then_s.offset
+                    )
+                    actual_then_expr = [
+                        x for x in before_jf[:ts_pos] if x.opname not in SKIP
+                    ]
+                    if not all(x.opname in PURE for x in actual_then_expr):
+                        continue
+                    if any(x.opname == "POP_TOP" or "POP_JUMP_IF" in x.opname
+                           for x in actual_then_expr):
+                        continue
+                    else_raw    = self.instructions[t_idx : st_idx]
+                    else_instrs = [x for x in else_raw if x.opname not in SKIP]
+                    if any(x.opname == "POP_TOP" or "POP_JUMP_IF" in x.opname
+                           for x in else_instrs):
+                        continue
+                    if not all(x.opname in PURE for x in else_instrs):
+                        continue
+                    store_name = str(store_instr.argval)
+                    is_true    = "IF_TRUE" in ins.opname
+                    self._ternary_jumps[ins.offset] = (
+                        store_name, actual_then_expr, else_instrs, is_true,
+                    )
+                    for x in then_raw:
+                        self._ternary_suppress.add(x.offset)
+                    for x in else_instrs:
+                        self._ternary_suppress.add(x.offset)
+                    continue
+
+                # ── B1: no then-STORE before the jump ────────────────────
+                if not all(x.opname in PURE for x in before_jf):
+                    continue
+                if any(x.opname == "POP_TOP" or "POP_JUMP_IF" in x.opname
+                       for x in before_jf):
+                    continue
+
+                store_target = self._get_jump_target(jf)
+                st_idx = offset_to_idx.get(store_target)
+                if st_idx is None:
+                    for fi in range(t_idx, min(t_idx + 20, len(self.instructions))):
+                        if self.instructions[fi].opname in STORES:
+                            st_idx = fi
+                            break
+                if st_idx is None:
+                    continue
+
+                else_raw    = self.instructions[t_idx : st_idx]
+                else_instrs = [x for x in else_raw if x.opname not in SKIP]
+                if any(x.opname == "POP_TOP" or "POP_JUMP_IF" in x.opname
+                       for x in else_instrs):
+                    continue
+                if not all(x.opname in PURE for x in else_instrs):
+                    continue
+
+                if st_idx >= len(self.instructions):
+                    continue
+                store_instr = self.instructions[st_idx]
+                if store_instr.opname not in STORES:
+                    continue
+
+                store_name = str(store_instr.argval)
+                is_true    = "IF_TRUE" in ins.opname
+                self._ternary_jumps[ins.offset] = (
+                    store_name, before_jf, else_instrs, is_true,
+                )
+                for x in then_raw:
+                    self._ternary_suppress.add(x.offset)
+                for x in else_instrs:
+                    self._ternary_suppress.add(x.offset)
+                continue  # done with this POP_JUMP_IF
+
+            # ── Pattern A: no JUMP_FORWARD ────────────────────────────────
+            store_idxs = [i for i, x in enumerate(then_sig) if x.opname in STORES]
+            if len(store_idxs) != 1:
+                continue
+            store_pos  = store_idxs[0]
+            then_store = then_sig[store_pos]
+            before_store = then_sig[:store_pos]
+
+            if any(x.opname == "POP_TOP" for x in before_store):
+                continue
+            if any("POP_JUMP_IF" in x.opname for x in before_store):
+                continue
+            if not all(x.opname in PURE for x in before_store):
+                continue
+
+            # Find the first STORE in the else-branch
+            else_store = None
+            for i in range(t_idx, min(t_idx + 12, len(self.instructions))):
+                xi = self.instructions[i]
+                if xi.opname in STORES:
+                    else_store = xi
+                    break
+                if xi.opname not in PURE:
+                    break
+
+            if else_store is None or else_store.argval != then_store.argval:
+                continue
+
+            es_idx = offset_to_idx[else_store.offset]
+            else_raw = self.instructions[t_idx : es_idx]
+            else_instrs = [x for x in else_raw if x.opname not in SKIP]
+            if any(x.opname == "POP_TOP" for x in else_instrs):
+                continue
+            if any("POP_JUMP_IF" in x.opname for x in else_instrs):
+                continue
+
+            store_name = str(then_store.argval)
+            is_true    = "IF_TRUE" in ins.opname
+
+            self._ternary_jumps[ins.offset] = (
+                store_name, before_store, else_instrs, is_true
+            )
+            for x in then_raw:
+                self._ternary_suppress.add(x.offset)
+            for x in else_instrs:
+                self._ternary_suppress.add(x.offset)
+
+    def _eval_ternary_branch(self, instrs: list) -> str:
+        """
+        Speculatively evaluate a short pure-expression instruction sequence
+        (the then- or else-branch of a ternary) and return the expression string.
+
+        Uses a fresh mini-stack that mirrors the main stack behaviour but
+        discards the result without emitting any reconstructed lines.
+        """
+        mini_stack: list = []
+        for ins in instrs:
+            op = ins.opname
+            if op in ("CACHE", "RESUME", "NOT_TAKEN", "COPY_FREE_VARS",
+                      "PRECALL", "PUSH_NULL", "TO_BOOL",
+                      "RETURN_CONST", "RETURN_VALUE"):
+                continue
+            if op == "LOAD_FAST_BORROW_LOAD_FAST_BORROW":
+                # Pushes two values: argval is a tuple (name1, name2)
+                if isinstance(ins.argval, (tuple, list)) and len(ins.argval) >= 2:
+                    mini_stack.append(str(ins.argval[0]))
+                    mini_stack.append(str(ins.argval[1]))
+                continue
+            if op in ("LOAD_FAST", "LOAD_NAME", "LOAD_GLOBAL",
+                      "LOAD_SMALL_INT", "LOAD_FAST_BORROW",
+                      "LOAD_CONST_BORROW", "LOAD_DEREF",
+                      "LOAD_GLOBAL_MODULE", "LOAD_CONST"):
+                val = ins.argval
+                if val is None and op == "LOAD_SMALL_INT":
+                    val = ins.arg
+                if op == "LOAD_GLOBAL_MODULE" and isinstance(val, (list, tuple)) and val:
+                    val = val[0]
+                if "CONST" in op or "SMALL_INT" in op:
+                    mini_stack.append(self._format_val(val))
+                else:
+                    mini_stack.append(str(val))
+            elif op in ("GET_ATTR", "LOAD_ATTR", "LOAD_METHOD"):
+                if mini_stack:
+                    obj = mini_stack.pop()
+                    mini_stack.append(f"{obj}.{ins.argval}")
+            elif op in ("CALL", "CALL_FUNCTION", "CALL_METHOD"):
+                num = int(ins.arg) if ins.arg is not None else 0
+                args = []
+                for _ in range(num):
+                    args.insert(0, mini_stack.pop() if mini_stack else "?")
+                func = mini_stack.pop() if mini_stack else "?"
+                if " + NULL" in str(func) or "|NULL" in str(func):
+                    func = str(func).split(" + ")[0].split("|")[0]
+                mini_stack.append(f"{func}({', '.join(args)})")
+            elif op == "COMPARE_OP":
+                if len(mini_stack) >= 2:
+                    right, left = mini_stack.pop(), mini_stack.pop()
+                    op_sym = str(ins.argval)
+                    import re as _re
+                    m = _re.search(r"\(([^)]+)\)", op_sym)
+                    if m:
+                        op_sym = m.group(1)
+                    mini_stack.append(f"{left} {op_sym} {right}")
+            elif op == "BINARY_OP":
+                if len(mini_stack) >= 2:
+                    right, left = mini_stack.pop(), mini_stack.pop()
+                    op_map = {0:"+",1:"&",2:"//",3:"<<",4:"@",5:"*",
+                              6:"%",7:"|",8:"**",9:">>",10:"-",11:"/",12:"^"}
+                    sym = op_map.get(int(ins.arg) if ins.arg is not None else -1, "?")
+                    mini_stack.append(f"({left} {sym} {right})")
+            elif op in ("IS_OP",):
+                if len(mini_stack) >= 2:
+                    right, left = mini_stack.pop(), mini_stack.pop()
+                    sym = "is not" if bool(ins.arg) else "is"
+                    mini_stack.append(f"{left} {sym} {right}")
+            elif op in ("CONTAINS_OP",):
+                if len(mini_stack) >= 2:
+                    container, item = mini_stack.pop(), mini_stack.pop()
+                    sym = "not in" if bool(ins.arg) else "in"
+                    mini_stack.append(f"{item} {sym} {container}")
+            elif op == "UNARY_NOT":
+                if mini_stack:
+                    mini_stack.append(f"not {mini_stack.pop()}")
+            elif op in ("UNARY_NEGATIVE",):
+                if mini_stack:
+                    mini_stack.append(f"-{mini_stack.pop()}")
+            elif op == "BINARY_SUBSCR":
+                if len(mini_stack) >= 2:
+                    key, obj = mini_stack.pop(), mini_stack.pop()
+                    mini_stack.append(f"{obj}[{key}]")
+        return str(mini_stack[-1]) if mini_stack else "?"
+
     def _has_conditional_jump(self) -> bool:
         """Return True if any POP_JUMP_IF_FALSE/TRUE exists anywhere."""
         return any(
@@ -708,6 +1035,10 @@ class DecompilerGeneric(DecompilerBase):
 
     def _handle_instruction(self, instr: BytecodeInstruction):  # noqa: C901
         opname = instr.opname
+        # Suppress then-branch instructions of detected ternary expressions;
+        # the ternary is pushed as a whole expression at POP_JUMP_IF time.
+        if instr.offset in getattr(self, "_ternary_suppress", ()):
+            return
 
         # ── loads ──────────────────────────────────────────────────────
         if opname in (
@@ -1524,6 +1855,34 @@ class DecompilerGeneric(DecompilerBase):
                         self._while_true_ends.add(end_offset)
 
         elif "POP_JUMP_IF_FALSE" in opname or "POP_JUMP_IF_TRUE" in opname:
+            # ── Ternary expression detection ──────────────────────────────
+            # If _prescan_ternaries identified this jump as a ternary, evaluate
+            # both branches speculatively and push the ternary expression onto
+            # the stack instead of opening a control-flow block.
+            if instr.offset in getattr(self, "_ternary_jumps", {}):
+                store_name, then_instrs, else_instrs, is_true = \
+                    self._ternary_jumps[instr.offset]
+                cond_expr = str(self.stack.pop()) if self.stack else "?"
+                then_expr = self._eval_ternary_branch(then_instrs)
+                else_expr = self._eval_ternary_branch(else_instrs)
+                # POP_JUMP_IF_TRUE jumps to else-branch when True,
+                # so: x = then_expr if NOT cond else else_expr
+                # POP_JUMP_IF_FALSE jumps to else-branch when False,
+                # so: x = then_expr if cond else else_expr
+                if is_true:
+                    self.stack.append(f"{then_expr} if not {cond_expr} else {else_expr}")
+                else:
+                    self.stack.append(f"{then_expr} if {cond_expr} else {else_expr}")
+                # Skip past the else-branch instructions up to (but not including)
+                # the else-STORE: they have already been evaluated speculatively.
+                # The else-STORE fires normally and emits the assignment.
+                jump_target = self._get_jump_target(instr)
+                while self.pc < len(self.instructions):
+                    if self.instructions[self.pc].offset >= jump_target:
+                        break
+                    self.pc += 1
+                return
+
             # Suppress dup-condition instructions pre-identified by pre-scan.
             if instr.offset in self._while_body_offsets:
                 if self.stack:
