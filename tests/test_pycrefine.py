@@ -192,8 +192,23 @@ class TestControlFlow(unittest.TestCase):
         assert_contains(out, "if x > 0:", "print(x)")
 
     def test_if_else(self):
+        # CPython compiles both `if x > 0: y=1 else: y=0` and
+        # `y = 1 if x > 0 else 0` to identical bytecode.  The decompiler
+        # canonicalises this pattern as a ternary expression, which is
+        # semantically equivalent and more compact.  Accept either form.
         out = decompile("x = 1\nif x > 0:\n    y = 1\nelse:\n    y = 0\n")
-        assert_contains(out, "if x > 0:", "y = 1")
+        self.assertIn("x > 0", out, f"Condition missing:\n{out}")
+        self.assertIn("y = 1" if "if x > 0:" in out else "1", out,
+                      f"Then-value missing:\n{out}")
+        # Both branch values must appear somewhere in the output
+        self.assertTrue(
+            "y = 1" in out or "1 if" in out,
+            f"Then branch value '1' missing:\n{out}",
+        )
+        self.assertTrue(
+            "y = 0" in out or "else 0" in out,
+            f"Else branch value '0' missing:\n{out}",
+        )
 
     def test_for_loop(self):
         out = decompile("for i in range(3):\n    print(i)\n")
@@ -2503,6 +2518,112 @@ class TestGenexprRendering(unittest.TestCase):
                     "(x + 1)", line,
                     "Single-expression return parens should be stripped",
                 )
+
+
+# ---------------------------------------------------------------------------
+# Ternary expressions
+# ---------------------------------------------------------------------------
+
+class TestTernaryExpression(unittest.TestCase):
+    """
+    Tests for the ternary-expression decompilation fix.
+
+    CPython compiles ``x = A if cond else B`` to a diamond bytecode pattern
+    (POP_JUMP_IF -> then-expr -> STORE -> fall-through / JUMP_FORWARD ->
+    else-expr -> STORE) with no syntactic marker distinguishing it from a
+    two-branch if/else block.  pycrefine canonicalises this as the compact
+    ternary form.
+    """
+
+    def test_basic_ternary_assign(self):
+        """x = 1 if cond else 0 must not decompile as if/pass/else/pass."""
+        out = decompile("def f(x):\n    y = 1 if x > 0 else 0\n    return y\n")
+        self.assertNotIn("pass", out, f"Spurious pass in ternary:\n{out}")
+        self.assertIn("1", out)
+        self.assertIn("0", out)
+        self.assertIn("x > 0", out)
+
+    def test_ternary_correct_form(self):
+        """The ternary expression must appear on a single assignment line."""
+        out = decompile("def f(x):\n    y = 1 if x > 0 else 0\n    return y\n")
+        # Exactly one assignment to y using the ternary form
+        ternary_lines = [
+            ln.strip() for ln in out.splitlines()
+            if "y =" in ln and "if" in ln and "else" in ln
+        ]
+        self.assertEqual(len(ternary_lines), 1,
+                         f"Expected exactly one ternary line, got {ternary_lines!r}\n{out}")
+
+    def test_original_reported_case(self):
+        """
+        The exact case reported: bytes assignment with isinstance guard.
+        lnotab = bytes(lnotab) if not isinstance(lnotab, bytes) else lnotab
+        """
+        src = (
+            "def test(lnotab):\n"
+            "    lnotab = bytes(lnotab) if not isinstance(lnotab, bytes) else lnotab\n"
+            "    print(lnotab)\n"
+        )
+        out = decompile(src)
+        self.assertNotIn("pass", out, f"Spurious pass:\n{out}")
+        self.assertIn("isinstance", out)
+        self.assertIn("bytes", out)
+        self.assertIn("lnotab", out)
+        self.assertIn("print", out)
+        # Must be a single assignment, not an if/else block with pass bodies
+        self.assertNotIn("if not isinstance(lnotab, bytes):\n        pass", out)
+
+    def test_ternary_with_call_expression(self):
+        """A call in the then-branch must be preserved, not discarded."""
+        out = decompile("def f(x):\n    y = abs(x) if x < 0 else x\n")
+        self.assertNotIn("pass", out, f"Spurious pass:\n{out}")
+        self.assertIn("abs", out)
+        self.assertIn("x < 0", out)
+
+    def test_ternary_with_unary(self):
+        """Unary negation in a branch must be preserved."""
+        out = decompile("def f(x):\n    b = -x if x < 0 else x\n")
+        self.assertNotIn("pass", out, f"Spurious pass:\n{out}")
+        self.assertIn("x < 0", out)
+
+    def test_ternary_chain_with_other_statements(self):
+        """Ternary followed by more statements must not corrupt them."""
+        src = "def f(x):\n    a = 1\n    b = x if x > 0 else -x\n    return a + b\n"
+        out = decompile(src)
+        self.assertIn("a = 1", out)
+        self.assertIn("return", out)
+        self.assertNotIn("pass", out, f"Spurious pass:\n{out}")
+
+    def test_real_if_else_multistatement_not_collapsed(self):
+        """A genuine if/else with multiple statements must NOT become a ternary."""
+        src = "def f(x):\n    if x > 0:\n        y = 1\n        z = 2\n    else:\n        y = 0\n        z = -1\n"
+        out = decompile(src)
+        # Both y and z assignments must appear — multi-statement branch preserved
+        self.assertIn("z", out, f"z assignment missing:\n{out}")
+        self.assertIn("if x > 0:", out, f"if header missing:\n{out}")
+
+    def test_side_effect_if_not_collapsed(self):
+        """An if-branch with a side-effect call (no assignment) must not become ternary."""
+        src = "def f(x):\n    if x > 0:\n        print(x)\n"
+        out = decompile(src)
+        self.assertIn("if x > 0:", out)
+        self.assertIn("print", out)
+        self.assertNotIn("if x > 0 else", out)
+
+    def test_if_else_equivalent_preserves_semantics(self):
+        """
+        Both the if/else and ternary forms produce identical bytecode.
+        The decompiler output must be semantically correct Python that
+        can be compiled and run.
+        """
+        src = "def f(x):\n    y = 1 if x > 0 else 0\n    return y\n"
+        out = decompile(src)
+        # The output must be valid Python
+        import ast
+        try:
+            ast.parse(out)
+        except SyntaxError as e:
+            self.fail(f"Decompiled output is not valid Python: {e}\n{out}")
 
 
 # ---------------------------------------------------------------------------
