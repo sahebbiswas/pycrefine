@@ -10,6 +10,27 @@ from typing import List, Optional
 # Basic global constant
 VERSION = "1.0.0"
 
+class ComplexException(Exception):
+    def __init__(self, message):
+        self.message = message
+
+def some_decorator(func):
+    def wrapper(*args, **kwargs):
+        print("Before function")
+        result = func(*args, **kwargs)
+        print("After function")
+        return result
+    return wrapper
+
+
+def member_decorator(func):
+    def wrapper(self, *args, **kwargs):
+        print("Before method")
+        result = func(self, *args, **kwargs)
+        print("After method")
+        return result
+    return wrapper
+
 class BaseProcessor:
     """Base class for demonstration."""
     def __init__(self, name: str):
@@ -26,12 +47,16 @@ class DataProcessor(BaseProcessor):
         super().__init__(name)
         self.threshold = threshold
 
+    @member_decorator
     def add_item(self, item):
         if item is not None:
+            if item == "error":
+                raise ComplexException("Error processing item")
             self.items.append(item)
             return True
         return False
 
+    @member_decorator
     def process(self):
         results = []
         for item in self.items:
@@ -41,11 +66,12 @@ class DataProcessor(BaseProcessor):
                 elif isinstance(item, str):
                     results.append(item.upper())
                 else:
-                    results.append(None)
+                    raise ValueError("Invalid item type")
             except Exception as e:
                 print(f"Error processing item {item}: {e}")
         return results
 
+@some_decorator
 def complex_logic(x: int, y: List[int]) -> bool:
     """A function with nested logic and loops."""
     if x < 0:
@@ -71,8 +97,17 @@ def run_test():
     proc = DataProcessor("TestRunner", threshold=5)
     
     data = [1, 10, "hello", None, 3]
-    for d in data:
-        proc.add_item(d)
+    try:    
+        for d in data:
+            proc.add_item(d)
+    except ComplexException as e:
+        print(f"Complex exception: {e.message}")
+    except BaseProcessor as e:
+        print(f"Error processing item {d}: {e}")
+    except Exception:
+        pass
+    finally:
+        print("Finally block")
         
     print(f"Processor: {proc.name}")
     print(f"Results: {proc.process()}")

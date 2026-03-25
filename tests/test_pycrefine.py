@@ -1210,15 +1210,25 @@ class TestDecompiler39Classes(unittest.TestCase):
         self.assertNotIn("__build_class__", result)
 
     def test_regular_call_with_func_tuple_arg(self):
-        """A regular call that happens to receive a (func, text) tuple converts it."""
+        """
+        A CALL_FUNCTION with a named ('func', body) as its single argument
+        is the decorator pattern: decorator(func) -> push ('func', '@deco\ndef f()...')
+        so the decorated function definition is preserved as a tuple for STORE_NAME
+        to emit cleanly.
+        """
         dec = self._make_dec()
         body_tuple = ("func", "def f():\n    return 1")
         dec.stack = ["decorator", body_tuple]
         self._call_function(dec, 1)
         result = dec.stack[-1]
-        self.assertIsInstance(result, str)
-        # Should use the body text, not the raw tuple repr
-        self.assertNotIn("('func'", result)
+        # Must be a ('func', ...) tuple — STORE_NAME will emit it as source code
+        self.assertIsInstance(result, tuple)
+        self.assertEqual(result[0], "func")
+        # The decorated body must contain both the @decorator line and the def
+        body_text = result[1]
+        self.assertIn("@decorator", body_text)
+        self.assertIn("def f():", body_text)
+        self.assertNotIn("('func'", body_text)
 
     # ------------------------------------------------------------------
     # STORE_NAME integration
@@ -2624,6 +2634,114 @@ class TestTernaryExpression(unittest.TestCase):
             ast.parse(out)
         except SyntaxError as e:
             self.fail(f"Decompiled output is not valid Python: {e}\n{out}")
+
+
+# ---------------------------------------------------------------------------
+# Decorator decompilation
+# ---------------------------------------------------------------------------
+
+class TestDecorators(unittest.TestCase):
+    """
+    Tests for the decorator decompilation fix.
+
+    On 3.12+, decorators compile as:
+        LOAD_NAME deco
+        [annotation setup]
+        LOAD_CONST <code>
+        MAKE_FUNCTION [flags]
+        CALL 0            <- CPython decorator protocol
+        STORE_NAME func_name
+
+    The CALL handler must recognise ('func', body) as the implicit argument
+    and the item below it on the stack as the decorator.
+
+    On 3.9, decorators compile as:
+        LOAD_NAME deco
+        MAKE_FUNCTION 0
+        CALL_FUNCTION 1   <- explicit 1-arg call
+        STORE_NAME func_name
+    """
+
+    def test_simple_decorator(self):
+        """@deco def f(x): must emit @deco on the line before def."""
+        out = decompile("@deco\ndef f(x):\n    return x\n")
+        lines = [l for l in out.splitlines() if l.strip()]
+        deco_line = next((i for i, l in enumerate(lines) if l.strip() == "@deco"), None)
+        self.assertIsNotNone(deco_line, f"@deco not found:\n{out}")
+        def_line = next((i for i, l in enumerate(lines) if l.strip().startswith("def f(")), None)
+        self.assertIsNotNone(def_line, f"def f not found:\n{out}")
+        self.assertEqual(deco_line + 1, def_line,
+                         f"@deco must immediately precede def:\n{out}")
+
+    def test_decorator_with_arguments(self):
+        """@deco(arg) must appear as-is before the def."""
+        out = decompile("@deco(1)\ndef f(x):\n    return x\n")
+        self.assertIn("@deco(1)", out, f"@deco(1) missing:\n{out}")
+        self.assertIn("def f(", out)
+
+    def test_two_decorators(self):
+        """Multiple decorators must all appear, outermost first."""
+        out = decompile("@deco1\n@deco2\ndef f(x):\n    return x\n")
+        self.assertIn("@deco1", out, f"@deco1 missing:\n{out}")
+        self.assertIn("@deco2", out, f"@deco2 missing:\n{out}")
+        d1_pos = out.find("@deco1")
+        d2_pos = out.find("@deco2")
+        self.assertLess(d1_pos, d2_pos,
+                        f"@deco1 must appear before @deco2:\n{out}")
+
+    def test_decorator_body_preserved(self):
+        """The decorated function body must still be emitted correctly."""
+        out = decompile("@deco\ndef f(x):\n    return x + 1\n")
+        self.assertIn("return x", out, f"Function body missing:\n{out}")
+
+    def test_no_spurious_decorator_on_genexpr(self):
+        """Generator expressions must NOT be wrapped in a spurious @decorator."""
+        out = decompile("result = sum(x**2 for x in range(10))\n")
+        self.assertNotIn("@sum", out, f"@sum spuriously added:\n{out}")
+        self.assertIn("for x in range(10)", out)
+
+    def test_no_spurious_decorator_on_lambda(self):
+        """Lambda expressions must NOT be treated as decorated functions."""
+        out = decompile("f = lambda x: x * 2\n")
+        self.assertNotIn("@", out, f"Spurious decorator on lambda:\n{out}")
+
+    def test_decorator_not_a_regular_call(self):
+        """Decorated function must NOT appear as func_name = deco(def ...)."""
+        out = decompile("@deco\ndef f(x):\n    return x\n")
+        self.assertNotIn("= deco(", out,
+                         f"Function emitted as assignment call:\n{out}")
+        self.assertNotIn("deco(def", out,
+                         f"deco(def...) pattern found:\n{out}")
+
+    def test_decorator_function_missing_not_skipped(self):
+        """The decorated function must appear in the output (not be silently dropped)."""
+        out = decompile("@deco\ndef f(x):\n    return x\n")
+        self.assertIn("def f(", out, f"Decorated function was silently dropped:\n{out}")
+        self.assertGreater(len(out.strip()), 10,
+                           f"Output too short — function body dropped:\n{out}")
+
+    def test_decorated_function_with_body(self):
+        """Complex body after decorator must be intact."""
+        src = (
+            "@some_decorator\n"
+            "def complex_logic(x, y):\n"
+            "    if x < 0:\n"
+            "        return False\n"
+            "    return True\n"
+        )
+        out = decompile(src)
+        self.assertIn("@some_decorator", out)
+        self.assertIn("def complex_logic(", out)
+        self.assertIn("return False", out)
+        self.assertIn("return True", out)
+        # Must not appear as an assignment call
+        self.assertNotIn("some_decorator(def", out)
+        self.assertNotIn("complex_logic = some_decorator", out)
+
+    def test_undecorated_function_unchanged(self):
+        """A function without a decorator must not gain a spurious @ line."""
+        out = decompile("def f(x):\n    return x\n")
+        self.assertNotIn("@", out, f"Spurious decorator added:\n{out}")
 
 
 # ---------------------------------------------------------------------------
