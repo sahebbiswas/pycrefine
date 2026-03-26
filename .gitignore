@@ -4,3 +4,4 @@ __pycache__
 *.txt
 *.json
 pycrefine.egg-info 
+run_tests.bat 

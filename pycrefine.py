@@ -334,6 +334,23 @@ def _render_func_tuple(body_text: str, args: List[str]) -> str:
 
     return f"<func>({', '.join(args)})"
 
+
+def _is_anonymous_func_body(first_line: str) -> bool:
+    """
+    Return True when *first_line* is the signature line of an anonymous code
+    object — a generator expression, lambda, list/set/dict comprehension, or
+    the synthetic ``<module>`` frame — rather than a named function.
+
+    Used by the decorator-detection logic in CALL / CALL_FUNCTION handlers to
+    distinguish ``@decorator def real_func(...): ...`` (should be emitted with
+    a ``@`` line) from ``sum(x**2 for x in ...)`` (should NOT gain a decorator).
+    """
+    _ANON_TOKENS = (
+        "<genexpr>", "<lambda>", "<listcomp>",
+        "<setcomp>", "<dictcomp>", "<module>",
+    )
+    return any(tok in first_line for tok in _ANON_TOKENS)
+
 # ---------------------------------------------------------------------------
 # Base
 # ---------------------------------------------------------------------------
@@ -1582,12 +1599,7 @@ class DecompilerGeneric(DecompilerBase):
                 body_text = str(func_val[1])
                 # Is this a named function (not a genexpr/lambda/comprehension)?
                 first_line = body_text.strip().split("\n")[0] if body_text.strip() else ""
-                is_anonymous = any(
-                    tok in first_line
-                    for tok in ("<genexpr>", "<lambda>", "<listcomp>",
-                                "<setcomp>", "<dictcomp>", "<module>")
-                )
-                if not is_anonymous and self.stack:
+                if not _is_anonymous_func_body(first_line) and self.stack:
                     decorator_expr = str(self.stack.pop())
                     # Strip NULL sentinel if present
                     if " + NULL" in decorator_expr or "|NULL" in decorator_expr:
@@ -2566,12 +2578,7 @@ class Decompiler39(DecompilerGeneric):
                         and raw_args[0][0] == "func"):
                     body_text = str(raw_args[0][1])
                     first_line = body_text.strip().split("\n")[0] if body_text.strip() else ""
-                    is_anonymous = any(
-                        tok in first_line
-                        for tok in ("<genexpr>", "<lambda>", "<listcomp>",
-                                    "<setcomp>", "<dictcomp>", "<module>")
-                    )
-                    if not is_anonymous:
+                    if not _is_anonymous_func_body(first_line):
                         deco_line = f"@{func}"
                         self.stack.append(("func", f"{deco_line}\n{body_text}"))
                         return
