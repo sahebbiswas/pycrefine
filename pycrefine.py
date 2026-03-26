@@ -110,6 +110,7 @@
 #         Python 3.14 magic numbers, with LOAD_SMALL_INT already handled
 #         by parent; extend here as 3.14 opcodes become known.
 
+import argparse
 import marshal
 import re
 import struct
@@ -3243,14 +3244,28 @@ def get_decompiler(filepath: str) -> DecompilerBase:
 # ---------------------------------------------------------------------------
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: pycrefine <file.pyc>")
-        return
-
-    pyc_path = sys.argv[1]
+    parser = argparse.ArgumentParser(
+        description="A Python .pyc decompiler that reconstructs readable source code from compiled bytecode."
+    )
+    parser.add_argument("input", help="The .pyc file to decompile")
+    parser.add_argument(
+        "-o", "--output",
+        help="Optional filename to save the decompiled output to. If not supplied, prints to screen."
+    )
+    
+    args = parser.parse_args()
+    
     try:
-        decompiler = get_decompiler(pyc_path)
-        print(decompiler.decompile())
+        decompiler = get_decompiler(args.input)
+        output_text = decompiler.decompile()
+        
+        if args.output:
+            with open(args.output, "w", encoding="utf-8") as f:
+                f.write(output_text)
+            print(f"Decompiled output saved to {args.output}")
+        else:
+            print(output_text)
+            
     except ValueError as e:
         print(f"Error: {e}")
         sys.exit(1)
