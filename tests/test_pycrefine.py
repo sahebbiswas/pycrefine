@@ -268,8 +268,37 @@ class TestControlFlow(unittest.TestCase):
         assert_contains(out, "x == 1")
 
     def test_if_comparison_not_equals(self):
+        """
+        Verify that decompiling an inequality if-statement preserves the '!=' comparison.
+        
+        Ensures the decompiled output contains the substring "x != 2".
+        """
         out = decompile("x = 1\nif x != 2:\n    pass\n")
         assert_contains(out, "x != 2")
+
+    def test_if_implicit_else_avoidance(self):
+        """The decompiler should not append an else block after an if block
+        that ends with an unconditional exit (like return or raise)."""
+        src = (
+            "def test(x):\n"
+            "    if x is None:\n"
+            "        return True\n"
+            "    if x == 1:\n"
+            "        return True\n"
+            "    return False\n"
+        )
+        out = decompile(src)
+        self.assertNotIn("else:", out, f"Unexpected 'else:' generated:\n{out}")
+        assert_contains(out, "if x is None:", "if x == 1:", "return False")
+
+        lines = out.splitlines()
+        first_if_indent = next(len(line) - len(line.lstrip()) for line in lines if "if x is None:" in line)
+        second_if_indent = next(len(line) - len(line.lstrip()) for line in lines if "if x == 1:" in line)
+        return_false_indent = next(len(line) - len(line.lstrip()) for line in lines if "return False" in line)
+
+        self.assertEqual(first_if_indent, second_if_indent, "if-headers missing base ident level")
+        self.assertEqual(first_if_indent, return_false_indent, "return False missing base indent level")
+
 
 
 # ---------------------------------------------------------------------------
@@ -543,6 +572,7 @@ class TestNoneGuards(unittest.TestCase):
         """
         out = decompile("x = None\nif x is not None:\n    print(1)\n")
         self.assertIn("print(1)", out)
+        self.assertIn("if x is not None:", out)
 
     def test_pjif_not_none_emits_is_none(self):
         """
@@ -551,6 +581,7 @@ class TestNoneGuards(unittest.TestCase):
         """
         out = decompile("x = None\nif x is None:\n    print(2)\n")
         self.assertIn("print(2)", out)
+        self.assertIn("if x is None:", out)
 
     def test_none_guard_no_inverted_condition(self):
         """A simple is-None check must not be inverted into is-not-None."""
