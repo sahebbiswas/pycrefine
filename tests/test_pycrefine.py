@@ -271,6 +271,22 @@ class TestControlFlow(unittest.TestCase):
         out = decompile("x = 1\nif x != 2:\n    pass\n")
         assert_contains(out, "x != 2")
 
+    def test_if_implicit_else_avoidance(self):
+        """The decompiler should not append an else block after an if block
+        that ends with an unconditional exit (like return or raise)."""
+        src = (
+            "def test(x):\n"
+            "    if x is None:\n"
+            "        return True\n"
+            "    if x == 1:\n"
+            "        return True\n"
+            "    return False\n"
+        )
+        out = decompile(src)
+        self.assertNotIn("else:", out, f"Unexpected 'else:' generated:\n{out}")
+        assert_contains(out, "if x is None:", "if x == 1:", "return False")
+
+
 
 # ---------------------------------------------------------------------------
 # Augmented assignment  (FIX-09)

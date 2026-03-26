@@ -466,55 +466,6 @@ class DecompilerGeneric(DecompilerBase):
                     self._append_reconstructed("pass")
                 self.indent_level -= 1
 
-                if block_type == "if_implicit_else":
-                    parent_end = (
-                        self.blocks[-1][0] if self.blocks
-                        else (self.instructions[-1].offset + 2)
-                    )
-                    meaningful = False
-                    for b_idx in range(self.pc, len(self.instructions)):
-                        ins = self.instructions[b_idx]
-                        if ins.offset >= parent_end:
-                            break
-                        if ins.opname in (
-                            "RETURN_VALUE", "RETURN_CONST", "RESUME",
-                            "POP_TOP", "CACHE", "END_FOR", "POP_ITER", "NOT_TAKEN",
-                        ):
-                            continue
-                        if ins.opname in ("LOAD_CONST", "LOAD_NAME") and ins.argval is None:
-                            continue
-                        meaningful = True
-                        break
-
-                    if meaningful:
-                        next_pc = self.pc
-                        while (
-                            next_pc < len(self.instructions)
-                            and self.instructions[next_pc].opname in ("RESUME", "CACHE", "NOP", "NOT_TAKEN")
-                        ):
-                            next_pc += 1
-
-                        is_elif = False
-                        if next_pc < len(self.instructions) and (
-                            "JUMP_IF" in self.instructions[next_pc].opname
-                            or "FOR_ITER" in self.instructions[next_pc].opname
-                        ):
-                            orig_num = len(self.reconstructed)
-                            self._handle_instruction(self.instructions[next_pc])
-                            self.pc = next_pc + 1
-
-                            for i in range(orig_num, len(self.reconstructed)):
-                                line = self.reconstructed[i]
-                                if "if " in line:
-                                    head, sep, tail = line.partition("if ")
-                                    self.reconstructed[i] = head + "elif " + tail
-                                    is_elif = True
-                                    break
-
-                        if not is_elif:
-                            self._append_reconstructed("else:")
-                            self.indent_level += 1
-                            self.blocks.append((parent_end, "else"))
 
             if self.pc < len(self.instructions):
                 instr = self.instructions[self.pc]
@@ -1775,7 +1726,7 @@ class DecompilerGeneric(DecompilerBase):
                 # Find the most recently emitted "if" header and rewrite it.
                 for bi in range(len(self.blocks) - 1, -1, -1):
                     boff, btype = self.blocks[bi]
-                    if btype in ("if", "if_implicit_else") and boff >= instr.offset:
+                    if btype == "if" and boff >= instr.offset:
                         for idx in range(len(self.reconstructed) - 1, -1, -1):
                             if self.reconstructed[idx].lstrip().startswith("if "):
                                 self.reconstructed[idx] = self.reconstructed[idx].replace(
@@ -1798,7 +1749,7 @@ class DecompilerGeneric(DecompilerBase):
                 if b_type == "while":
                     break  # only check innermost while
 
-            if self.blocks and self.blocks[-1][1] in ("if", "if_implicit_else"):
+            if self.blocks and self.blocks[-1][1] == "if":
                 is_loop_back = opname == "JUMP_BACKWARD" and jump_target <= instr.offset
                 if self.blocks[-1][0] <= instr.offset + 2 or is_loop_back:
                     target_of_else = (
@@ -1980,7 +1931,7 @@ class DecompilerGeneric(DecompilerBase):
                         "RETURN_VALUE", "RETURN_CONST", "RAISE_VARARGS",
                         "BREAK_LOOP", "JUMP_FORWARD",
                     ):
-                        self.blocks.append((jump_target, "if_implicit_else"))
+                        self.blocks.append((jump_target, "if"))
                         return
 
                 self.blocks.append((jump_target, "if"))
@@ -1993,9 +1944,10 @@ class DecompilerGeneric(DecompilerBase):
                 # POP_JUMP_IF_NOT_NONE: jumps when not-None → body runs when None
                 # POP_JUMP_IF_NONE:     jumps when None     → body runs when not-None
                 if is_not_none:
-                    self._append_reconstructed(f"if {cond} is not None:")
-                else:
                     self._append_reconstructed(f"if {cond} is None:")
+                else:
+                    self._append_reconstructed(f"if {cond} is not None:")
+
                 self.indent_level += 1
                 jump_target = self._get_jump_target(instr)
                 self.blocks.append((jump_target, "if"))
