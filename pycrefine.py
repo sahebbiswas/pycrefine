@@ -3260,14 +3260,18 @@ def main():
         output_text = decompiler.decompile()
         
         if args.output:
-            with open(args.output, "w", encoding="utf-8") as f:
-                f.write(output_text)
-            print(f"Decompiled output saved to {args.output}")
+            try:
+                with open(args.output, "w", encoding="utf-8") as f:
+                    f.write(output_text)
+                print(f"Decompiled output saved to {args.output}", file=sys.stderr)
+            except OSError as e:
+                print(f"Error: Failed to save decompiled output to {args.output}: {e}", file=sys.stderr)
+                sys.exit(1)
         else:
             print(output_text)
             
     except ValueError as e:
-        print(f"Error: {e}")
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     except Exception:
         import traceback
