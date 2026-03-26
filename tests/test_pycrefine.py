@@ -268,6 +268,11 @@ class TestControlFlow(unittest.TestCase):
         assert_contains(out, "x == 1")
 
     def test_if_comparison_not_equals(self):
+        """
+        Verify that decompiling an inequality if-statement preserves the '!=' comparison.
+        
+        Ensures the decompiled output contains the substring "x != 2".
+        """
         out = decompile("x = 1\nif x != 2:\n    pass\n")
         assert_contains(out, "x != 2")
 

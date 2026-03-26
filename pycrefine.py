@@ -414,6 +414,14 @@ class DecompilerGeneric(DecompilerBase):
     # ------------------------------------------------------------------
 
     def decompile(self) -> str:
+        """
+        Decompile the stored code object into a cleaned, human-readable Python source string.
+        
+        Performs bytecode disassembly, scans for loop and ternary patterns, reconstructs Python source lines (including a module docstring when present), and runs final post-processing to normalize imports, remove redundant parentheses, and tidy spacing.
+        
+        Returns:
+            The reconstructed Python source as a single string with a trailing newline trimmed.
+        """
         self._disassemble()
         self.pc = 0
         self.blocks = []
@@ -1003,6 +1011,15 @@ class DecompilerGeneric(DecompilerBase):
     # ------------------------------------------------------------------
 
     def _handle_instruction(self, instr: BytecodeInstruction):  # noqa: C901
+        """
+        Dispatches a single bytecode instruction to the decompiler's handler, updating internal state and emitting reconstructed source as needed.
+        
+        Parameters:
+            instr (BytecodeInstruction): The decoded bytecode instruction to process; its opname and arg/argval determine how the decompiler updates the operand stack, control-flow block stack, indentation, and the list of reconstructed source lines.
+        
+        Side effects:
+            Mutates the decompiler instance state (notably self.stack, self.reconstructed, self.blocks, self.indent_level, and self.pc) to reflect the effect of the instruction and may append emitted source lines.
+        """
         opname = instr.opname
         # Suppress then-branch instructions of detected ternary expressions;
         # the ternary is pushed as a whole expression at POP_JUMP_IF time.
