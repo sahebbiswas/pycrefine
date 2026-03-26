@@ -16,6 +16,12 @@ Using `pycrefine` to decompile a Python bytecode `.pyc` file is straightforward 
 python pycrefine.py path/to/compiled_file.pyc
 ```
 
+Or save the output to a file:
+
+```bash
+python pycrefine.py path/to/compiled_file.pyc -o decompiled_output.py
+```
+
 The script is entirely self-contained with no third-party dependencies required. It needs Python 3.9 or later to execute.
 
 ### Features
