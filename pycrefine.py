@@ -334,6 +334,23 @@ def _render_func_tuple(body_text: str, args: List[str]) -> str:
 
     return f"<func>({', '.join(args)})"
 
+
+def _is_anonymous_func_body(first_line: str) -> bool:
+    """
+    Return True when *first_line* is the signature line of an anonymous code
+    object — a generator expression, lambda, list/set/dict comprehension, or
+    the synthetic ``<module>`` frame — rather than a named function.
+
+    Used by the decorator-detection logic in CALL / CALL_FUNCTION handlers to
+    distinguish ``@decorator def real_func(...): ...`` (should be emitted with
+    a ``@`` line) from ``sum(x**2 for x in ...)`` (should NOT gain a decorator).
+    """
+    _ANON_TOKENS = (
+        "<genexpr>", "<lambda>", "<listcomp>",
+        "<setcomp>", "<dictcomp>", "<module>",
+    )
+    return any(tok in first_line for tok in _ANON_TOKENS)
+
 # ---------------------------------------------------------------------------
 # Base
 # ---------------------------------------------------------------------------
@@ -1569,12 +1586,30 @@ class DecompilerGeneric(DecompilerBase):
             if str(func_val) == "None" and self.stack:
                 func_val = self.stack.pop()
 
-            # ── ('func', body) called directly: genexpr / lambda ─────────
-            # This happens when MAKE_FUNCTION pushes a code object that is
-            # immediately called (generator expression, lambda, comprehension)
-            # rather than stored under a name by STORE_NAME.
+            # ── Decorator pattern detection ───────────────────────────────
+            # When MAKE_FUNCTION is immediately followed by CALL, the pattern is
+            # either:
+            # (a) a decorator application: @decorator def name(...): body
+            #     Stack: [..., decorator_expr, ('func', 'def name(...):\n body')]
+            # (b) a genexpr/lambda called immediately (already handled below)
+            #
+            # Distinguish: decorator bodies have a plain function name (no angle
+            # brackets like <genexpr>, <lambda>, <listcomp> etc.).
             if isinstance(func_val, tuple) and func_val[0] == "func":
-                rendered = _render_func_tuple(str(func_val[1]), final_args)
+                body_text = str(func_val[1])
+                # Is this a named function (not a genexpr/lambda/comprehension)?
+                first_line = body_text.strip().split("\n")[0] if body_text.strip() else ""
+                if not _is_anonymous_func_body(first_line) and self.stack:
+                    decorator_expr = str(self.stack.pop())
+                    # Strip NULL sentinel if present
+                    if " + NULL" in decorator_expr or "|NULL" in decorator_expr:
+                        decorator_expr = decorator_expr.split(" + ")[0].split("|")[0]
+                    # Emit as a decorated function definition
+                    deco_line = f"@{decorator_expr}"
+                    self.stack.append(("func", f"{deco_line}\n{body_text}"))
+                    return
+                # Anonymous function or no decorator — genexpr/lambda handling
+                rendered = _render_func_tuple(body_text, final_args)
                 self.stack.append(rendered)
                 return
 
@@ -2531,6 +2566,23 @@ class Decompiler39(DecompilerGeneric):
                 else:
                     self.stack.append(("class", f"class {cls_name}{bases_str}: pass"))
             else:
+                # ── Decorator pattern: func(('func', body)) ───────────────
+                # When a decorator is applied on 3.9, the pattern is:
+                #   LOAD decorator_expr
+                #   MAKE_FUNCTION -> pushes ('func', body)
+                #   CALL_FUNCTION 1 -> func_val=decorator, raw_args=[('func', body)]
+                # Detect: exactly one arg that is a ('func', body) tuple with a
+                # named (non-anonymous) function body.
+                if (len(raw_args) == 1
+                        and isinstance(raw_args[0], tuple)
+                        and raw_args[0][0] == "func"):
+                    body_text = str(raw_args[0][1])
+                    first_line = body_text.strip().split("\n")[0] if body_text.strip() else ""
+                    if not _is_anonymous_func_body(first_line):
+                        deco_line = f"@{func}"
+                        self.stack.append(("func", f"{deco_line}\n{body_text}"))
+                        return
+
                 # Regular function call — convert args to strings now
                 str_args = []
                 for v in raw_args:
