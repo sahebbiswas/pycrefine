@@ -2869,6 +2869,33 @@ class TestCompoundConditions(unittest.TestCase):
         header_count = sum(1 for line in out.splitlines() if line.lstrip().startswith("if "))
         self.assertEqual(header_count, 2)
 
+    def test_compound_with_function_calls(self):
+        """
+        Verify that function calls with parentheses do not disrupt precedence tracking.
+        """
+        src = "def f(x, y):\n    if len(x) > 0 and (y is None or x[0] == 1):\n        return True\n    return False\n"
+        out = decompile(src)
+        # Verify that len(x) is NOT wrapped, but (y is None or x[0] == 1) IS wrapped correctly.
+        self.assertTrue("len(x) > 0 and (y is None or x[0] == 1)" in out)
+        header_count = sum(1 for line in out.splitlines() if line.lstrip().startswith("if "))
+        self.assertEqual(header_count, 1)
+
+    def test_compound_flat_shared_target(self):
+        """
+        Verify that contiguous flat operands with shared jump targets (common in None checks)
+        do not trigger RecursionError and are grouped correctly.
+        """
+        src = (
+            "def test(a, b, c, d, e):\n"
+            "    if a is None and b is None and c is None and d is None and e is None:\n"
+            "        return True\n"
+            "    return False\n"
+        )
+        out = decompile(src)
+        assert_contains(out, "if a is None and b is None and c is None and d is None and e is None:")
+        header_count = sum(1 for line in out.splitlines() if line.lstrip().startswith("if "))
+        self.assertEqual(header_count, 1)
+
 
 # ---------------------------------------------------------------------------
 # Entry point

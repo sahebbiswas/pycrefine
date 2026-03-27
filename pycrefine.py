@@ -963,15 +963,11 @@ class DecompilerGeneric(DecompilerBase):
                 op = jinstr.opname
                 is_success_type = ("IF_TRUE" in op)
                 
-                # Logic: is_or_jump is True if jump targets body (Success) or 
-                # a later part of the chain that allows bypassing the alternative.
                 if t == body_target:
                     is_or_jump = True
                 elif t == end_target:
                     is_or_jump = False
                 else:
-                    # Intra-group jump. If it's a success-type jump to a later offset, 
-                    # it indicates an OR short-circuit.
                     is_or_jump = is_success_type
 
                 if "IF_NONE" in op and "NOT" not in op:
@@ -1083,15 +1079,6 @@ class DecompilerGeneric(DecompilerBase):
             or "IF_NOT_NONE" in opname
         )
 
-    def _is_compound_or_jump(self, opname: str) -> bool:
-        """
-        Determine whether an opcode name represents a short-circuit OR-style conditional jump.
-        
-        Returns:
-            bool: `True` if `opname` contains "IF_TRUE", or contains "IF_NONE" but does not contain "AND" or "NOT"; `False` otherwise.
-        """
-        return "IF_TRUE" in opname or ("IF_NONE" in opname and "AND" not in opname and "NOT" not in opname)
-
     def _eval_cond_expr(self, instrs: list) -> str:
         """
         Constructs a boolean expression string from a sequence of bytecode instructions.
@@ -1168,10 +1155,14 @@ class DecompilerGeneric(DecompilerBase):
             elif op == "BINARY_OP":
                 if len(mini_stack) >= 2:
                     right, left = mini_stack.pop(), mini_stack.pop()
-                    op_map = {0:"+",1:"&",2:"//",3:"<<",4:"@",5:"*",
-                              6:"%",7:"|",8:"**",9:">>",10:"-",11:"/",12:"^"}
+                    op_map = {0:"+", 1:"&", 2:"//", 3:"<<", 4:"@", 5:"*",
+                              6:"%", 7:"|", 8:"**", 9:">>", 10:"-", 11:"/", 12:"^",
+                              26: "[]"}
                     sym = op_map.get(int(ins.arg) if ins.arg is not None else -1, "?")
-                    mini_stack.append(f"({left} {sym} {right})")
+                    if sym == "[]":
+                        mini_stack.append(f"{left}[{right}]")
+                    else:
+                        mini_stack.append(f"({left} {sym} {right})")
             elif op in ("IS_OP",):
                 if len(mini_stack) >= 2:
                     right, left = mini_stack.pop(), mini_stack.pop()
@@ -2163,12 +2154,7 @@ class DecompilerGeneric(DecompilerBase):
                         self.blocks.append((end_offset, "while"))
                         self._while_true_ends.add(end_offset)
 
-        elif (
-            "POP_JUMP_IF_FALSE" in opname
-            or "POP_JUMP_IF_TRUE" in opname
-            or "POP_JUMP_IF_NONE" in opname
-            or "POP_JUMP_IF_NOT_NONE" in opname
-        ):
+        elif self._is_compound_cjump(opname):
             # ── Ternary expression detection ──────────────────────────────
             # If _prescan_ternaries identified this jump as a ternary, evaluate
             # both branches speculatively and push the ternary expression onto
