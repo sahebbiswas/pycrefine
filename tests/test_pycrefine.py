@@ -2789,6 +2789,73 @@ class TestDecorators(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Compound conditions (boolean and/or chains)
+# ---------------------------------------------------------------------------
+
+class TestCompoundConditions(unittest.TestCase):
+    def test_compound_and(self):
+        src = "def f(a, b):\n    if a == 1 and b == 2:\n        return True\n    return False\n"
+        out = decompile(src)
+        assert_contains(out, "if a == 1 and b == 2:")
+        self.assertEqual(out.count("if "), 1, f"Expected 1 if, got:\n{out}")
+
+    def test_compound_or(self):
+        src = "def f(a, b):\n    if a == 1 or b == 2:\n        return True\n    return False\n"
+        out = decompile(src)
+        assert_contains(out, "if a == 1 or b == 2:")
+        self.assertEqual(out.count("if "), 1, f"Expected 1 if, got:\n{out}")
+
+    def test_compound_mixed_and_or(self):
+        src = "def f(a, b, c):\n    if a == 1 and b == 2 or c == 3:\n        return True\n    return False\n"
+        out = decompile(src)
+        assert_contains(out, "if a == 1 and b == 2 or c == 3:")
+        self.assertEqual(out.count("if "), 1)
+
+    def test_compound_none_and(self):
+        src = "def f(x):\n    if x is not None and x > 0:\n        return True\n    return False\n"
+        out = decompile(src)
+        assert_contains(out, "if x is not None and x > 0:")
+        self.assertEqual(out.count("if "), 1)
+
+    def test_compound_none_or(self):
+        src = "def f(x, y):\n    if x is None or y is None:\n        return True\n    return False\n"
+        out = decompile(src)
+        assert_contains(out, "if x is None or y is None:")
+        self.assertEqual(out.count("if "), 1)
+
+    def test_compound_complex_mixed(self):
+        src = (
+            "def f(x, y, z):\n"
+            "    if (x is not None and x > 0) or (y is None and z == 1):\n"
+            "        return True\n"
+            "    return False\n"
+        )
+        out = decompile(src)
+        self.assertTrue("x is not None and x > 0 or y is None and z == 1" in out or
+                        "(x is not None and x > 0) or (y is None and z == 1)" in out)
+        self.assertEqual(out.count("if "), 1)
+
+    def test_compound_short_circuit_with_call(self):
+        src = "def f(x):\n    if x is not None and len(x) > 0:\n        return x[0]\n    return None\n"
+        out = decompile(src)
+        assert_contains(out, "if x is not None and len(x) > 0:")
+        self.assertEqual(out.count("if "), 1)
+
+    def test_compound_nested_if_merge_regression(self):
+        src = (
+            "def test(x, y):\n"
+            "    if x > 0:\n"
+            "        if y > 0:\n"
+            "            return 1\n"
+            "        return 2\n"
+            "    return 0\n"
+        )
+        out = decompile(src)
+        assert_contains(out, "if x > 0:", "if y > 0:", "return 1", "return 2", "return 0")
+        self.assertEqual(out.count("if "), 2)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
