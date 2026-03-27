@@ -2189,8 +2189,10 @@ class DecompilerGeneric(DecompilerBase):
                     return
                 compound_cond_map = getattr(self, "_compound_cond_map", {})
                 compound_cond = compound_cond_map.get(instr.offset)
+                compound_precomputed = False
                 if compound_cond is not None:
                     cond = compound_cond
+                    compound_precomputed = True
                 else:
                     if "IF_NONE" in opname and "NOT" not in opname:
                         # Fires on None; body runs on NOT None
@@ -2211,7 +2213,9 @@ class DecompilerGeneric(DecompilerBase):
                 for bs, go in self._while_header_targets.items():
                     if go == instr.offset:
                         # This POP_JUMP is the while-loop guard
-                        if is_true:
+                        if compound_precomputed:
+                            self._append_reconstructed(f"while {cond}:")
+                        elif is_true:
                             self._append_reconstructed(f"while not {cond}:")
                         else:
                             self._append_reconstructed(f"while {cond}:")
@@ -2225,14 +2229,18 @@ class DecompilerGeneric(DecompilerBase):
                     p_line = prev_line.strip()
                     prev_cond = p_line[3:].rstrip(":") if p_line.startswith("if ") else p_line.rstrip(":")
                     self.indent_level -= 1
-                    if is_true:
+                    if compound_precomputed:
+                        self._append_reconstructed(f"if {prev_cond} and {cond}:")
+                    elif is_true:
                         self._append_reconstructed(f"if {prev_cond} or not {cond}:")
                     else:
                         self._append_reconstructed(f"if {prev_cond} and {cond}:")
                     self.indent_level += 1
                     return
 
-                if is_true:
+                if compound_precomputed:
+                    self._append_reconstructed(f"if {cond}:")
+                elif is_true:
                     self._append_reconstructed(f"if not {cond}:")
                 else:
                     self._append_reconstructed(f"if {cond}:")
