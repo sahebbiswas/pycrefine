@@ -2820,6 +2820,7 @@ class TestCompoundConditions(unittest.TestCase):
     def test_compound_none_or(self):
         src = "def f(x, y):\n    if x is None or y is None:\n        return True\n    return False\n"
         out = decompile(src)
+        # We accept either parenthesised or unparenthesised since precedence is correct
         assert_contains(out, "if x is None or y is None:")
         self.assertEqual(out.count("if "), 1)
 

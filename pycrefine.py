@@ -973,38 +973,85 @@ class DecompilerGeneric(DecompilerBase):
             # -----------------------------------------------------------
             # Build the combined condition string.
             # -----------------------------------------------------------
-            parts: list = []  # list of (cond_str, connector_after)
+            parts: list = []  # list of (cond_str, is_or)
 
             for k, (jump_idx, jinstr, expr_instrs, _) in enumerate(group):
                 raw_expr = self._eval_cond_expr(expr_instrs)
                 t = self._get_jump_target(jinstr)
-                is_or_jump = (t == body_target)
                 op = jinstr.opname
                 
-                # Logic: if jump targets body (OR), it fires on success.
-                # If jump targets end/future (AND), it fires on failure.
+                # Polarities:
+                # Success-type: IF_TRUE, IF_NONE (if not NOT)
+                # Polarities:
+                # IF_TRUE fires on Success.
+                # IF_FALSE/NONE/NOT_NONE fire on Failure or specific condition.
+                is_success_type = ("IF_TRUE" in op)
+                
+                # Logic: if jump targets body (OR), it's definitely an OR jump.
+                # If it targets END, it's definitely an AND jump.
+                # If it targets a later part of the chain: 
+                # - Success-type jump to later = Progress to next OR sub-group.
+                # - Failure-type jump to later = Progress to next part of AND-chain.
+                if t == body_target:
+                    is_or_jump = True
+                elif t == end_target:
+                    is_or_jump = False
+                else:
+                    # Intermediate target.
+                    is_or_jump = is_success_type
+
                 if "IF_NONE" in op and "NOT" not in op:
-                    # fires on None
+                    # Fires on None; if OR jump, success is None. If AND, failure is None -> success is not None.
                     cond_str = f"{raw_expr} is None" if is_or_jump else f"{raw_expr} is not None"
                 elif "IF_NOT_NONE" in op:
-                    # fires on NOT None
+                    # Fires on NOT None; if OR jump, success is NOT None. If AND, failure is NOT None -> success is None.
                     cond_str = f"{raw_expr} is not None" if is_or_jump else f"{raw_expr} is None"
                 elif "IF_TRUE" in op:
-                    # fires on True
                     cond_str = raw_expr if is_or_jump else f"not {raw_expr}"
                 else:
                     # POP_JUMP_IF_FALSE: fires on False
                     cond_str = f"not {raw_expr}" if is_or_jump else raw_expr
                 
-                connector = "or" if is_or_jump else ("and" if k < len(group) - 1 else "")
-                parts.append((cond_str, connector))
+                parts.append((cond_str, is_or_jump))
 
-            # Assemble: "c1 or c2 and c3"
+            # Assemble with precedence and parentheses.
+            # -------------------------------------------
+            # Precedence: and > or.
+            # a and b or c  -> (a and b) or c
+            # a or b and c  -> a or (b and c)
+            
             combined = parts[0][0]
+            # Track 'top level' precedence.
+            combined_contains_or = parts[0][1]
+            
             for k in range(len(parts) - 1):
-                conn = parts[k][1]
-                next_cond = parts[k + 1][0]
-                combined = f"{combined} {conn} {next_cond}"
+                curr_is_or = parts[k][1]
+                next_expr, next_is_or = parts[k+1]
+                conn = "or" if curr_is_or else "and"
+                
+                # If joining with 'and', wrap the current 'combined' if it contains 'or'.
+                if conn == "and" and combined_contains_or:
+                    combined = f"({combined})"
+                # is actually the start of an 'or' sub-expression?
+                # Actually, in a linear chain, we only know about the current transition.
+                
+                combined = f"{combined} {conn} {next_expr}"
+                # Keep track of the 'top level' connector of the current block.
+                # If we just added an 'or', then the next 'and' will trigger parens.
+                if curr_is_or:
+                    prev_was_or = True
+                # If we just added an 'and', the 'or' state is reset? No.
+                # If we have "a or b and c", it is "a or (b and c)".
+                # If we have "a and b or c", it is "(a and b) or c".
+                
+                # Logic: if we have mixed, the linear builder should be conservative.
+                # Let's use simple precedence:
+                if conn == "or":
+                    # We are currently at an OR level. Any future AND must wrap this.
+                    prev_was_or = True
+                else:
+                    # We are at an AND level.
+                    pass
 
             # Register: controlling jump gets combined cond; all others are suppressed.
             # -----------------------------------------------------------
@@ -1018,16 +1065,16 @@ class DecompilerGeneric(DecompilerBase):
 
     def _is_compound_cjump(self, opname: str) -> bool:
         """Return True if opname is any conditional jump in a compound boolean."""
-        return (
-            "POP_JUMP_IF_FALSE" in opname
-            or "POP_JUMP_IF_TRUE" in opname
-            or "POP_JUMP_IF_NONE" in opname
-            or "POP_JUMP_IF_NOT_NONE" in opname
+        return "POP_JUMP" in opname and (
+            "IF_FALSE" in opname
+            or "IF_TRUE" in opname
+            or "IF_NONE" in opname
+            or "IF_NOT_NONE" in opname
         )
 
     def _is_compound_or_jump(self, opname: str) -> bool:
         """Return True if this jump is a short-circuit OR (jumps to body when True/None)."""
-        return "IF_TRUE" in opname or ("IF_NONE" in opname and "NOT" not in opname)
+        return "IF_TRUE" in opname or ("IF_NONE" in opname and "AND" not in opname and "NOT" not in opname)
 
     def _eval_cond_expr(self, instrs: list) -> str:
         """Evaluate a pure boolean sub-expression. Like _eval_ternary_branch."""
