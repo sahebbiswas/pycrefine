@@ -2837,6 +2837,11 @@ class TestCompoundConditions(unittest.TestCase):
         self.assertEqual(out.count("if "), 1)
 
     def test_compound_short_circuit_with_call(self):
+        """
+        Verify that a compound `and` condition containing a short-circuiting call is decompiled correctly.
+        
+        Asserts that the decompiled output contains the exact header `if x is not None and len(x) > 0:` and that exactly one `if` header appears in the output.
+        """
         src = "def f(x):\n    if x is not None and len(x) > 0:\n        return x[0]\n    return None\n"
         out = decompile(src)
         assert_contains(out, "if x is not None and len(x) > 0:")

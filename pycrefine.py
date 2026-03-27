@@ -571,33 +571,16 @@ class DecompilerGeneric(DecompilerBase):
 
     def _prescan_ternaries(self) -> None:
         """
-        Pre-scan all POP_JUMP_IF_* instructions to identify ternary expressions.
-
-        Two bytecode patterns both encode ``x = A if cond else B``:
-
-        Pattern A (diamond, then-branch ends with RETURN/fall-through):
-            POP_JUMP_IF_*(else_start)
-            <A-expr>  STORE_* x  RETURN_CONST
-            >> <B-expr>  STORE_* x     [else_start]
-
-        Pattern B (JUMP_FORWARD, used when more code follows the ternary):
-            POP_JUMP_IF_*(else_start)
-            <A-expr>  JUMP_FORWARD(store_offset)
-            >> <B-expr>               [else_start]
-            >> STORE_* x              [store_offset]
-
-        Disambiguation from a real if/else block:
-          - Exactly ONE STORE in the then-branch with the same name as the
-            first STORE in the else-branch.
-          - No POP_TOP (discarded call result = side-effect statement).
-          - No nested POP_JUMP_IF (no inner if in the branch).
-          - All non-STORE instructions before the then-STORE are pure
-            expression-builders (no control flow, no side effects).
-
-        Populates:
-          _ternary_jumps   {pop_jump_offset: (store_name, then_instrs,
-                                              else_instrs, is_true_jump)}
-          _ternary_suppress  set of offsets to skip in normal processing
+        Identify bytecode sequences that encode ternary assignments and record them for later reconstruction.
+        
+        Populates two attributes used by the decompiler:
+        - _ternary_jumps: maps the offset of a conditional POP_JUMP_IF_* instruction to a tuple
+          (store_name, then_instrs, else_instrs, is_true_jump) where `store_name` is the target
+          variable name, `then_instrs` and `else_instrs` are lists of instructions forming the
+          true/false branch expressions, and `is_true_jump` is True when the jump was taken
+          for the truthy branch.
+        - _ternary_suppress: a set of instruction offsets that should be skipped during normal
+          instruction processing because they are part of a recognized ternary pattern.
         """
         STORES = frozenset(("STORE_FAST", "STORE_NAME", "STORE_GLOBAL"))
         SKIP   = frozenset(("CACHE", "RESUME", "NOT_TAKEN", "COPY_FREE_VARS"))
@@ -1064,7 +1047,15 @@ class DecompilerGeneric(DecompilerBase):
             i = controlling_idx + 1
 
     def _is_compound_cjump(self, opname: str) -> bool:
-        """Return True if opname is any conditional jump in a compound boolean."""
+        """
+        Identify conditional POP_JUMP_* opcode names that participate in compound boolean expressions.
+        
+        Parameters:
+        	opname (str): The opcode name to test (e.g., "POP_JUMP_IF_FALSE").
+        
+        Returns:
+        	True if `opname` is a POP_JUMP_* variant used for compound boolean conditions (`IF_FALSE`, `IF_TRUE`, `IF_NONE`, or `IF_NOT_NONE`), False otherwise.
+        """
         return "POP_JUMP" in opname and (
             "IF_FALSE" in opname
             or "IF_TRUE" in opname
@@ -1073,21 +1064,38 @@ class DecompilerGeneric(DecompilerBase):
         )
 
     def _is_compound_or_jump(self, opname: str) -> bool:
-        """Return True if this jump is a short-circuit OR (jumps to body when True/None)."""
+        """
+        Determine whether an opcode name represents a short-circuit OR-style conditional jump.
+        
+        Returns:
+            bool: `True` if `opname` contains "IF_TRUE", or contains "IF_NONE" but does not contain "AND" or "NOT"; `False` otherwise.
+        """
         return "IF_TRUE" in opname or ("IF_NONE" in opname and "AND" not in opname and "NOT" not in opname)
 
     def _eval_cond_expr(self, instrs: list) -> str:
-        """Evaluate a pure boolean sub-expression. Like _eval_ternary_branch."""
+        """
+        Constructs a boolean expression string from a sequence of bytecode instructions.
+        
+        Takes a list of bytecode instructions that form a pure boolean sub‑expression and reconstructs the equivalent Python condition as a single expression string.
+        
+        Parameters:
+            instrs (list): Sequence of instruction objects (bytecode slice) that comprise the boolean sub-expression.
+        
+        Returns:
+            str: The reconstructed boolean expression, or "?" if the expression cannot be determined.
+        """
         return self._eval_ternary_branch(instrs)
 
 
     def _eval_ternary_branch(self, instrs: list) -> str:
         """
-        Speculatively evaluate a short pure-expression instruction sequence
-        (the then- or else-branch of a ternary) and return the expression string.
-
-        Uses a fresh mini-stack that mirrors the main stack behaviour but
-        discards the result without emitting any reconstructed lines.
+        Reconstructs a Python expression string from a sequence of pure-expression bytecode instructions.
+        
+        Parameters:
+        	instrs (list): Disassembled instruction objects representing the then- or else-branch of a ternary expression; should contain only expression-building opcodes.
+        
+        Returns:
+        	expr (str): The reconstructed expression as source text, or "?" if an expression could not be determined.
         """
         mini_stack: list = []
         for ins in instrs:
@@ -1284,6 +1292,12 @@ class DecompilerGeneric(DecompilerBase):
     # ------------------------------------------------------------------
 
     def _handle_instruction(self, instr: BytecodeInstruction):  # noqa: C901
+        """
+        Handle a single disassembled bytecode instruction, updating the decompiler's internal state and emitting reconstructed source lines when appropriate.
+        
+        Parameters:
+            instr (BytecodeInstruction): The disassembled instruction to process; this method may push/pop from the decompiler expression stack, append lines to the reconstructed source buffer, and modify control-flow state such as indentation level, block stack, program counter, and pre-scan suppression/mapping structures.
+        """
         opname = instr.opname
         # Suppress then-branch instructions of detected ternary expressions;
         # the ternary is pushed as a whole expression at POP_JUMP_IF time.
