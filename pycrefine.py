@@ -956,7 +956,7 @@ class DecompilerGeneric(DecompilerBase):
             # -----------------------------------------------------------
             # Build the combined condition string.
             # -----------------------------------------------------------
-            parts: list = []  # list of (cond_str, is_or)
+            parts: list = []  # list of (cond_str, is_or, jump_target)
 
             for k, (jump_idx, jinstr, expr_instrs, _) in enumerate(group):
                 raw_expr = self._eval_cond_expr(expr_instrs)
@@ -964,7 +964,6 @@ class DecompilerGeneric(DecompilerBase):
                 op = jinstr.opname
                 
                 # Polarities:
-                # Success-type: IF_TRUE, IF_NONE (if not NOT)
                 # Polarities:
                 # IF_TRUE fires on Success.
                 # IF_FALSE/NONE/NOT_NONE fire on Failure or specific condition.
@@ -995,7 +994,7 @@ class DecompilerGeneric(DecompilerBase):
                     # POP_JUMP_IF_FALSE: fires on False
                     cond_str = f"not {raw_expr}" if is_or_jump else raw_expr
                 
-                parts.append((cond_str, is_or_jump))
+                parts.append((cond_str, is_or_jump, t))
 
             # Assemble with precedence and parentheses.
             # -------------------------------------------
@@ -1003,38 +1002,62 @@ class DecompilerGeneric(DecompilerBase):
             # a and b or c  -> (a and b) or c
             # a or b and c  -> a or (b and c)
             
-            combined = parts[0][0]
-            # Track 'top level' precedence.
-            combined_contains_or = parts[0][1]
+            # Assemble with precedence and parentheses.
+            # -------------------------------------------
+            # Precedence: and > or.
+            # We use a recursive builder that identifies subgroups based 
+            # on jump targets. A jump that targets a point before the current 
+            # "final exit" defines the boundary of a local subgroup.
             
-            for k in range(len(parts) - 1):
-                curr_is_or = parts[k][1]
-                next_expr, next_is_or = parts[k+1]
-                conn = "or" if curr_is_or else "and"
+            def assemble(start_idx, end_idx, context_exit):
+                """Assemble parts[start_idx:end_idx]."""
+                if start_idx + 1 == end_idx:
+                    return parts[start_idx][0], parts[start_idx][1]
                 
-                # If joining with 'and', wrap the current 'combined' if it contains 'or'.
-                if conn == "and" and combined_contains_or:
-                    combined = f"({combined})"
-                # is actually the start of an 'or' sub-expression?
-                # Actually, in a linear chain, we only know about the current transition.
-                
-                combined = f"{combined} {conn} {next_expr}"
-                # Keep track of the 'top level' connector of the current block.
-                # If we just added an 'or', then the next 'and' will trigger parens.
-                if curr_is_or:
-                    prev_was_or = True
-                # If we just added an 'and', the 'or' state is reset? No.
-                # If we have "a or b and c", it is "a or (b and c)".
-                # If we have "a and b or c", it is "(a and b) or c".
-                
-                # Logic: if we have mixed, the linear builder should be conservative.
-                # Let's use simple precedence:
-                if conn == "or":
-                    # We are currently at an OR level. Any future AND must wrap this.
-                    prev_was_or = True
-                else:
-                    # We are at an AND level.
-                    pass
+                # Build a list of top-level subgroups for this recursion level.
+                subs = [] # (expr, is_or)
+                i = start_idx
+                while i < end_idx:
+                    curr_expr, curr_is_or, curr_target = parts[i]
+                    # Find how far this subgroup extends.
+                    # It extends as long as jumps target something contained 
+                    # within the first jump's range (if it's not the final exit).
+                    
+                    j = i + 1
+                    if curr_target < context_exit:
+                        # This jump defines a subgroup that ends at curr_target.
+                        while j < end_idx and group[j][3] < curr_target:
+                            j += 1
+                        
+                        sub_expr, sub_is_or = assemble(i, j, curr_target)
+                        # Conservatively parenthesize nested groups with internal connectors.
+                        if " and " in sub_expr or " or " in sub_expr:
+                            sub_expr = f"({sub_expr})"
+                        subs.append((sub_expr, sub_is_or))
+                    else:
+                        # Simple flat component.
+                        subs.append((curr_expr, curr_is_or))
+                    i = j
+
+                # Join the subgroups linearly with precedence handling.
+                res = subs[0][0]
+                prev_is_or = subs[0][1]
+                for k in range(1, len(subs)):
+                    next_expr, next_is_or = subs[k]
+                    conn = "or" if prev_is_or else "and"
+                    
+                    # Precedence: (a or b) and c
+                    if conn == "and" and (" or " in res and "(" not in res):
+                        res = f"({res})"
+                    # a and (b or c)
+                    if conn == "and" and (" or " in next_expr and "(" not in next_expr):
+                        next_expr = f"({next_expr})"
+                        
+                    res = f"{res} {conn} {next_expr}"
+                    prev_is_or = next_is_or
+                return res, prev_is_or
+
+            combined, _ = assemble(0, len(parts), end_target)
 
             # Register: controlling jump gets combined cond; all others are suppressed.
             # -----------------------------------------------------------

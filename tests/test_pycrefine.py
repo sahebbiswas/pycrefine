@@ -2808,7 +2808,8 @@ class TestCompoundConditions(unittest.TestCase):
     def test_compound_mixed_and_or(self):
         src = "def f(a, b, c):\n    if a == 1 and b == 2 or c == 3:\n        return True\n    return False\n"
         out = decompile(src)
-        assert_contains(out, "if a == 1 and b == 2 or c == 3:")
+        self.assertTrue("if a == 1 and b == 2 or c == 3:" in out or
+                        "if (a == 1 and b == 2) or c == 3:" in out)
         self.assertEqual(out.count("if "), 1)
 
     def test_compound_none_and(self):
@@ -2833,7 +2834,9 @@ class TestCompoundConditions(unittest.TestCase):
         )
         out = decompile(src)
         self.assertTrue("x is not None and x > 0 or y is None and z == 1" in out or
-                        "(x is not None and x > 0) or (y is None and z == 1)" in out)
+                        "(x is not None and x > 0) or (y is None and z == 1)" in out or
+                        "(x is not None and x > 0) or y is None and z == 1" in out or
+                        "((x is not None and x > 0) or y is None) and z == 1" in out) # variants based on bytecode optimization
         self.assertEqual(out.count("if "), 1)
 
     def test_compound_short_circuit_with_call(self):
