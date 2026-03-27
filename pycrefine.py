@@ -428,6 +428,7 @@ class DecompilerGeneric(DecompilerBase):
         self._while_header_targets = {}
         self._prescan_while_loops()
         self._prescan_ternaries()
+        self._prescan_compound_conds()
 
         # Check for docstring.
         # co_consts[0] is a docstring ONLY if the first meaningful instruction
@@ -570,33 +571,16 @@ class DecompilerGeneric(DecompilerBase):
 
     def _prescan_ternaries(self) -> None:
         """
-        Pre-scan all POP_JUMP_IF_* instructions to identify ternary expressions.
-
-        Two bytecode patterns both encode ``x = A if cond else B``:
-
-        Pattern A (diamond, then-branch ends with RETURN/fall-through):
-            POP_JUMP_IF_*(else_start)
-            <A-expr>  STORE_* x  RETURN_CONST
-            >> <B-expr>  STORE_* x     [else_start]
-
-        Pattern B (JUMP_FORWARD, used when more code follows the ternary):
-            POP_JUMP_IF_*(else_start)
-            <A-expr>  JUMP_FORWARD(store_offset)
-            >> <B-expr>               [else_start]
-            >> STORE_* x              [store_offset]
-
-        Disambiguation from a real if/else block:
-          - Exactly ONE STORE in the then-branch with the same name as the
-            first STORE in the else-branch.
-          - No POP_TOP (discarded call result = side-effect statement).
-          - No nested POP_JUMP_IF (no inner if in the branch).
-          - All non-STORE instructions before the then-STORE are pure
-            expression-builders (no control flow, no side effects).
-
-        Populates:
-          _ternary_jumps   {pop_jump_offset: (store_name, then_instrs,
-                                              else_instrs, is_true_jump)}
-          _ternary_suppress  set of offsets to skip in normal processing
+        Identify bytecode sequences that encode ternary assignments and record them for later reconstruction.
+        
+        Populates two attributes used by the decompiler:
+        - _ternary_jumps: maps the offset of a conditional POP_JUMP_IF_* instruction to a tuple
+          (store_name, then_instrs, else_instrs, is_true_jump) where `store_name` is the target
+          variable name, `then_instrs` and `else_instrs` are lists of instructions forming the
+          true/false branch expressions, and `is_true_jump` is True when the jump was taken
+          for the truthy branch.
+        - _ternary_suppress: a set of instruction offsets that should be skipped during normal
+          instruction processing because they are part of a recognized ternary pattern.
         """
         STORES = frozenset(("STORE_FAST", "STORE_NAME", "STORE_GLOBAL"))
         SKIP   = frozenset(("CACHE", "RESUME", "NOT_TAKEN", "COPY_FREE_VARS"))
@@ -808,13 +792,317 @@ class DecompilerGeneric(DecompilerBase):
             for x in else_instrs:
                 self._ternary_suppress.add(x.offset)
 
+    # ------------------------------------------------------------------
+    # Compound boolean condition pre-scan
+    # ------------------------------------------------------------------
+
+    def _prescan_compound_conds(self) -> None:
+        """Pre-scan for compound boolean conditions (and/or chains).
+
+        Python compiles ``if A or B and C:`` into a sequence of conditional
+        jumps that all share at most two distinct targets:
+
+        * **body_target** – the first instruction of the if-body (where a
+          short-circuit POP_JUMP_IF_TRUE lands, meaning "this clause is True,
+          skip the rest and execute the body").
+        * **end_target** – the instruction after the if-body (where a
+          POP_JUMP_IF_FALSE lands, meaning "this clause is False, skip the
+          body").
+
+        The final (controlling) jump in the chain is always a
+        POP_JUMP_IF_FALSE → end_target.  All earlier jumps are either:
+          - POP_JUMP_IF_TRUE  → body_target  (short-circuit OR)
+          - POP_JUMP_IF_FALSE → end_target   (short-circuit AND, same end)
+
+        This method:
+        1. Finds every consecutive run of POP_JUMP_IF_* instructions that all
+           share the same end_target and optionally a shared body_target.
+        2. Uses ``_eval_cond_expr`` to compute the expression string for each
+           clause (the pure-expression instructions between adjacent jumps).
+        3. Assembles the combined condition string using ``and``/``or``.
+        4. Stores the result in ``_compound_cond_map[controlling_jump_offset]``.
+        5. Adds all non-controlling intermediate instructions to
+           ``_compound_suppress`` (so they are skipped during normal dispatch).
+        """
+        SKIP = frozenset(("CACHE", "RESUME", "NOT_TAKEN", "COPY_FREE_VARS",
+                          "PRECALL", "PUSH_NULL"))
+        EXPR_OPS = frozenset((
+            "LOAD_FAST", "LOAD_NAME", "LOAD_GLOBAL", "LOAD_CONST", "LOAD_DEREF",
+            "LOAD_SMALL_INT", "LOAD_FAST_BORROW", "LOAD_CONST_BORROW",
+            "LOAD_FAST_BORROW_LOAD_FAST_BORROW", "LOAD_GLOBAL_MODULE",
+            "LOAD_ATTR", "LOAD_METHOD", "GET_ATTR",
+            "CALL", "CALL_FUNCTION", "CALL_METHOD",
+            "COMPARE_OP", "BINARY_OP", "IS_OP", "CONTAINS_OP",
+            "UNARY_NOT", "UNARY_NEGATIVE", "UNARY_POSITIVE", "UNARY_INVERT",
+            "BUILD_TUPLE", "BUILD_LIST", "BUILD_SET", "BUILD_MAP",
+            "TO_BOOL", "FORMAT_VALUE", "FORMAT_SIMPLE", "BUILD_STRING",
+            "BINARY_SUBSCR",
+        )) | SKIP
+
+        self._compound_cond_map: dict = {}   # controlling_offset -> combined_cond_str
+        self._compound_suppress: set = set() # instruction offsets to skip
+
+        instrs = self.instructions
+        n = len(instrs)
+        offset_to_idx = {ins.offset: i for i, ins in enumerate(instrs)}
+
+        # Ternary jumps must not be touched here (they are pure expression nodes)
+        ternary_offsets = set(getattr(self, "_ternary_jumps", {}).keys())
+
+        i = 0
+        while i < n:
+            ins = instrs[i]
+            # Only start a group at a brand-new POP_JUMP_IF_*
+            if not self._is_compound_cjump(ins.opname):
+                i += 1
+                continue
+            if ins.offset in ternary_offsets:
+                i += 1
+                continue
+
+            # -----------------------------------------------------------
+            # Gather the group: starting at index i, collect consecutive
+            # conditional-jump instructions.  Between each pair of jumps the
+            # only instructions allowed are pure expression builders.
+            # -----------------------------------------------------------
+            group: list = []   # list of (jump_instr_idx, jump_instr, expr_instrs_before_it)
+            start_i = i
+            # Scan backwards from the first jump to find the start of the
+            # first clause's expression (stop at any non-EXPR_OPS instruction,
+            # including a previous jump, RESUME, STORE, etc.).
+            first_expr_start = i
+            scan_back = i - 1
+            while scan_back >= 0:
+                bop = instrs[scan_back].opname
+                if bop in SKIP:
+                    scan_back -= 1
+                    continue
+                if bop in EXPR_OPS:
+                    first_expr_start = scan_back
+                    scan_back -= 1
+                else:
+                    break  # hit a non-expression instruction
+
+            prev_jump_end_idx = first_expr_start
+
+            j = i
+            while j < n:
+                jinstr = instrs[j]
+                is_cjump = self._is_compound_cjump(jinstr.opname)
+                if jinstr.opname in SKIP:
+                    j += 1
+                    continue
+                if is_cjump and jinstr.offset not in ternary_offsets:
+                    # Collect expression instructions since the previous jump
+                    expr_instrs = [
+                        instrs[k] for k in range(prev_jump_end_idx, j)
+                        if instrs[k].opname not in SKIP
+                    ]
+                    # All of them must be pure expression builders
+                    if not all(op.opname in EXPR_OPS for op in expr_instrs):
+                        break  # not a clean chain
+                    # Start offset of this clause's expression
+                    expr_start_off = expr_instrs[0].offset if expr_instrs else jinstr.offset
+                    group.append((j, jinstr, expr_instrs, expr_start_off))
+                    prev_jump_end_idx = j + 1
+                    j += 1
+                    continue
+                if jinstr.opname in EXPR_OPS:
+                    j += 1
+                    continue
+                break  # something else → end of group
+
+            if len(group) < 2:
+                i += 1
+                continue
+
+            # -----------------------------------------------------------
+            # Validate that the group forms a compound condition.
+            # -----------------------------------------------------------
+            # Body target: where the 'if' body begins. Usually the fall-through
+            # of the last jump in the chain.
+            last_jump_idx = group[-1][0]
+            body_target = -1
+            for k in range(last_jump_idx + 1, n):
+                if instrs[k].opname not in SKIP:
+                    body_target = instrs[k].offset
+                    break
+            
+            # End target: where the 'if' body ends. Usually the target of
+            # the last jump in the chain.
+            end_target = self._get_jump_target(group[-1][1])
+            
+            # Record current jump start offsets for internal jump lookups
+            jump_starts = {g[3] for g in group}
+
+            valid = True
+            for _, jinstr, _, _ in group:
+                t = self._get_jump_target(jinstr)
+                if t == body_target:
+                    pass
+                elif t == end_target or t in jump_starts:
+                    pass
+                else:
+                    # Jumps to somewhere else entirely -> complex structure
+                    valid = False
+                    break
+
+            if not valid:
+                # Keep the scan moving if we can't merge it here.
+                i = group[0][0] + 1
+                continue
+
+            # -----------------------------------------------------------
+            # Build the combined condition string.
+            # -----------------------------------------------------------
+            parts: list = []  # list of (cond_str, is_or_connector, next_t)
+
+            for _, jinstr, expr_instrs, _ in group:
+                raw_expr = self._eval_cond_expr(expr_instrs)
+                t = self._get_jump_target(jinstr)
+                op = jinstr.opname
+                is_success_type = ("IF_TRUE" in op)
+                
+                if t == body_target:
+                    is_or_jump = True
+                elif t == end_target:
+                    is_or_jump = False
+                else:
+                    is_or_jump = is_success_type
+
+                if "IF_NONE" in op and "NOT" not in op:
+                    cond_str = f"{raw_expr} is None" if is_or_jump else f"{raw_expr} is not None"
+                elif "IF_NOT_NONE" in op:
+                    cond_str = f"{raw_expr} is not None" if is_or_jump else f"{raw_expr} is None"
+                elif "IF_TRUE" in op:
+                    cond_str = raw_expr if is_or_jump else f"not {raw_expr}"
+                else:
+                    cond_str = f"not {raw_expr}" if is_or_jump else raw_expr
+                
+                parts.append((cond_str, is_or_jump, t))
+
+            # Assemble with precedence and parentheses.
+            # -------------------------------------------
+            # Precedence: and > or.
+            # We use a recursive builder that identifies subgroups based 
+            # on jump targets. A jump that targets a point before the current 
+            # "final exit" defines the boundary of a local subgroup.
+            
+            def join_flat(s_idx, e_idx):
+                """Linearly joins parts[s_idx:e_idx] without recursion."""
+                comb = parts[s_idx][0]
+                h_or = False
+                for k in range(s_idx + 1, e_idx):
+                    c = "or" if parts[k-1][1] else "and"
+                    if c == "and" and h_or:
+                        comb = f"({comb})"
+                        h_or = False
+                    comb = f"{comb} {c} {parts[k][0]}"
+                    h_or = h_or or (c == "or")
+                return comb, parts[e_idx-1][1], h_or
+
+            def assemble(start_idx, end_idx, context_exit):
+                """Assemble parts[start_idx:end_idx]. Returns (expr, next_conn_is_or, has_top_level_or)."""
+                if start_idx + 1 == end_idx:
+                    return parts[start_idx][0], parts[start_idx][1], False
+                
+                subs: list = [] # list of (expr, unit_is_or, has_or)
+                i = start_idx
+                while i < end_idx:
+                    curr_expr, curr_is_or, curr_target = parts[i]
+                    j = i + 1
+                    
+                    if curr_target < context_exit:
+                        # Deeper nesting detected.
+                        while j < end_idx and group[j][3] < curr_target:
+                            j += 1
+                        sub_expr, sub_is_or, sub_has_or = assemble(i, j, curr_target)
+                        if sub_has_or:
+                            sub_expr = f"({sub_expr})"
+                            sub_has_or = False
+                        subs.append((sub_expr, sub_is_or, sub_has_or))
+                    else:
+                        # Shared-target grouping (non-recursive).
+                        while j < end_idx and parts[j][2] == curr_target:
+                            j += 1
+                        if j > i + 1:
+                            subs.append(join_flat(i, j))
+                        else:
+                            subs.append((curr_expr, curr_is_or, False))
+                    i = j
+
+                combined = subs[0][0]
+                has_or = subs[0][2]
+                
+                for k in range(1, len(subs)):
+                    next_expr, next_is_or, next_has_or = subs[k]
+                    conn = "or" if subs[k-1][1] else "and"
+                    
+                    if conn == "and" and has_or:
+                        combined = f"({combined})"
+                        has_or = False
+                    
+                    if conn == "and" and next_has_or:
+                        next_expr = f"({next_expr})"
+                    
+                    combined = f"{combined} {conn} {next_expr}"
+                    has_or = has_or or (conn == "or") or next_has_or
+                
+                return combined, subs[-1][1], has_or
+
+            combined, _, _ = assemble(0, len(parts), end_target)
+
+            # Register: controlling jump gets combined cond; all others are suppressed.
+            # -----------------------------------------------------------
+            controlling_idx, controlling_instr, _, _ = group[-1]
+            self._compound_cond_map[controlling_instr.offset] = combined
+
+            for _, ginstr, _, _ in group[:-1]:
+                self._compound_suppress.add(ginstr.offset)
+
+            i = controlling_idx + 1
+
+    def _is_compound_cjump(self, opname: str) -> bool:
+        """
+        Identify conditional POP_JUMP_* opcode names that participate in compound boolean expressions.
+        
+        Parameters:
+        	opname (str): The opcode name to test (e.g., "POP_JUMP_IF_FALSE").
+        
+        Returns:
+        	True if `opname` is a POP_JUMP_* variant used for compound boolean conditions (`IF_FALSE`, `IF_TRUE`, `IF_NONE`, or `IF_NOT_NONE`), False otherwise.
+        """
+        return "POP_JUMP" in opname and (
+            "IF_FALSE" in opname
+            or "IF_TRUE" in opname
+            or "IF_NONE" in opname
+            or "IF_NOT_NONE" in opname
+        )
+
+    def _eval_cond_expr(self, instrs: list) -> str:
+        """
+        Constructs a boolean expression string from a sequence of bytecode instructions.
+        
+        Takes a list of bytecode instructions that form a pure boolean sub‑expression and reconstructs the equivalent Python condition as a single expression string.
+        
+        Parameters:
+            instrs (list): Sequence of instruction objects (bytecode slice) that comprise the boolean sub-expression.
+        
+        Returns:
+            str: The reconstructed boolean expression, or "?" if the expression cannot be determined.
+        """
+        return self._eval_ternary_branch(instrs)
+
+
     def _eval_ternary_branch(self, instrs: list) -> str:
         """
-        Speculatively evaluate a short pure-expression instruction sequence
-        (the then- or else-branch of a ternary) and return the expression string.
-
-        Uses a fresh mini-stack that mirrors the main stack behaviour but
-        discards the result without emitting any reconstructed lines.
+        Reconstructs a Python expression string from a sequence of pure-expression bytecode instructions.
+        
+        Parameters:
+        	instrs (list): Disassembled instruction objects representing the then- or else-branch of a ternary expression; should contain only expression-building opcodes.
+        
+        Returns:
+        	expr (str): The reconstructed expression as source text, or "?" if an expression could not be determined.
         """
         mini_stack: list = []
         for ins in instrs:
@@ -867,10 +1155,14 @@ class DecompilerGeneric(DecompilerBase):
             elif op == "BINARY_OP":
                 if len(mini_stack) >= 2:
                     right, left = mini_stack.pop(), mini_stack.pop()
-                    op_map = {0:"+",1:"&",2:"//",3:"<<",4:"@",5:"*",
-                              6:"%",7:"|",8:"**",9:">>",10:"-",11:"/",12:"^"}
+                    op_map = {0:"+", 1:"&", 2:"//", 3:"<<", 4:"@", 5:"*",
+                              6:"%", 7:"|", 8:"**", 9:">>", 10:"-", 11:"/", 12:"^",
+                              26: "[]"}
                     sym = op_map.get(int(ins.arg) if ins.arg is not None else -1, "?")
-                    mini_stack.append(f"({left} {sym} {right})")
+                    if sym == "[]":
+                        mini_stack.append(f"{left}[{right}]")
+                    else:
+                        mini_stack.append(f"({left} {sym} {right})")
             elif op in ("IS_OP",):
                 if len(mini_stack) >= 2:
                     right, left = mini_stack.pop(), mini_stack.pop()
@@ -1012,18 +1304,22 @@ class DecompilerGeneric(DecompilerBase):
 
     def _handle_instruction(self, instr: BytecodeInstruction):  # noqa: C901
         """
-        Dispatches a single bytecode instruction to the decompiler's handler, updating internal state and emitting reconstructed source as needed.
+        Handle a single disassembled bytecode instruction, updating the decompiler's internal state and emitting reconstructed source lines when appropriate.
         
         Parameters:
-            instr (BytecodeInstruction): The decoded bytecode instruction to process; its opname and arg/argval determine how the decompiler updates the operand stack, control-flow block stack, indentation, and the list of reconstructed source lines.
-        
-        Side effects:
-            Mutates the decompiler instance state (notably self.stack, self.reconstructed, self.blocks, self.indent_level, and self.pc) to reflect the effect of the instruction and may append emitted source lines.
+            instr (BytecodeInstruction): The disassembled instruction to process; this method may push/pop from the decompiler expression stack, append lines to the reconstructed source buffer, and modify control-flow state such as indentation level, block stack, program counter, and pre-scan suppression/mapping structures.
         """
         opname = instr.opname
         # Suppress then-branch instructions of detected ternary expressions;
         # the ternary is pushed as a whole expression at POP_JUMP_IF time.
         if instr.offset in getattr(self, "_ternary_suppress", ()):
+            return
+        # Suppress intermediate instructions belonging to a compound boolean
+        # These are the non-controlling POP_JUMP_IF_* instructions; pop their
+        # clause operand from the stack so the stack stays balanced.
+        if instr.offset in getattr(self, "_compound_suppress", ()):
+            if self.stack:
+                self.stack.pop()
             return
 
         # ── loads ──────────────────────────────────────────────────────
@@ -1858,7 +2154,7 @@ class DecompilerGeneric(DecompilerBase):
                         self.blocks.append((end_offset, "while"))
                         self._while_true_ends.add(end_offset)
 
-        elif "POP_JUMP_IF_FALSE" in opname or "POP_JUMP_IF_TRUE" in opname:
+        elif self._is_compound_cjump(opname):
             # ── Ternary expression detection ──────────────────────────────
             # If _prescan_ternaries identified this jump as a ternary, evaluate
             # both branches speculatively and push the ternary expression onto
@@ -1897,6 +2193,20 @@ class DecompilerGeneric(DecompilerBase):
                 # Suppress the POP_JUMP after CHECK_EXC_MATCH.
                 if str(cond) == "_exc_match":
                     return
+                compound_cond_map = getattr(self, "_compound_cond_map", {})
+                compound_cond = compound_cond_map.get(instr.offset)
+                compound_precomputed = False
+                if compound_cond is not None:
+                    cond = compound_cond
+                    compound_precomputed = True
+                else:
+                    if "IF_NONE" in opname and "NOT" not in opname:
+                        # Fires on None; body runs on NOT None
+                        cond = f"{cond} is not None"
+                    elif "IF_NOT_NONE" in opname:
+                        # Fires on NOT None; body runs on None
+                        cond = f"{cond} is None"
+
                 is_true = "IF_TRUE" in opname
                 jump_target = self._get_jump_target(instr)
 
@@ -1909,7 +2219,9 @@ class DecompilerGeneric(DecompilerBase):
                 for bs, go in self._while_header_targets.items():
                     if go == instr.offset:
                         # This POP_JUMP is the while-loop guard
-                        if is_true:
+                        if compound_precomputed:
+                            self._append_reconstructed(f"while {cond}:")
+                        elif is_true:
                             self._append_reconstructed(f"while not {cond}:")
                         else:
                             self._append_reconstructed(f"while {cond}:")
@@ -1923,14 +2235,18 @@ class DecompilerGeneric(DecompilerBase):
                     p_line = prev_line.strip()
                     prev_cond = p_line[3:].rstrip(":") if p_line.startswith("if ") else p_line.rstrip(":")
                     self.indent_level -= 1
-                    if is_true:
+                    if compound_precomputed:
+                        self._append_reconstructed(f"if {prev_cond} and {cond}:")
+                    elif is_true:
                         self._append_reconstructed(f"if {prev_cond} or not {cond}:")
                     else:
                         self._append_reconstructed(f"if {prev_cond} and {cond}:")
                     self.indent_level += 1
                     return
 
-                if is_true:
+                if compound_precomputed:
+                    self._append_reconstructed(f"if {cond}:")
+                elif is_true:
                     self._append_reconstructed(f"if not {cond}:")
                 else:
                     self._append_reconstructed(f"if {cond}:")
@@ -1953,21 +2269,7 @@ class DecompilerGeneric(DecompilerBase):
 
                 self.blocks.append((jump_target, "if"))
 
-        # FIX-01: POP_JUMP_IF_NONE / POP_JUMP_IF_NOT_NONE — was swapped
-        elif "POP_JUMP_IF_NONE" in opname or "POP_JUMP_IF_NOT_NONE" in opname:
-            if self.stack:
-                cond = self.stack.pop()
-                is_not_none = "NOT_NONE" in opname
-                # POP_JUMP_IF_NOT_NONE: jumps when not-None → body runs when None
-                # POP_JUMP_IF_NONE:     jumps when None     → body runs when not-None
-                if is_not_none:
-                    self._append_reconstructed(f"if {cond} is None:")
-                else:
-                    self._append_reconstructed(f"if {cond} is not None:")
 
-                self.indent_level += 1
-                jump_target = self._get_jump_target(instr)
-                self.blocks.append((jump_target, "if"))
 
         # ── for loop ───────────────────────────────────────────────────
         elif opname == "FOR_ITER":
