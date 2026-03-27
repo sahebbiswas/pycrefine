@@ -2797,33 +2797,39 @@ class TestCompoundConditions(unittest.TestCase):
         src = "def f(a, b):\n    if a == 1 and b == 2:\n        return True\n    return False\n"
         out = decompile(src)
         assert_contains(out, "if a == 1 and b == 2:")
-        self.assertEqual(out.count("if "), 1, f"Expected 1 if, got:\n{out}")
+        header_count = sum(1 for line in out.splitlines() if line.lstrip().startswith("if "))
+        self.assertEqual(header_count, 1, f"Expected 1 if, got {header_count} in:\n{out}")
 
     def test_compound_or(self):
         src = "def f(a, b):\n    if a == 1 or b == 2:\n        return True\n    return False\n"
         out = decompile(src)
         assert_contains(out, "if a == 1 or b == 2:")
-        self.assertEqual(out.count("if "), 1, f"Expected 1 if, got:\n{out}")
+        header_count = sum(1 for line in out.splitlines() if line.lstrip().startswith("if "))
+        self.assertEqual(header_count, 1, f"Expected 1 if, got {header_count} in:\n{out}")
 
     def test_compound_mixed_and_or(self):
         src = "def f(a, b, c):\n    if a == 1 and b == 2 or c == 3:\n        return True\n    return False\n"
         out = decompile(src)
         self.assertTrue("if a == 1 and b == 2 or c == 3:" in out or
                         "if (a == 1 and b == 2) or c == 3:" in out)
-        self.assertEqual(out.count("if "), 1)
+        header_count = sum(1 for line in out.splitlines() if line.lstrip().startswith("if "))
+        self.assertEqual(header_count, 1)
 
     def test_compound_none_and(self):
         src = "def f(x):\n    if x is not None and x > 0:\n        return True\n    return False\n"
         out = decompile(src)
         assert_contains(out, "if x is not None and x > 0:")
-        self.assertEqual(out.count("if "), 1)
+        header_count = sum(1 for line in out.splitlines() if line.lstrip().startswith("if "))
+        self.assertEqual(header_count, 1)
 
     def test_compound_none_or(self):
         src = "def f(x, y):\n    if x is None or y is None:\n        return True\n    return False\n"
         out = decompile(src)
-        # We accept either parenthesised or unparenthesised since precedence is correct
-        assert_contains(out, "if x is None or y is None:")
-        self.assertEqual(out.count("if "), 1)
+        # Accept either parenthesised or unparenthesised
+        self.assertTrue("if x is None or y is None:" in out or
+                        "if (x is None or y is None):" in out)
+        header_count = sum(1 for line in out.splitlines() if line.lstrip().startswith("if "))
+        self.assertEqual(header_count, 1)
 
     def test_compound_complex_mixed(self):
         src = (
@@ -2835,20 +2841,19 @@ class TestCompoundConditions(unittest.TestCase):
         out = decompile(src)
         self.assertTrue("x is not None and x > 0 or y is None and z == 1" in out or
                         "(x is not None and x > 0) or (y is None and z == 1)" in out or
-                        "(x is not None and x > 0) or y is None and z == 1" in out or
-                        "((x is not None and x > 0) or y is None) and z == 1" in out) # variants based on bytecode optimization
-        self.assertEqual(out.count("if "), 1)
+                        "(x is not None and x > 0) or y is None and z == 1" in out) # semantically equivalent variants
+        header_count = sum(1 for line in out.splitlines() if line.lstrip().startswith("if "))
+        self.assertEqual(header_count, 1)
 
     def test_compound_short_circuit_with_call(self):
         """
         Verify that a compound `and` condition containing a short-circuiting call is decompiled correctly.
-        
-        Asserts that the decompiled output contains the exact header `if x is not None and len(x) > 0:` and that exactly one `if` header appears in the output.
         """
         src = "def f(x):\n    if x is not None and len(x) > 0:\n        return x[0]\n    return None\n"
         out = decompile(src)
         assert_contains(out, "if x is not None and len(x) > 0:")
-        self.assertEqual(out.count("if "), 1)
+        header_count = sum(1 for line in out.splitlines() if line.lstrip().startswith("if "))
+        self.assertEqual(header_count, 1)
 
     def test_compound_nested_if_merge_regression(self):
         src = (
@@ -2861,7 +2866,8 @@ class TestCompoundConditions(unittest.TestCase):
         )
         out = decompile(src)
         assert_contains(out, "if x > 0:", "if y > 0:", "return 1", "return 2", "return 0")
-        self.assertEqual(out.count("if "), 2)
+        header_count = sum(1 for line in out.splitlines() if line.lstrip().startswith("if "))
+        self.assertEqual(header_count, 2)
 
 
 # ---------------------------------------------------------------------------

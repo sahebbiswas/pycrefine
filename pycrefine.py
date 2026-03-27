@@ -936,11 +936,10 @@ class DecompilerGeneric(DecompilerBase):
             jump_starts = {g[3] for g in group}
 
             valid = True
-            has_or = False
             for _, jinstr, _, _ in group:
                 t = self._get_jump_target(jinstr)
                 if t == body_target:
-                    has_or = True
+                    pass
                 elif t == end_target or t in jump_starts:
                     pass
                 else:
@@ -956,42 +955,32 @@ class DecompilerGeneric(DecompilerBase):
             # -----------------------------------------------------------
             # Build the combined condition string.
             # -----------------------------------------------------------
-            parts: list = []  # list of (cond_str, is_or, jump_target)
+            parts: list = []  # list of (cond_str, is_or_connector, next_t)
 
-            for k, (jump_idx, jinstr, expr_instrs, _) in enumerate(group):
+            for _, jinstr, expr_instrs, _ in group:
                 raw_expr = self._eval_cond_expr(expr_instrs)
                 t = self._get_jump_target(jinstr)
                 op = jinstr.opname
-                
-                # Polarities:
-                # Polarities:
-                # IF_TRUE fires on Success.
-                # IF_FALSE/NONE/NOT_NONE fire on Failure or specific condition.
                 is_success_type = ("IF_TRUE" in op)
                 
-                # Logic: if jump targets body (OR), it's definitely an OR jump.
-                # If it targets END, it's definitely an AND jump.
-                # If it targets a later part of the chain: 
-                # - Success-type jump to later = Progress to next OR sub-group.
-                # - Failure-type jump to later = Progress to next part of AND-chain.
+                # Logic: is_or_jump is True if jump targets body (Success) or 
+                # a later part of the chain that allows bypassing the alternative.
                 if t == body_target:
                     is_or_jump = True
                 elif t == end_target:
                     is_or_jump = False
                 else:
-                    # Intermediate target.
+                    # Intra-group jump. If it's a success-type jump to a later offset, 
+                    # it indicates an OR short-circuit.
                     is_or_jump = is_success_type
 
                 if "IF_NONE" in op and "NOT" not in op:
-                    # Fires on None; if OR jump, success is None. If AND, failure is None -> success is not None.
                     cond_str = f"{raw_expr} is None" if is_or_jump else f"{raw_expr} is not None"
                 elif "IF_NOT_NONE" in op:
-                    # Fires on NOT None; if OR jump, success is NOT None. If AND, failure is NOT None -> success is None.
                     cond_str = f"{raw_expr} is not None" if is_or_jump else f"{raw_expr} is None"
                 elif "IF_TRUE" in op:
                     cond_str = raw_expr if is_or_jump else f"not {raw_expr}"
                 else:
-                    # POP_JUMP_IF_FALSE: fires on False
                     cond_str = f"not {raw_expr}" if is_or_jump else raw_expr
                 
                 parts.append((cond_str, is_or_jump, t))
@@ -999,65 +988,73 @@ class DecompilerGeneric(DecompilerBase):
             # Assemble with precedence and parentheses.
             # -------------------------------------------
             # Precedence: and > or.
-            # a and b or c  -> (a and b) or c
-            # a or b and c  -> a or (b and c)
-            
-            # Assemble with precedence and parentheses.
-            # -------------------------------------------
-            # Precedence: and > or.
             # We use a recursive builder that identifies subgroups based 
             # on jump targets. A jump that targets a point before the current 
             # "final exit" defines the boundary of a local subgroup.
             
+            def join_flat(s_idx, e_idx):
+                """Linearly joins parts[s_idx:e_idx] without recursion."""
+                comb = parts[s_idx][0]
+                h_or = False
+                for k in range(s_idx + 1, e_idx):
+                    c = "or" if parts[k-1][1] else "and"
+                    if c == "and" and h_or:
+                        comb = f"({comb})"
+                        h_or = False
+                    comb = f"{comb} {c} {parts[k][0]}"
+                    h_or = h_or or (c == "or")
+                return comb, parts[e_idx-1][1], h_or
+
             def assemble(start_idx, end_idx, context_exit):
-                """Assemble parts[start_idx:end_idx]."""
+                """Assemble parts[start_idx:end_idx]. Returns (expr, next_conn_is_or, has_top_level_or)."""
                 if start_idx + 1 == end_idx:
-                    return parts[start_idx][0], parts[start_idx][1]
+                    return parts[start_idx][0], parts[start_idx][1], False
                 
-                # Build a list of top-level subgroups for this recursion level.
-                subs = [] # (expr, is_or)
+                subs: list = [] # list of (expr, unit_is_or, has_or)
                 i = start_idx
                 while i < end_idx:
                     curr_expr, curr_is_or, curr_target = parts[i]
-                    # Find how far this subgroup extends.
-                    # It extends as long as jumps target something contained 
-                    # within the first jump's range (if it's not the final exit).
-                    
                     j = i + 1
+                    
                     if curr_target < context_exit:
-                        # This jump defines a subgroup that ends at curr_target.
+                        # Deeper nesting detected.
                         while j < end_idx and group[j][3] < curr_target:
                             j += 1
-                        
-                        sub_expr, sub_is_or = assemble(i, j, curr_target)
-                        # Conservatively parenthesize nested groups with internal connectors.
-                        if " and " in sub_expr or " or " in sub_expr:
+                        sub_expr, sub_is_or, sub_has_or = assemble(i, j, curr_target)
+                        if sub_has_or:
                             sub_expr = f"({sub_expr})"
-                        subs.append((sub_expr, sub_is_or))
+                            sub_has_or = False
+                        subs.append((sub_expr, sub_is_or, sub_has_or))
                     else:
-                        # Simple flat component.
-                        subs.append((curr_expr, curr_is_or))
+                        # Shared-target grouping (non-recursive).
+                        while j < end_idx and parts[j][2] == curr_target:
+                            j += 1
+                        if j > i + 1:
+                            subs.append(join_flat(i, j))
+                        else:
+                            subs.append((curr_expr, curr_is_or, False))
                     i = j
 
-                # Join the subgroups linearly with precedence handling.
-                res = subs[0][0]
-                prev_is_or = subs[0][1]
+                combined = subs[0][0]
+                has_or = subs[0][2]
+                
                 for k in range(1, len(subs)):
-                    next_expr, next_is_or = subs[k]
-                    conn = "or" if prev_is_or else "and"
+                    next_expr, next_is_or, next_has_or = subs[k]
+                    conn = "or" if subs[k-1][1] else "and"
                     
-                    # Precedence: (a or b) and c
-                    if conn == "and" and (" or " in res and "(" not in res):
-                        res = f"({res})"
-                    # a and (b or c)
-                    if conn == "and" and (" or " in next_expr and "(" not in next_expr):
+                    if conn == "and" and has_or:
+                        combined = f"({combined})"
+                        has_or = False
+                    
+                    if conn == "and" and next_has_or:
                         next_expr = f"({next_expr})"
-                        
-                    res = f"{res} {conn} {next_expr}"
-                    prev_is_or = next_is_or
-                return res, prev_is_or
+                    
+                    combined = f"{combined} {conn} {next_expr}"
+                    has_or = has_or or (conn == "or") or next_has_or
+                
+                return combined, subs[-1][1], has_or
 
-            combined, _ = assemble(0, len(parts), end_target)
+            combined, _, _ = assemble(0, len(parts), end_target)
 
             # Register: controlling jump gets combined cond; all others are suppressed.
             # -----------------------------------------------------------
@@ -2286,21 +2283,7 @@ class DecompilerGeneric(DecompilerBase):
 
                 self.blocks.append((jump_target, "if"))
 
-        # FIX-01: POP_JUMP_IF_NONE / POP_JUMP_IF_NOT_NONE — was swapped
-        elif "POP_JUMP_IF_NONE" in opname or "POP_JUMP_IF_NOT_NONE" in opname:
-            if self.stack:
-                cond = self.stack.pop()
-                is_not_none = "NOT_NONE" in opname
-                # POP_JUMP_IF_NOT_NONE: jumps when not-None → body runs when None
-                # POP_JUMP_IF_NONE:     jumps when None     → body runs when not-None
-                if is_not_none:
-                    self._append_reconstructed(f"if {cond} is None:")
-                else:
-                    self._append_reconstructed(f"if {cond} is not None:")
 
-                self.indent_level += 1
-                jump_target = self._get_jump_target(instr)
-                self.blocks.append((jump_target, "if"))
 
         # ── for loop ───────────────────────────────────────────────────
         elif opname == "FOR_ITER":
