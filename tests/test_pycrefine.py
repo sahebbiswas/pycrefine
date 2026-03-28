@@ -297,7 +297,8 @@ class TestControlFlow(unittest.TestCase):
         return_false_indent = next(len(line) - len(line.lstrip()) for line in lines if "return False" in line)
 
         self.assertEqual(first_if_indent, second_if_indent, "if-headers missing base ident level")
-        self.assertEqual(first_if_indent, return_false_indent, "return False missing base indent level")
+        self.assertEqual(first_if_indent, return_false_indent, "return False missing base indent level")
+
 
 
 
@@ -558,6 +559,111 @@ class TestExceptions(unittest.TestCase):
         )
         out = decompile(src)
         assert_contains(out, "raise RuntimeError", "from e")
+
+    def test_try_except_finally(self):
+        """try/except/finally must produce all three clauses in correct order."""
+        src = (
+            "try:\n    x = int('1')\n"
+            "except ValueError:\n    x = 0\n"
+            "finally:\n    print('done')\n"
+        )
+        out = decompile(src)
+        assert_contains(out, "try:", "except ValueError:", "finally:", "print('done')")
+        lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+        try_pos    = next(i for i, l in enumerate(lines) if l == "try:")
+        except_pos = next(i for i, l in enumerate(lines) if l.startswith("except"))
+        finally_pos = next(i for i, l in enumerate(lines) if l == "finally:")
+        self.assertLess(try_pos, except_pos, "try: must come before except:")
+        self.assertLess(except_pos, finally_pos, "except: must come before finally:")
+
+    def test_try_finally_no_except(self):
+        """try/finally without except must produce try: and finally: blocks."""
+        src = "try:\n    x = 1\nfinally:\n    print('done')\n"
+        out = decompile(src)
+        assert_contains(out, "try:", "finally:", "print('done')")
+
+    def test_with_statement(self):
+        """with X as y: must emit the with header (FIX-15 BEFORE_WITH)."""
+        src = "with open('f') as fh:\n    data = fh.read()\n"
+        out = decompile(src)
+        self.assertIn("with ", out, f"'with' header missing:\n{out}")
+        self.assertIn("open(", out, f"context expression missing:\n{out}")
+        self.assertNotIn("None(None, None)", out, f"__exit__ epilogue leaked:\n{out}")
+
+    def test_with_as_variable_bound(self):
+        """The 'as' variable from a with statement must appear in the output."""
+        src = "with open('f') as fh:\n    x = fh.read()\n"
+        out = decompile(src)
+        # The decompiler should bind 'fh' in the with header
+        self.assertIn("fh", out, f"'as fh' binding missing:\n{out}")
+        self.assertIn("fh.read()", out, f"body missing:\n{out}")
+
+    def test_with_try_except_finally(self):
+        """with + nested try/except/finally must not corrupt structure."""
+        src = (
+            "with open('f') as fh:\n"
+            "    try:\n"
+            "        x = fh.read()\n"
+            "    except IOError:\n"
+            "        x = ''\n"
+            "    finally:\n"
+            "        print('done')\n"
+        )
+        out = decompile(src)
+        assert_contains(out, "with ", "try:", "except IOError:", "finally:")
+        self.assertNotIn("None(None, None)", out, f"__exit__ epilogue leaked:\n{out}")
+        self.assertNotIn("_exc_info", out, f"sentinel leaked:\n{out}")
+
+    def test_sequential_try_except_finally_blocks(self):
+        """Two sequential try/except/finally blocks must both appear correctly."""
+        src = (
+            "try:\n    a = int('1')\n"
+            "except ValueError:\n    a = 0\n"
+            "finally:\n    print('first')\n"
+            "try:\n    b = int('2')\n"
+            "except ValueError:\n    b = 0\n"
+            "finally:\n    print('second')\n"
+        )
+        out = decompile(src)
+        assert_contains(out, "try:", "except ValueError:", "finally:")
+        self.assertIn("print('first')", out, f"first finally body missing:\n{out}")
+        self.assertIn("print('second')", out, f"second finally body missing:\n{out}")
+        # Both except clauses must be present
+        self.assertEqual(out.count("except ValueError:"), 2,
+                         f"Expected 2 except ValueError: clauses:\n{out}")
+
+    def test_finally_body_after_except_not_before(self):
+        """finally: must appear AFTER except clauses, not before them."""
+        src = (
+            "try:\n    x = 1\n"
+            "except ValueError:\n    x = 0\n"
+            "finally:\n    print('fin')\n"
+        )
+        out = decompile(src)
+        lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+        except_pos  = next((i for i, l in enumerate(lines) if l.startswith("except")), -1)
+        finally_pos = next((i for i, l in enumerate(lines) if l == "finally:"), -1)
+        self.assertGreater(finally_pos, except_pos,
+                           f"finally: appeared before except: in:\n{out}")
+
+    def test_no_exit_epilogue_leakage(self):
+        """The __exit__(None,None,None) with-cleanup must not appear as None(None,None)."""
+        src = "with open('f') as fh:\n    pass\n"
+        out = decompile(src)
+        self.assertNotIn("None(None, None)", out, f"__exit__ epilogue leaked:\n{out}")
+        self.assertNotIn("None(None,", out, f"__exit__ epilogue leaked:\n{out}")
+
+    def test_reraise_wrapper_suppressed(self):
+        """Re-raise wrapper machinery must not appear in decompiled output."""
+        src = (
+            "try:\n    x = int('1')\n"
+            "except ValueError:\n    x = 0\n"
+            "finally:\n    print('done')\n"
+        )
+        out = decompile(src)
+        self.assertNotIn("RERAISE", out, f"RERAISE opcode leaked:\n{out}")
+        self.assertNotIn("PUSH_EXC_INFO", out, f"PUSH_EXC_INFO leaked:\n{out}")
+        self.assertNotIn("_exc_info", out, f"_exc_info sentinel leaked:\n{out}")
 
 
 # ---------------------------------------------------------------------------
