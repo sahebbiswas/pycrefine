@@ -389,6 +389,30 @@ class DecompilerBase:
             return instr.argval
         return int(instr.arg) if (instr.arg is not None) else 0
 
+    def is_effectively_last(self) -> bool:
+        """Check if all remaining instructions are logically epilogue/handlers only."""
+        # Search ahead from current PC.
+        for i in range(self.pc, len(self.instructions)):
+            instr = self.instructions[i]
+            op = instr.opname
+            # Skip re-raise epilogue, filler, and terminal stack-clearing instructions
+            # common in modern Python (3.11-3.14) exception handlers and epilogues.
+            if op in (
+                "COPY", "POP_EXCEPT", "RERAISE", "CACHE", "RESUME", "PUSH_EXC_INFO", 
+                "POP_TOP", "LOAD_CONST", "EXTENDED_ARG", "CHECK_EXC_MATCH", 
+                "NOT_TAKEN", "TO_BOOL", "POP_JUMP_IF_TRUE", "POP_JUMP_IF_FALSE",
+                "JUMP_BACKWARD", "JUMP_BACKWARD_NO_INTERRUPT", "NOP"
+            ):
+                continue
+            # Skip subsequent None returns (common in 3.14 multiple exit paths)
+            stack = getattr(self, "stack", None)
+            if op == "RETURN_VALUE" and stack and str(stack[-1]) == "None":
+                continue
+            if op == "RETURN_CONST" and str(instr.argval) == "None":
+                continue
+            return False
+        return True
+
 
 # ---------------------------------------------------------------------------
 # Generic decompiler (3.10–3.13 primary path)
@@ -437,6 +461,7 @@ class DecompilerGeneric(DecompilerBase):
         Returns:
             The reconstructed Python source as a single string with a trailing newline trimmed.
         """
+        start_indent = self.indent_level
         self._disassemble()
         self.pc = 0
         self.blocks = []
@@ -479,38 +504,61 @@ class DecompilerGeneric(DecompilerBase):
 
         while self.pc < len(self.instructions):
             instr = self.instructions[self.pc]
+            self.pc += 1
 
             # Close any blocks whose end offset we have passed
-            while self.blocks and instr.offset >= self.blocks[-1][0]:
-                block_end, block_type = self.blocks.pop()
-                # Add 'pass' only for user-visible conditional/loop blocks whose
-                # header was the last thing written.  Internal structural blocks
-                # (try_body, exc_cleanup, with, for, else) never need a pass here —
-                # the handler that closes them properly does so by emitting content.
-                # finally_wrapper: silent outer SETUP_FINALLY (no indent emitted).
-                _NO_PASS_TYPES = frozenset({
-                    "try_body", "exc_cleanup", "with", "with_body", "for",
-                    "else", "finally_body", "finally_wrapper",
-                })
-                # finally_wrapper never incremented indent, so don't decrement it.
-                _NO_INDENT_TYPES = frozenset({"finally_wrapper"})
-                if block_type not in _NO_PASS_TYPES:
-                    last_idx = len(self.reconstructed) - 1
-                    while last_idx >= 0 and not self.reconstructed[last_idx].strip():
-                        last_idx -= 1
-                    if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
-                        self._append_reconstructed("pass")
-                if block_type not in _NO_INDENT_TYPES:
-                    self.indent_level -= 1
+            self._close_blocks(instr.offset)
+            self._handle_instruction(instr)
 
+        # Final block closure for anything spanning to the very end
+        self._close_blocks(0x7fffffff)
 
-            if self.pc < len(self.instructions):
-                instr = self.instructions[self.pc]
-                self.pc += 1
-                self._handle_instruction(instr)
+        # Final cleanup: suppress redundant trailing 'return None' at the base indent
+        if self.reconstructed:
+            # Find last non-empty line
+            last_idx = len(self.reconstructed) - 1
+            while last_idx >= 0 and not self.reconstructed[last_idx].strip():
+                last_idx -= 1
+            
+            if last_idx >= 0 and self.reconstructed[last_idx].strip() == "return None":
+                # Found a trailing return None. We can safely remove it if there's other code.
+                has_others = False
+                for i in range(last_idx):
+                     strip_line = self.reconstructed[i].strip()
+                     if strip_line and not (
+                         strip_line.startswith('"""') or strip_line.startswith("'''")
+                     ):
+                         has_others = True
+                         break
+                
+                if has_others or getattr(self, "has_doc", False):
+                    self.reconstructed.pop(last_idx)
+                else:
+                    line = self.reconstructed[last_idx]
+                    indent = len(line) - len(line.lstrip())
+                    self.reconstructed[last_idx] = line[:indent] + "pass"
 
         raw_source = "\n".join(str(s) for s in self.reconstructed).rstrip()
         return post_process_source(raw_source)
+
+    def _close_blocks(self, offset: int):
+        """Close any blocks whose end offset we have reached or passed."""
+        _NO_PASS_TYPES = frozenset({
+            "try_body", "exc_cleanup", "with", "with_body", "for",
+            "else", "finally_body", "finally_wrapper",
+        })
+        _NO_INDENT_TYPES = frozenset({"finally_wrapper"})
+
+        while self.blocks and offset >= self.blocks[-1][0]:
+            block_end, block_type = self.blocks.pop()
+            if block_type not in _NO_PASS_TYPES:
+                last_idx = len(self.reconstructed) - 1
+                while last_idx >= 0 and not self.reconstructed[last_idx].strip():
+                    last_idx -= 1
+                if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
+                    self._append_reconstructed("pass")
+            if block_type not in _NO_INDENT_TYPES:
+                self.indent_level -= 1
 
     # ------------------------------------------------------------------
     # Output helpers
@@ -518,6 +566,10 @@ class DecompilerGeneric(DecompilerBase):
 
     def _append_reconstructed(self, line: str, indent_multiline: bool = False):
         if not line:
+            return
+            
+        # Suppress redundant trailing 'return None'
+        if line == "return None" and self.is_effectively_last():
             return
 
         # Blank line before major blocks
@@ -2439,36 +2491,46 @@ class DecompilerGeneric(DecompilerBase):
         elif opname == "RETURN_VALUE":
             if self.stack:
                 val = self.stack.pop()
-                is_last = self.pc >= len(self.instructions)
-                if val == "None" and is_last:
+                val_str = str(val)
+                is_last = self.is_effectively_last()
+                if val_str == "None" and is_last:
                     pass
-                elif "__class__" in str(val) or "__classdict__" in str(val):
+                elif "__class__" in val_str or "__classdict__" in val_str:
                     pass
                 elif self.starts_as_function:
+                    if val_str != "None" or not is_last:
+                        self._append_reconstructed(f"return {val}")
+                elif val_str != "None" and not is_last:
                     self._append_reconstructed(f"return {val}")
-                elif val != "None" and not is_last:
-                    self._append_reconstructed(f"return {val}")
+            return
 
         elif opname == "RETURN_CONST":
             # RETURN_CONST None has two meanings:
             #   - Inside a 'while True:' (NOP-driven, unconditional) block: it's `break`
-            #   - Everywhere else: compiler-generated exit sentinel — suppress
+            #   - Everywhere else: compiler-generated exit sentinel — suppress if effectively last
             if instr.argval is None:
-                # Check if we are inside a while-True block (type "while" and
-                # opened by the NOP handler, not by a guard POP_JUMP)
-                # while-True blocks are tracked by their end offsets in _while_true_ends
                 in_while_true = any(
-                    b[1] == "while" and b[0] in self._while_true_ends
+                    b[1] == "while" and b[0] in getattr(self, "_while_true_ends", set())
                     for b in self.blocks
                 )
                 if in_while_true:
                     self._append_reconstructed("break")
+                elif not self.is_effectively_last():
+                    if self.starts_as_function:
+                        # Only return if it's NOT the implicit None-return for a function
+                        # (this occurs inside a block that logically ends here)
+                        pass
                 return
-            val = repr(instr.argval)
-            if self.starts_as_function:
-                self._append_reconstructed("return " + val)
-            elif val != "None":
-                self._append_reconstructed("return " + val)
+            val = instr.argval
+            val_str = str(val)
+            is_last = self.is_effectively_last()
+            if val_str == "None" and is_last:
+                pass
+            elif self.starts_as_function:
+                if val_str != "None" or not is_last:
+                    self._append_reconstructed("return " + repr(val))
+            elif val_str != "None":
+                self._append_reconstructed("return " + repr(val))
 
         # ── POP_TOP ────────────────────────────────────────────────────
         elif opname == "POP_TOP":
@@ -4136,19 +4198,21 @@ class Decompiler314(Decompiler311Plus):
     def _handle_instruction(self, instr: BytecodeInstruction):
         opname = instr.opname
         
-        # Suppress normal-path __exit__ body calls
+        # Suppress normal-path __exit__ body calls (identified by range scan)
         if getattr(self, "_with_exit_suppress", set()) and instr.offset in self._with_exit_suppress:
             return
 
         # Handle Python 3.14 LOAD_SPECIAL (opcode 95)
-        # Note: 95 is LOAD_SPECIAL. We ignore it completely so it doesn't push __exit__ or __enter__ to stack.
         if instr.opcode == 95:
+            # LOAD_SPECIAL is used in with/async-with preambles and cleanup.
+            # We skip it primarily, unless it's part of a detected call.
             return
 
         # Python 3.14 with preamble starting at COPY 1
         if opname == "COPY" and instr.arg == 1:
             if self.pc + 4 < len(self.instructions):
                 seq = self.instructions[self.pc : self.pc + 5]
+                # Pattern: LOAD_SPECIAL 1 (__exit__), SWAP 2, SWAP 3, LOAD_SPECIAL 0 (__enter__), CALL 0
                 if (seq[0].opcode == 95 and seq[0].arg == 1 and
                     seq[1].opname == "SWAP" and seq[1].arg == 2 and
                     seq[2].opname == "SWAP" and seq[2].arg == 3 and
@@ -4156,7 +4220,9 @@ class Decompiler314(Decompiler311Plus):
                     seq[4].opname == "CALL" and seq[4].arg == 0):
                     
                     ctx_mgr = str(self.stack.pop()) if self.stack else "unknown_ctx"
-                    
+                    # Push internal sentinel representing EX and CM that stay on stack
+                    self.stack.append(("_with_info", ctx_mgr))
+
                     self.pc += 5
                     next_instr = self.instructions[self.pc] if self.pc < len(self.instructions) else None
                     as_name = ""
@@ -4174,19 +4240,19 @@ class Decompiler314(Decompiler311Plus):
                     try:
                         import dis
                         curr_offset = self.instructions[self.pc].offset if self.pc < len(self.instructions) else getattr(instr, "offset", 0)
-                        entries = dis.Bytecode(self.code_obj).exception_entries
-                        
-                        handler_target = None
-                        for e in entries:
-                            if e.start <= curr_offset <= e.start + 10:
-                                handler_target = e.target
-                                break
-                                
-                        if handler_target is not None:
-                            try_end = handler_target
-                            normal_ends = [e.end for e in entries if e.target == handler_target and e.end < handler_target]
-                            if normal_ends:
-                                exit_body_start = max(normal_ends)
+                        # We use the host Python's dis.Bytecode if it supports exception_entries (3.11+)
+                        if hasattr(dis, "Bytecode"):
+                            entries = dis.Bytecode(self.code_obj).exception_entries
+                            handler_target = None
+                            for e in entries:
+                                if e.start <= curr_offset <= e.start + 10:
+                                    handler_target = e.target
+                                    break
+                            if handler_target is not None:
+                                try_end = handler_target
+                                normal_ends = [e.end for e in entries if e.target == handler_target and e.end < handler_target]
+                                if normal_ends:
+                                    exit_body_start = max(normal_ends)
                     except Exception:
                         pass
                         
@@ -4197,12 +4263,44 @@ class Decompiler314(Decompiler311Plus):
                             self._with_exit_suppress = set()
                         idx = next((i for i, x in enumerate(self.instructions) if x.offset == exit_body_start), None)
                         if idx is not None:
+                            # Suppress up to the end of the cleanup sequence
                             for j in range(idx, len(self.instructions)):
                                 op = self.instructions[j].opname
                                 self._with_exit_suppress.add(self.instructions[j].offset)
                                 if op in ("POP_TOP", "RETURN_VALUE", "JUMP_FORWARD", "JUMP_ABSOLUTE", "JUMP_BACKWARD", "JUMP_BACKWARD_NO_INTERRUPT"):
                                     break
                     return
+
+        # Suppress normal-path cleanup calls: LOAD_CONST None (x3) + CALL 3 + POP_TOP
+        elif opname == "LOAD_CONST" and instr.argval is None:
+            # Check if this is the start of a 3x None sequence
+            if self.pc + 3 < len(self.instructions):
+                seq = self.instructions[self.pc : self.pc + 4]
+                if (seq[0].opname == "LOAD_CONST" and seq[0].argval is None and
+                    seq[1].opname == "LOAD_CONST" and seq[1].argval is None and
+                    seq[2].opname == "CALL" and seq[2].arg == 3 and
+                    seq[3].opname == "POP_TOP"):
+                    
+                    # Suppress the sequence
+                    self.pc += 4
+                    # Pop the sentinel if it's there
+                    if self.stack and isinstance(self.stack[-1], tuple) and self.stack[-1][0] == "_with_info":
+                        self.stack.pop()
+                    elif len(self.stack) >= 2 and isinstance(self.stack[-2], tuple) and self.stack[-2][0] == "_with_info":
+                        # Sometimes a return value or None is on top
+                        sav = self.stack.pop()
+                        self.stack.pop()
+                        self.stack.append(sav)
+                    return
+
+        # Before any return, ensure we've cleared the internal with-sentinel
+        elif opname in ("RETURN_VALUE", "RETURN_CONST"):
+            if any(isinstance(s, tuple) and s[0] == "_with_info" for s in self.stack):
+                while self.stack:
+                    s = self.stack.pop()
+                    if isinstance(s, tuple) and s[0] == "_with_info":
+                        break
+            # Fall through to super()
 
         super()._handle_instruction(instr)
 
