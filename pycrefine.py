@@ -3353,8 +3353,55 @@ class Decompiler39(DecompilerGeneric):
             for ins in self.instructions
         ]
 
+    def _prescan_try_structure(self) -> None:
+        super()._prescan_try_structure()
+        self._finally_targets = set()
+        self._finally_body_suppress = set()
+
+        for i, ins in enumerate(self.instructions):
+            if ins.opname == "SETUP_FINALLY":
+                target = self._get_jump_target(ins)
+                t_idx = next((idx for idx, x in enumerate(self.instructions) if x.offset == target), None)
+                if t_idx is not None:
+                    target_ins = self.instructions[t_idx]
+                    is_except = False
+                    if target_ins.opname == "DUP_TOP":
+                        is_except = True
+                    elif target_ins.opname == "POP_TOP":
+                        if t_idx + 2 < len(self.instructions):
+                            if self.instructions[t_idx+1].opname == "POP_TOP" and self.instructions[t_idx+2].opname == "POP_TOP":
+                                is_except = True
+                    # Exception handlers are either except blocks or with block exits.
+                    # In Python 3.9, with block exception handlers start with WITH_EXCEPT_START inside a try.
+                    # SETUP_FINALLY handles both, but we only want to pick strictly finally blocks.
+                    if target_ins.opname == "WITH_EXCEPT_START":
+                        is_except = True
+                        
+                    if not is_except:
+                        self._finally_targets.add(target)
+                        end_reraise = None
+                        level = 0
+                        for j in range(t_idx, len(self.instructions)):
+                            jx = self.instructions[j]
+                            if jx.opname in ("SETUP_FINALLY", "SETUP_WITH", "SETUP_ASYNC_WITH"):
+                                level += 1
+                            elif jx.opname == "POP_BLOCK":
+                                level -= 1
+                            elif jx.opname == "RERAISE" and level <= 0:
+                                end_reraise = jx.offset
+                                break
+                        if end_reraise is not None:
+                            for j in range(t_idx, len(self.instructions)):
+                                self._finally_body_suppress.add(self.instructions[j].offset)
+                                if self.instructions[j].offset == end_reraise:
+                                    break
+
     # FIX-06: clean instruction dispatch for 3.9-specific opcodes
     def _handle_instruction(self, instr: BytecodeInstruction):
+        # Suppress exception-path finally bodies
+        if getattr(self, "_finally_body_suppress", set()) and instr.offset in self._finally_body_suppress:
+            return
+        
         opname = instr.opname
 
         # Scoped suppression: clear except-zone state when we exit the handler scope.
@@ -3595,7 +3642,12 @@ class Decompiler39(DecompilerGeneric):
         # POP_BLOCK: marks the clean exit from a try body in Python 3.9.
         # Close the try_body block and record the indent level for except headers.
         elif opname == "POP_BLOCK":
+            is_finally_pop = False
+            finally_target = None
             if self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup"):
+                finally_target = self.blocks[-1][0]
+                if getattr(self, "_finally_targets", set()) and finally_target in self._finally_targets:
+                    is_finally_pop = True
                 self.blocks.pop()
                 self.indent_level -= 1
             # Record the indent level where except/finally headers should appear.
@@ -3609,6 +3661,14 @@ class Decompiler39(DecompilerGeneric):
                     look += 1
                 if look < len(self.instructions) and self.instructions[look].opname == "JUMP_FORWARD":
                     self._except_end_offset = self._get_jump_target(self.instructions[look])
+
+            if is_finally_pop:
+                if self._except_header_indent >= 0:
+                    self.indent_level = self._except_header_indent
+                self._append_reconstructed("finally:")
+                self.indent_level += 1
+                self.blocks.append((finally_target, "finally_body"))
+                self._except_header_indent = -1
 
         # JUMP_ABSOLUTE: in 3.9 this is used both as:
         #   (a) a loop back-edge (target <= current offset) — treat as JUMP_BACKWARD
@@ -3716,7 +3776,7 @@ class Decompiler39(DecompilerGeneric):
                         look += 1
 
                     # Close any still-open try_body block
-                    if self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup"):
+                    if self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup") and self.blocks[-1][0] == instr.offset:
                         self.blocks.pop()
                         self.indent_level -= 1
 
@@ -3737,9 +3797,9 @@ class Decompiler39(DecompilerGeneric):
             # --- Bare except: DUP_TOP not followed by a LOAD (no type check) ---
             # In this case DUP_TOP is just the handler entry for a bare 'except:'.
             if self._except_header_indent >= 0 or (
-                self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup")
+                self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup") and self.blocks[-1][0] == instr.offset
             ):
-                if self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup"):
+                if self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup") and self.blocks[-1][0] == instr.offset:
                     self.blocks.pop()
                     self.indent_level -= 1
                 if self._except_header_indent >= 0:
@@ -3763,7 +3823,7 @@ class Decompiler39(DecompilerGeneric):
             exc_type = str(self.stack.pop()) if self.stack else "Exception"
             if self.stack:
                 self.stack.pop()  # exc_instance
-            if self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup"):
+            if self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup") and self.blocks[-1][0] == instr.offset:
                 self.blocks.pop()
                 self.indent_level -= 1
             if self._except_header_indent >= 0:
@@ -3919,13 +3979,81 @@ class Decompiler311Plus(DecompilerGeneric):
 
 class Decompiler314(Decompiler311Plus):
     """
-    Stub for Python 3.14.  Most opcodes are shared with 3.11–3.13.
-    Known 3.14 additions handled here:
-      - LOAD_SMALL_INT  already dispatched by DecompilerGeneric
-      - LOAD_GLOBAL_MODULE  already dispatched by DecompilerGeneric
-    Extend this class as 3.14-specific opcodes are confirmed.
+    Python 3.14+ specific decompiler logic.
+    Handles the new LOAD_SPECIAL opcodes and structure for with statements.
     """
-    pass
+    def _handle_instruction(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        
+        # Suppress normal-path __exit__ body calls
+        if getattr(self, "_with_exit_suppress", set()) and instr.offset in self._with_exit_suppress:
+            return
+
+        # Handle Python 3.14 LOAD_SPECIAL (opcode 95)
+        # Note: 95 is LOAD_SPECIAL. We ignore it completely so it doesn't push __exit__ or __enter__ to stack.
+        if instr.opcode == 95:
+            return
+
+        # Python 3.14 with preamble starting at COPY 1
+        if opname == "COPY" and instr.arg == 1:
+            if self.pc + 4 < len(self.instructions):
+                seq = self.instructions[self.pc : self.pc + 5]
+                if (seq[0].opcode == 95 and seq[0].arg == 1 and
+                    seq[1].opname == "SWAP" and seq[1].arg == 2 and
+                    seq[2].opname == "SWAP" and seq[2].arg == 3 and
+                    seq[3].opcode == 95 and seq[3].arg == 0 and
+                    seq[4].opname == "CALL" and seq[4].arg == 0):
+                    
+                    ctx_mgr = str(self.stack.pop()) if self.stack else "unknown_ctx"
+                    
+                    self.pc += 5
+                    next_instr = self.instructions[self.pc] if self.pc < len(self.instructions) else None
+                    as_name = ""
+                    if next_instr and next_instr.opname in ("STORE_NAME", "STORE_FAST", "STORE_GLOBAL", "STORE_ATTR"):
+                        as_name = f" as {next_instr.argval}"
+                        self.pc += 1
+                    elif next_instr and next_instr.opname == "POP_TOP":
+                        self.pc += 1
+                        
+                    self._append_reconstructed(f"with {ctx_mgr}{as_name}:")
+                    self.indent_level += 1
+                    
+                    try_end = None
+                    exit_body_start = None
+                    try:
+                        import dis
+                        curr_offset = self.instructions[self.pc].offset if self.pc < len(self.instructions) else getattr(instr, "offset", 0)
+                        entries = dis.Bytecode(self.code_obj).exception_entries
+                        
+                        handler_target = None
+                        for e in entries:
+                            if e.start <= curr_offset <= e.start + 10:
+                                handler_target = e.target
+                                break
+                                
+                        if handler_target is not None:
+                            try_end = handler_target
+                            normal_ends = [e.end for e in entries if e.target == handler_target and e.end < handler_target]
+                            if normal_ends:
+                                exit_body_start = max(normal_ends)
+                    except Exception:
+                        pass
+                        
+                    if try_end is not None:
+                        self.blocks.append((try_end, "with_body"))
+                    if exit_body_start is not None:
+                        if not hasattr(self, "_with_exit_suppress"):
+                            self._with_exit_suppress = set()
+                        idx = next((i for i, x in enumerate(self.instructions) if x.offset == exit_body_start), None)
+                        if idx is not None:
+                            for j in range(idx, len(self.instructions)):
+                                op = self.instructions[j].opname
+                                self._with_exit_suppress.add(self.instructions[j].offset)
+                                if op in ("POP_TOP", "RETURN_VALUE", "JUMP_FORWARD", "JUMP_ABSOLUTE", "JUMP_BACKWARD", "JUMP_BACKWARD_NO_INTERRUPT"):
+                                    break
+                    return
+
+        super()._handle_instruction(instr)
 
 
 # ---------------------------------------------------------------------------
