@@ -483,13 +483,25 @@ class DecompilerGeneric(DecompilerBase):
             # Close any blocks whose end offset we have passed
             while self.blocks and instr.offset >= self.blocks[-1][0]:
                 block_end, block_type = self.blocks.pop()
-                # Add 'pass' if the block header was the last thing written
-                last_idx = len(self.reconstructed) - 1
-                while last_idx >= 0 and not self.reconstructed[last_idx].strip():
-                    last_idx -= 1
-                if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
-                    self._append_reconstructed("pass")
-                self.indent_level -= 1
+                # Add 'pass' only for user-visible conditional/loop blocks whose
+                # header was the last thing written.  Internal structural blocks
+                # (try_body, exc_cleanup, with, for, else) never need a pass here —
+                # the handler that closes them properly does so by emitting content.
+                # finally_wrapper: silent outer SETUP_FINALLY (no indent emitted).
+                _NO_PASS_TYPES = frozenset({
+                    "try_body", "exc_cleanup", "with", "with_body", "for",
+                    "else", "finally_body", "finally_wrapper",
+                })
+                # finally_wrapper never incremented indent, so don't decrement it.
+                _NO_INDENT_TYPES = frozenset({"finally_wrapper"})
+                if block_type not in _NO_PASS_TYPES:
+                    last_idx = len(self.reconstructed) - 1
+                    while last_idx >= 0 and not self.reconstructed[last_idx].strip():
+                        last_idx -= 1
+                    if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
+                        self._append_reconstructed("pass")
+                if block_type not in _NO_INDENT_TYPES:
+                    self.indent_level -= 1
 
 
             if self.pc < len(self.instructions):
@@ -1792,14 +1804,27 @@ class DecompilerGeneric(DecompilerBase):
                 lines.append(s)
         return lines
 
-    def _emit_deferred_finally(self, merge_offset: int) -> None:
-        """Emit deferred except handlers then the finally: block for merge_offset."""
+    def _emit_deferred_finally(self, merge_offset: int, header_indent: int = -1) -> None:
+        """Emit deferred except handlers then the finally: block for merge_offset.
+
+        ``header_indent`` is the indent level at which ``except:`` / ``finally:``
+        headers should be written.  When called from the finally-merge label
+        handler, this is ``self.indent_level`` right after the try-body block
+        closed — which is the correct structural level regardless of whether
+        ``_except_header_indent`` was set (it may be -1 when the PUSH_EXC_INFO
+        was pre-suppressed into the deferred handler section).
+        """
+        # Determine the header indent: prefer the explicitly passed value;
+        # fall back to _except_header_indent if set; last resort: current level.
+        if header_indent < 0:
+            header_indent = self._except_header_indent if self._except_header_indent >= 0 \
+                            else self.indent_level
+
         # Emit pre-decompiled except handler lines first
         except_lines = getattr(self, "_deferred_except_lines", {}).get(merge_offset)
         if except_lines:
             save_indent = self.indent_level
-            if self._except_header_indent >= 0:
-                self.indent_level = self._except_header_indent
+            self.indent_level = header_indent
             for line in except_lines:
                 self._append_reconstructed(line)
             self.indent_level = save_indent
@@ -1807,8 +1832,7 @@ class DecompilerGeneric(DecompilerBase):
         # Then emit the finally: block
         finally_lines = getattr(self, "_deferred_finally_lines", {}).get(merge_offset)
         if finally_lines:
-            if self._except_header_indent >= 0:
-                self.indent_level = self._except_header_indent
+            self.indent_level = header_indent
             self._append_reconstructed("finally:")
             self.indent_level += 1
             for line in finally_lines:
@@ -1910,7 +1934,10 @@ class DecompilerGeneric(DecompilerBase):
         if instr.offset in getattr(self, "_finally_merge_offsets", ()):
             self._finally_merge_offsets.discard(instr.offset)
             self._pending_finally_merge = None
-            self._emit_deferred_finally(instr.offset)
+            # self.indent_level at this point is the correct header indent:
+            # the block manager has just closed the try_body block, leaving us
+            # at the same level as the enclosing try:/with: statement.
+            self._emit_deferred_finally(instr.offset, self.indent_level)
             return
         # Suppress inlined finally-body instructions (deferred; emitted at merge label)
         if instr.offset in getattr(self, "_finally_body_suppress", ()):
@@ -2207,10 +2234,51 @@ class DecompilerGeneric(DecompilerBase):
 
         elif opname == "SETUP_WITH":
             ctx = self.stack.pop() if self.stack else "ctx"
-            self._append_reconstructed(f"with {ctx} as _result:")
+            # Peek ahead for the STORE that binds the 'as' variable (3.9/3.10).
+            # In 3.9 the instruction immediately after SETUP_WITH is always
+            # STORE_FAST / STORE_NAME binding the __enter__() return value.
+            as_var = "_result"
+            _SKIP_SW = frozenset({"RESUME", "CACHE", "NOP", "NOT_TAKEN"})
+            look = self.pc
+            while look < len(self.instructions) and self.instructions[look].opname in _SKIP_SW:
+                look += 1
+            if look < len(self.instructions) and self.instructions[look].opname in (
+                "STORE_FAST", "STORE_NAME", "STORE_GLOBAL"
+            ):
+                as_var = str(self.instructions[look].argval)
+                self.pc = look + 1   # consume the STORE so it isn't processed again
+            self._append_reconstructed(f"with {ctx} as {as_var}:")
             self.indent_level += 1
             jump_target = self._get_jump_target(instr)
             self.blocks.append((jump_target, "with"))
+            # In Python 3.9 the normal with-exit sequence immediately preceding the
+            # exception handler looks like:
+            #   LOAD_CONST None; DUP_TOP; DUP_TOP; CALL_FUNCTION 3; POP_TOP; JUMP_FORWARD
+            # Suppress these so they don't produce spurious 'except:' / func() lines.
+            t_idx = next(
+                (i for i, x in enumerate(self.instructions) if x.offset == jump_target), -1
+            )
+            if t_idx > 0:
+                j = t_idx - 1
+                # Walk backwards to collect the exit-call block
+                suppress_start = None
+                while j >= 0:
+                    op = self.instructions[j].opname
+                    if op in ("LOAD_CONST", "DUP_TOP", "CALL_FUNCTION",
+                              "POP_TOP", "JUMP_FORWARD", "JUMP_ABSOLUTE", "POP_BLOCK"):
+                        suppress_start = self.instructions[j].offset
+                        j -= 1
+                    else:
+                        break
+                if suppress_start is not None:
+                    _fb = getattr(self, "_finally_body_suppress", set())
+                    for k in range(j + 1, t_idx):
+                        op = self.instructions[k].opname
+                        if op not in ("LOAD_CONST", "DUP_TOP", "CALL_FUNCTION",
+                                      "POP_TOP", "JUMP_FORWARD", "JUMP_ABSOLUTE", "POP_BLOCK"):
+                            break
+                        _fb.add(self.instructions[k].offset)
+                    self._finally_body_suppress = _fb
 
         elif opname == "BEFORE_WITH":
             # FIX-15: BEFORE_WITH — Python 3.11+ context-manager entry opcode.
@@ -3355,46 +3423,82 @@ class Decompiler39(DecompilerGeneric):
 
     def _prescan_try_structure(self) -> None:
         super()._prescan_try_structure()
+        # NOTE: do NOT reset self._finally_body_suppress here — super() may have
+        # populated it via the generic deferred-finally mechanism for PUSH_EXC_INFO
+        # patterns (even though 3.9 uses SETUP_FINALLY, the super call is harmless
+        # and we must preserve whatever it set).
         self._finally_targets = set()
-        self._finally_body_suppress = set()
+        # Merge with any suppress set from super(), don't overwrite it.
+        if not hasattr(self, "_finally_body_suppress"):
+            self._finally_body_suppress = set()
 
         for i, ins in enumerate(self.instructions):
-            if ins.opname == "SETUP_FINALLY":
-                target = self._get_jump_target(ins)
-                t_idx = next((idx for idx, x in enumerate(self.instructions) if x.offset == target), None)
-                if t_idx is not None:
-                    target_ins = self.instructions[t_idx]
-                    is_except = False
-                    if target_ins.opname == "DUP_TOP":
-                        is_except = True
-                    elif target_ins.opname == "POP_TOP":
-                        if t_idx + 2 < len(self.instructions):
-                            if self.instructions[t_idx+1].opname == "POP_TOP" and self.instructions[t_idx+2].opname == "POP_TOP":
-                                is_except = True
-                    # Exception handlers are either except blocks or with block exits.
-                    # In Python 3.9, with block exception handlers start with WITH_EXCEPT_START inside a try.
-                    # SETUP_FINALLY handles both, but we only want to pick strictly finally blocks.
-                    if target_ins.opname == "WITH_EXCEPT_START":
-                        is_except = True
-                        
-                    if not is_except:
-                        self._finally_targets.add(target)
-                        end_reraise = None
-                        level = 0
-                        for j in range(t_idx, len(self.instructions)):
-                            jx = self.instructions[j]
-                            if jx.opname in ("SETUP_FINALLY", "SETUP_WITH", "SETUP_ASYNC_WITH"):
-                                level += 1
-                            elif jx.opname == "POP_BLOCK":
-                                level -= 1
-                            elif jx.opname == "RERAISE" and level <= 0:
-                                end_reraise = jx.offset
-                                break
-                        if end_reraise is not None:
-                            for j in range(t_idx, len(self.instructions)):
-                                self._finally_body_suppress.add(self.instructions[j].offset)
-                                if self.instructions[j].offset == end_reraise:
-                                    break
+            if ins.opname != "SETUP_FINALLY":
+                continue
+            target = self._get_jump_target(ins)
+            t_idx = next(
+                (idx for idx, x in enumerate(self.instructions) if x.offset == target), None
+            )
+            if t_idx is None:
+                continue
+            target_ins = self.instructions[t_idx]
+
+            # Classify what the SETUP_FINALLY target is:
+            is_except = False
+            # Target is an except-handler entry (typed or bare):
+            if target_ins.opname == "DUP_TOP":
+                is_except = True
+            elif target_ins.opname == "POP_TOP":
+                # Bare-except: three consecutive POP_TOPs
+                if (t_idx + 2 < len(self.instructions)
+                        and self.instructions[t_idx + 1].opname == "POP_TOP"
+                        and self.instructions[t_idx + 2].opname == "POP_TOP"):
+                    is_except = True
+            # Target is the with-block exit handler:
+            elif target_ins.opname == "WITH_EXCEPT_START":
+                is_except = True
+            # Target is a tiny 'as e' cleanup block (LOAD_CONST None; STORE; DELETE; RERAISE):
+            # These are nested SETUP_FINALLY blocks for the 'except X as e:' binding.
+            # Recognise them by: the target is a LOAD_CONST None followed within 3 steps
+            # by a DELETE_* and a RERAISE (with no user body in between).
+            elif target_ins.opname == "LOAD_CONST" and target_ins.argval is None:
+                # Scan forward: if we hit DELETE_FAST/DELETE_NAME then RERAISE without
+                # any non-trivial instruction in between, treat as cleanup-only.
+                has_delete = False
+                has_reraise = False
+                for k in range(t_idx, min(t_idx + 8, len(self.instructions))):
+                    op = self.instructions[k].opname
+                    if op in ("DELETE_FAST", "DELETE_NAME", "DELETE_GLOBAL"):
+                        has_delete = True
+                    elif op == "RERAISE":
+                        has_reraise = True
+                        break
+                    elif op not in ("LOAD_CONST", "STORE_FAST", "STORE_NAME",
+                                    "STORE_GLOBAL", "POP_BLOCK"):
+                        break
+                if has_delete and has_reraise:
+                    is_except = True   # treat as cleanup, not a user finally
+
+            if not is_except:
+                self._finally_targets.add(target)
+                # Suppress the exception-path copy of the finally body.
+                # Find the end of it (up to and including the RERAISE).
+                end_reraise = None
+                level = 0
+                for j in range(t_idx, len(self.instructions)):
+                    jx = self.instructions[j]
+                    if jx.opname in ("SETUP_FINALLY", "SETUP_WITH", "SETUP_ASYNC_WITH"):
+                        level += 1
+                    elif jx.opname == "POP_BLOCK":
+                        level -= 1
+                    elif jx.opname == "RERAISE" and level <= 0:
+                        end_reraise = jx.offset
+                        break
+                if end_reraise is not None:
+                    for j in range(t_idx, len(self.instructions)):
+                        self._finally_body_suppress.add(self.instructions[j].offset)
+                        if self.instructions[j].offset == end_reraise:
+                            break
 
     # FIX-06: clean instruction dispatch for 3.9-specific opcodes
     def _handle_instruction(self, instr: BytecodeInstruction):
@@ -3650,6 +3754,16 @@ class Decompiler39(DecompilerGeneric):
                     is_finally_pop = True
                 self.blocks.pop()
                 self.indent_level -= 1
+
+            # Second case: POP_BLOCK at the end of all except-handlers may find a
+            # finally_wrapper block on top.  This POP_BLOCK signals the merge point
+            # at which the finally body should be emitted.
+            elif self.blocks and self.blocks[-1][1] == "finally_wrapper":
+                finally_target = self.blocks[-1][0]
+                is_finally_pop = True
+                self.blocks.pop()
+                # finally_wrapper never incremented indent, nothing to decrement here.
+
             # Record the indent level where except/finally headers should appear.
             # Only set when not already inside an except handler.
             if self._except_header_indent < 0:
@@ -3663,7 +3777,14 @@ class Decompiler39(DecompilerGeneric):
                     self._except_end_offset = self._get_jump_target(self.instructions[look])
 
             if is_finally_pop:
-                if self._except_header_indent >= 0:
+                # Determine the correct indent for finally: header.
+                # For finally_wrapper blocks, we captured the indent at SETUP_FINALLY time
+                # which is the right structural level regardless of what other blocks
+                # have been pushed/popped since then.
+                saved_indent = getattr(self, "_finally_wrapper_indent", {}).get(finally_target, -1)
+                if saved_indent >= 0:
+                    self.indent_level = saved_indent
+                elif self._except_header_indent >= 0:
                     self.indent_level = self._except_header_indent
                 self._append_reconstructed("finally:")
                 self.indent_level += 1
@@ -3835,12 +3956,42 @@ class Decompiler39(DecompilerGeneric):
         # SETUP_FINALLY inside an except handler: Python 3.9 wraps the 'as e'
         # cleanup in a nested SETUP_FINALLY to guarantee 'e = None; del e' runs
         # on both normal and reraise paths.  We must NOT emit a second 'try:' here.
+        #
+        # ALSO: when the target is a finally-block offset AND there's an immediately
+        # following inner SETUP_FINALLY (the real try: body), this is a silent outer
+        # wrapper.  For plain try/finally (no except), skip this path and use super().
         elif opname in ("SETUP_FINALLY", "SETUP_EXCEPT"):
+            jump_target = self._get_jump_target(instr)
             if self._except_header_indent >= 0:
                 # Inside an except handler — suppress 'try:' and just track boundary
-                jump_target = self._get_jump_target(instr)
                 self.blocks.append((jump_target, "exc_cleanup"))
                 self.indent_level += 1
+            elif jump_target in getattr(self, "_finally_targets", set()):
+                # Check if the very next real instruction is another SETUP_FINALLY.
+                # If so: this is the outer wrapper, inner will emit try:
+                # If not: this is a plain try/finally — let super() emit try: normally.
+                look = self.pc
+                _SKIP_SF = frozenset({"RESUME", "CACHE", "NOP", "NOT_TAKEN", "EXTENDED_ARG"})
+                while look < len(self.instructions) and self.instructions[look].opname in _SKIP_SF:
+                    look += 1
+                next_is_setup = (
+                    look < len(self.instructions)
+                    and self.instructions[look].opname in ("SETUP_FINALLY", "SETUP_EXCEPT")
+                )
+                if next_is_setup:
+                    # Outer wrapper only — inner SETUP_FINALLY will emit try:
+                    # Save current indent level so POP_BLOCK can correctly emit
+                    # finally: at the right level even if _except_header_indent
+                    # has been cleared by then.
+                    if not hasattr(self, "_finally_wrapper_indent"):
+                        self._finally_wrapper_indent = {}
+                    self._finally_wrapper_indent[jump_target] = self.indent_level
+                    self.blocks.append((jump_target, "finally_wrapper"))
+                else:
+                    # Plain try/finally (no except) — emit try: normally.
+                    # POP_BLOCK will see try_body with a finally_targets offset
+                    # and emit finally:.
+                    super()._handle_instruction(instr)
             else:
                 super()._handle_instruction(instr)
 
