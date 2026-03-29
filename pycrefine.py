@@ -421,6 +421,7 @@ class DecompilerBase:
         added by the compiler at the end of a function or module.
         Must be the final unbranched exit point.
         """
+        instr = self.instructions[instr_index]
         # Save current state for lookahead
         old_pc = self.pc
         self.pc = instr_index + 1
@@ -432,11 +433,22 @@ class DecompilerBase:
 
         # If we're inside any user-facing control flow block, it's likely 
         # an explicit return in the source.
-        # (excluding internal markers like finally_wrapper/exc_cleanup if they wrap the end)
-        user_blocks = {"if", "else", "for", "while", "try_body", "except", "finally_body"}
-        for _, btype in getattr(self, "blocks", []):
+        user_blocks = {"if", "else", "for", "while", "try_body", "except", "finally_body", "with", "with_body"}
+        blocks = getattr(self, "blocks", [])
+        for _, btype in blocks:
             if btype in user_blocks:
                 return False
+
+        # Robust check for Python 3.11+: if the return is within a protected 
+        # range in the exception table, it's explicit. Compiler-generated 
+        # returns for with/try blocks are always outside the protected range.
+        try:
+            import dis as _dis
+            for e in getattr(_dis.Bytecode(self.code_obj), "exception_entries", []):
+                if e.start <= instr.offset < e.end:
+                    return False
+        except (AttributeError, TypeError, ValueError, IndexError):
+            pass
 
         return True
 
@@ -468,7 +480,6 @@ class DecompilerGeneric(DecompilerBase):
         self._push_exc_to_finally_merge: dict = {}
         self._deferred_finally_lines: dict = {}
         self._deferred_except_lines: dict = {}
-        self._finally_body_suppress: set = set()
         self._handler_section_suppress: set = set()
         self._wrapper_body_suppress: set = set()
         self._pending_finally_merge: Optional[int] = None
@@ -547,22 +558,26 @@ class DecompilerGeneric(DecompilerBase):
                 last_idx -= 1
             
             if last_idx >= 0 and self.reconstructed[last_idx].strip() == "return None":
-                # Found a trailing return None. We can safely remove it if there's other code.
-                has_others = False
-                for i in range(last_idx):
-                     strip_line = self.reconstructed[i].strip()
-                     if strip_line and not (
-                         strip_line.startswith('"""') or strip_line.startswith("'''")
-                     ):
-                         has_others = True
-                         break
-                
-                if has_others or getattr(self, "has_doc", False):
-                    self.reconstructed.pop(last_idx)
-                else:
-                    line = self.reconstructed[last_idx]
-                    indent = len(line) - len(line.lstrip())
-                    self.reconstructed[last_idx] = line[:indent] + "pass"
+                line = self.reconstructed[last_idx]
+                # FIX: Only suppress root-level 'return None'. Indented ones (inside if/with/etc)
+                # are likely explicit and should be preserved.
+                if not (line.startswith(" ") or line.startswith("\t")):
+                    # Found a trailing return None at root level. 
+                    # We can safely remove it if there's other code.
+                    has_others = False
+                    for i in range(last_idx):
+                         strip_line = self.reconstructed[i].strip()
+                         if strip_line and not (
+                             strip_line.startswith('"""') or strip_line.startswith("'''")
+                         ):
+                             has_others = True
+                             break
+                    
+                    if has_others or getattr(self, "has_doc", False):
+                        self.reconstructed.pop(last_idx)
+                    else:
+                        indent = len(line) - len(line.lstrip())
+                        self.reconstructed[last_idx] = line[:indent] + "pass"
 
         raw_source = "\n".join(str(s) for s in self.reconstructed).rstrip()
         return post_process_source(raw_source)
@@ -1740,12 +1755,12 @@ class DecompilerGeneric(DecompilerBase):
         self._nop_to_push_exc: dict = {}  # nop_offset → push_exc_info_offset
         try:
             _exc_entries_for_nop = _dis.Bytecode(self.code_obj).exception_entries  # type: ignore[name-defined]
-        except Exception:
+        except (AttributeError, IndexError, TypeError, ValueError):
             _exc_entries_for_nop = []
         for nop_off in list(self._try_nop_offsets) + ([2] if any(ins.offset == 2 and ins.opname == "NOP" for ins in instrs) else []):
             body_start = nop_off + 2  # first instruction of the try body
             for e in _exc_entries_for_nop:
-                if e.start <= body_start <= e.end and e.target in real_push_exc:
+                if e.start <= body_start < e.end and e.target in real_push_exc:
                     self._nop_to_push_exc[nop_off] = e.target
                     break
 
@@ -1763,7 +1778,7 @@ class DecompilerGeneric(DecompilerBase):
             body_start = nop_off + 2
             # Find the suppressed PEI that handles this try body
             for e in _exc_entries_for_nop:
-                if e.start <= body_start and e.target in self._suppress_push_exc_offsets:
+                if e.start <= body_start < e.end and e.target in self._suppress_push_exc_offsets:
                     # This NOP has only a finally (no except).
                     # Find the try body end = start of finally body = e.end
                     try_body_end = e.end
@@ -4323,7 +4338,9 @@ class Decompiler314(Decompiler311Plus):
                             entries = dis.Bytecode(self.code_obj).exception_entries
                             handler_target = None
                             for e in entries:
-                                if e.start <= curr_offset <= e.start + 10:
+                                # Re-sync with exception table: the protected range 
+                                # usually starts at the first real instruction after CALL.
+                                if e.start >= instr.offset and e.start <= instr.offset + 20:
                                     handler_target = e.target
                                     break
                             if handler_target is not None:
@@ -4343,9 +4360,15 @@ class Decompiler314(Decompiler311Plus):
                         if idx is not None:
                             # Suppress up to the end of the cleanup sequence
                             for j in range(idx, len(self.instructions)):
-                                op = self.instructions[j].opname
-                                self._with_exit_suppress.add(self.instructions[j].offset)
-                                if op in ("POP_TOP", "RETURN_VALUE", "JUMP_FORWARD", "JUMP_ABSOLUTE", "JUMP_BACKWARD", "JUMP_BACKWARD_NO_INTERRUPT"):
+                                instr_j = self.instructions[j]
+                                op_j = instr_j.opname
+                                self._with_exit_suppress.add(instr_j.offset)
+                                # ONLY suppress until the end of the __exit__ cleanup call (POP_TOP).
+                                # Do NOT include RETURN_VALUE or any following instructions.
+                                if op_j == "POP_TOP":
+                                    break
+                                # Safety break if it looks like we're going too far
+                                if op_j in ("RETURN_VALUE", "RETURN_CONST", "RESUME"):
                                     break
                     return
 
@@ -4371,13 +4394,17 @@ class Decompiler314(Decompiler311Plus):
                         self.stack.append(sav)
                     return
 
-        # Before any return, ensure we've cleared the internal with-sentinel
+        # Before any return, ensure we've cleared the internal with-sentinel.
+        # Python 3.14 often leaves _with_info on the stack; we must clear it 
+        # while preserving the actual return value for the parent handler.
         elif opname in ("RETURN_VALUE", "RETURN_CONST"):
             if any(isinstance(s, tuple) and s[0] == "_with_info" for s in self.stack):
+                val = self.stack.pop()
                 while self.stack:
                     s = self.stack.pop()
                     if isinstance(s, tuple) and s[0] == "_with_info":
                         break
+                self.stack.append(val)
             # Fall through to super()
 
         super()._handle_instruction(instr)

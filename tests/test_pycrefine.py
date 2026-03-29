@@ -598,6 +598,12 @@ class TestExceptions(unittest.TestCase):
         self.assertIn("fh", out, f"'as fh' binding missing:\n{out}")
         self.assertIn("fh.read()", out, f"body missing:\n{out}")
 
+    def test_with_explicit_return_none(self):
+        """Explicit 'return None' inside a with statement must be preserved."""
+        src = "def f():\n    with open('f'):\n        return None\n"
+        out = decompile(src)
+        self.assertIn("return None", out, f"Explicit return None dropped inside with:\n{out}")
+
     def test_with_try_except_finally(self):
         """with + nested try/except/finally must not corrupt structure."""
         src = (
