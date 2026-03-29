@@ -264,6 +264,11 @@ class TestControlFlow(unittest.TestCase):
         self.assertEqual(inner, 1, f"Inner loop condition appears {inner} times:\n{out}")
 
     def test_if_comparison_equals(self):
+        """
+        Verify that decompiling an if-statement preserves an equality comparison.
+        
+        Asserts that the decompiled output contains the literal "x == 1".
+        """
         out = decompile("x = 1\nif x == 1:\n    pass\n")
         assert_contains(out, "x == 1")
 
@@ -583,7 +588,11 @@ class TestExceptions(unittest.TestCase):
         assert_contains(out, "try:", "finally:", "print('done')")
 
     def test_with_statement(self):
-        """with X as y: must emit the with header (FIX-15 BEFORE_WITH)."""
+        """
+        Ensure a `with ... as ...:` header and its context expression appear in decompiled output and no __exit__ epilogue leaks.
+        
+        Asserts that the decompiler emits a with-statement header and the context expression (for example, `open(`), and that the sentinel cleanup call `None(None, None)` does not appear.
+        """
         src = "with open('f') as fh:\n    data = fh.read()\n"
         out = decompile(src)
         self.assertIn("with ", out, f"'with' header missing:\n{out}")
@@ -2968,6 +2977,11 @@ class TestCompoundConditions(unittest.TestCase):
         self.assertEqual(header_count, 1)
 
     def test_compound_nested_if_merge_regression(self):
+        """
+        Checks that nested if statements are preserved and not merged by the decompiler.
+        
+        Decompiles a function containing a nested `if` and asserts the output contains both `if` headers and the expected `return` statements; also verifies exactly two `if` headers appear.
+        """
         src = (
             "def test(x, y):\n"
             "    if x > 0:\n"
