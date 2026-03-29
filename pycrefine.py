@@ -1860,8 +1860,10 @@ class DecompilerGeneric(DecompilerBase):
                         stack.append(repr(val))
                     else:
                         s = str(val)
-                        if " + NULL" in s: s = s.split(" + ")[0]
-                        if "|" in s: s = s.split("|")[0]
+                        if " + NULL" in s:
+                            s = s.split(" + ")[0]
+                        if "|" in s:
+                            s = s.split("|")[0]
                         stack.append(s)
                 continue
 
@@ -4329,7 +4331,7 @@ class Decompiler314(Decompiler311Plus):
                                 normal_ends = [e.end for e in entries if e.target == handler_target and e.end < handler_target]
                                 if normal_ends:
                                     exit_body_start = max(normal_ends)
-                    except Exception:
+                    except (AttributeError, IndexError, TypeError, ValueError):
                         pass
                         
                     if try_end is not None:
