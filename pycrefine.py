@@ -383,16 +383,34 @@ class DecompilerBase:
             ))
 
     def decompile(self) -> str:
+        """
+        Decompile the stored code object into a human-readable Python source string.
+        
+        Returns:
+            source (str): Reconstructed Python source for the decompiled code object.
+        """
         raise NotImplementedError("Subclasses must implement decompile()")
 
     def _get_jump_target(self, instr: BytecodeInstruction) -> int:
-        """Calculate absolute jump target. Prefer argval if resolved by dis."""
+        """
+        Determine the absolute jump target offset for the given instruction.
+        
+        @param instr: The disassembled instruction whose jump target should be resolved.
+        @returns: The target bytecode offset as an integer; returns 0 when no target is available.
+        """
         if isinstance(instr.argval, int):
             return instr.argval
         return int(instr.arg) if (instr.arg is not None) else 0
 
     def is_effectively_last(self) -> bool:
-        """Check if all remaining instructions are logically epilogue/handlers only."""
+        """
+        Determine whether the remaining instructions from the current program counter are only epilogue/handler or otherwise ignorable operations.
+        
+        Scans instructions starting at self.pc and treats common epilogue/exception-handler/filler opcodes and trailing `return None` patterns as non-meaningful; returns False if any remaining instruction is considered meaningful.
+        
+        Returns:
+            True if no meaningful instructions remain after the current program counter, False otherwise.
+        """
         # Search ahead from current PC.
         for i in range(self.pc, len(self.instructions)):
             instr = self.instructions[i]
@@ -417,9 +435,15 @@ class DecompilerBase:
 
     def is_compiler_generated_return(self, instr_index: int) -> bool:
         """
-        Determine if the return at instr_index is the implicit 'return None'
-        added by the compiler at the end of a function or module.
-        Must be the final unbranched exit point.
+        Determine whether the RETURN at the given instruction index is the implicit compiler-inserted `return None`.
+        
+        Performs conservative checks: the instruction must be effectively the final unbranched exit, must not reside inside user-level control-flow blocks (e.g., `if`, `for`, `while`, `try`, `except`, `finally`, `with`), and — when available — must not lie inside an exception-table protected range (Python 3.11+). These checks aim to distinguish a compiler-generated trailing `return None` from an explicit return written in source.
+        
+        Parameters:
+            instr_index (int): Index into `self.instructions` identifying the RETURN instruction to evaluate.
+        
+        Returns:
+            `true` if the RETURN is likely the compiler-inserted implicit `return None`, `false` otherwise.
         """
         instr = self.instructions[instr_index]
         # Save current state for lookahead
@@ -458,6 +482,37 @@ class DecompilerBase:
 
 class DecompilerGeneric(DecompilerBase):
     def __init__(self, code_obj: types.CodeType, indent_level: int = 0):
+        """
+        Initialize the decompiler state for generic Python bytecode reconstruction.
+        
+        Sets up expression stack, docstring tracking, loop and exception bookkeeping, and containers
+        that _prescan_try_structure populates during decompilation.
+        
+        Attributes:
+            stack: LIFO of partial expression strings or tuples used by the stack-driven renderer.
+            has_doc (bool): True after emitting a module/function docstring.
+            _while_body_offsets (set): Offsets that mark the start of while-loop bodies to suppress duplicated
+                trailing condition checks emitted by some bytecode patterns (notably 3.11+).
+            _exc_as_store_offset (int): Bytecode offset of a STORE_* that implements `except ... as name`
+                and should be skipped during normal emission (-1 when none).
+            _exc_cleanup_name (Optional[str]): Exception cleanup temporary name to suppress from output.
+            _except_header_indent (int): Indentation level to use when emitting except headers (-1 when none).
+            _except_end_offset (int): End offset for an exception region used to suppress intervening jumps.
+            _exc_bound_names (set): Names that have been bound via `except ... as name`.
+            _try_nop_offsets (set): Offsets of NOP markers that indicate try-entry points (filled by prescan).
+            _suppress_push_exc_offsets (set): Offsets of PUSH_EXC_INFO instructions to suppress (filled by prescan).
+            _finally_merge_offsets (set): Merge-label offsets where deferred finally/except content must be emitted.
+            _exc_handler_jump_offsets (set): Jump offsets identified as exits from exception handlers.
+            _with_exit_suppress_offsets (set): Offsets of with-context exit epilogue instructions to suppress.
+            _finally_body_suppress (set): Instruction offsets inside finally bodies that should be skipped in main pass.
+            _push_exc_to_finally_merge (dict): Maps PUSH_EXC_INFO offsets to corresponding finally-merge labels.
+            _deferred_finally_lines (dict): Pre-rendered finally-body source lines keyed by merge offset.
+            _deferred_except_lines (dict): Pre-rendered except-handler source lines keyed by merge offset.
+            _handler_section_suppress (set): Offsets of inlined handler instructions to suppress in the primary dispatch.
+            _wrapper_body_suppress (set): Offsets of wrapper/cleanup instruction ranges to suppress (e.g., re-raise wrappers).
+            _pending_finally_merge (Optional[int]): Merge offset currently pending emission, if any.
+            _nop_to_push_exc (dict): Mapping from try-entry NOP offsets to the following PUSH_EXC_INFO offset (populated by prescan).
+        """
         super().__init__(code_obj, indent_level)
         self.stack: List[Union[str, Tuple[Any, ...]]] = []
         self.has_doc = False
@@ -491,12 +546,12 @@ class DecompilerGeneric(DecompilerBase):
 
     def decompile(self) -> str:
         """
-        Decompile the stored code object into a cleaned, human-readable Python source string.
+        Decompile the stored code object into a human-readable Python source string.
         
-        Performs bytecode disassembly, scans for loop and ternary patterns, reconstructs Python source lines (including a module docstring when present), and runs final post-processing to normalize imports, remove redundant parentheses, and tidy spacing.
+        Performs bytecode disassembly, structural prescans (loops, ternaries, compound conditions, try/except/finally), reconstructs source lines (including a module docstring when present), closes open blocks, suppresses redundant module-level trailing `return None` when appropriate, and runs post-processing to normalize imports, parentheses, and spacing.
         
         Returns:
-            The reconstructed Python source as a single string with a trailing newline trimmed.
+            The reconstructed Python source as a single string, post-processed and ending with a single trailing newline.
         """
         start_indent = self.indent_level
         self._disassemble()
@@ -583,7 +638,18 @@ class DecompilerGeneric(DecompilerBase):
         return post_process_source(raw_source)
 
     def _close_blocks(self, offset: int):
-        """Close any blocks whose end offset we have reached or passed."""
+        """
+        Close code blocks whose end offset is at or before the given bytecode offset.
+        
+        For each closed block this may append a minimal body line (`pass`) when the last
+        non-blank reconstructed line is a block header (ends with ':') unless the block
+        type suppresses that emission. The function also decreases the current
+        indentation level for closed blocks except for block types that prevent
+        indentation changes.
+        
+        Parameters:
+            offset (int): Bytecode offset used to determine which blocks have ended.
+        """
         _NO_PASS_TYPES = frozenset({
             "exc_cleanup", "finally_wrapper",
         })
@@ -605,6 +671,18 @@ class DecompilerGeneric(DecompilerBase):
     # ------------------------------------------------------------------
 
     def _append_reconstructed(self, line: str, indent_multiline: bool = False):
+        """
+        Append a reconstructed source line (or multi-line block) to the decompiler's output buffer with proper indentation and spacing.
+        
+        This method mutates self.reconstructed by:
+        - inserting a blank line before top-level/major block headers (`def`, `class`, `if`, `for`, `while`, `try:`) when the previous line is not already blank;
+        - splitting multi-line input on `\n` and emitting each line, either indenting every line when `indent_multiline` is true or only indenting the first line when false;
+        - prefixing emitted lines with the current indentation (four spaces per indent level) and preserving empty lines.
+        
+        Parameters:
+            line (str): Source text to append; may contain embedded newlines. An empty string is ignored.
+            indent_multiline (bool): If true, apply indentation to every line produced by splitting `line`; if false, only the first line is indented.
+        """
         if not line:
             return
             
@@ -1406,7 +1484,12 @@ class DecompilerGeneric(DecompilerBase):
                     self._while_header_targets[body_start] = -1
 
     def _find_jump_backward_end(self) -> int:
-        """Return the offset just after the last backward-jump instruction."""
+        """
+        Find the offset immediately after the final backward-jump instruction in the instruction list.
+        
+        Returns:
+            int: The offset one past the last backward-jump instruction, or -1 if no backward jump is present.
+        """
         last_offset = -1
         for ins in self.instructions:
             if self._is_backward_instruction(ins):
@@ -1416,37 +1499,38 @@ class DecompilerGeneric(DecompilerBase):
         return -1
 
     def _prescan_try_structure(self) -> None:
-        """Pre-scan bytecode to classify structural exception-handling opcodes.
-
-        Populates sets used by the instruction dispatcher:
-
-        _try_nop_offsets
-            Offsets of NOP instructions that are try-block entry markers (beyond
-            offset 2, which is handled separately). A NOP at offset X is a
-            try-entry NOP when the instruction immediately following it (X+2) is
-            covered by an exception-table entry at depth 1 — i.e. X+2 is the
-            start of a try-body range.  Detected via ``dis.Bytecode.exception_entries``
-            (available on Python 3.11+); falls back to a heuristic on older hosts.
-
-        _finally_merge_offsets
-            Offsets of instructions that are the "finally-merge label": the point
-            in the bytecode that every except handler jumps back to via
-            JUMP_BACKWARD, which is immediately followed by the inlined finally
-            body.  At this offset the decompiler should emit ``finally:``.
-
-        _suppress_push_exc_offsets
-            Offsets of PUSH_EXC_INFO instructions that should be *silently
-            suppressed*: re-raise wrappers that handle exceptions raised inside
-            except-handler bodies, and the with-block's __exit__ handler.
-
-        _exc_handler_jump_offsets
-            Offsets of JUMP_BACKWARD instructions that are handler exits (they
-            jump to a finally-merge label) rather than genuine loop back-edges.
-
-        _with_exit_suppress_offsets
-            Offsets of the synthetic ``__exit__(None, None, None)`` epilogue on
-            the normal-exit path of a ``with`` block (suppress to prevent
-            ``None(None, None)`` artefacts in output).
+        """
+        Pre-scan the function's bytecode and classify exception-handling and with-block structure for later reconstruction.
+        
+        Populates the following attributes used by the instruction dispatcher:
+            _try_nop_offsets (set[int]):
+                Offsets of NOP instructions that mark try-block entries.
+            _finally_merge_offsets (set[int]):
+                Offsets that act as finally-merge labels where deferred `finally:` bodies should be emitted.
+            _suppress_push_exc_offsets (set[int]):
+                Offsets of `PUSH_EXC_INFO` instructions that should be suppressed (re-raise wrappers or with-exit handlers).
+            _exc_handler_jump_offsets (set[int]):
+                Offsets of backward jumps that represent exception-handler exits rather than loop back-edges.
+            _with_exit_suppress_offsets (set[int]):
+                Offsets of instructions that implement the normal-path `with` exit sequence and should be suppressed.
+            _push_exc_to_finally_merge (dict[int, int]):
+                Mapping from a real `PUSH_EXC_INFO` offset to its corresponding finally-merge offset.
+            _finally_body_suppress (set[int]):
+                Offsets of inlined finally-body instructions to suppress from normal dispatch.
+            _deferred_finally_lines (dict[int, list[str]]):
+                Pre-rendered lines for deferred finally bodies keyed by merge offset.
+            _deferred_except_lines (dict[int, list[str]]):
+                Pre-rendered lines for deferred except-handler sections keyed by merge offset.
+            _handler_section_suppress (set[int]):
+                Offsets of instructions that belong to pre-rendered handler sections and should be suppressed.
+            _wrapper_body_suppress (set[int]):
+                Offsets of re-raise/with-exit wrapper instructions to suppress.
+            _nop_to_push_exc (dict[int, int]):
+                Maps try-entry NOP offsets to the `PUSH_EXC_INFO` offset that handles their try body.
+            _pending_finally_merge (Optional[int]):
+                Internal placeholder used while building deferred-finally mappings.
+        
+        The routine uses available exception-table data when present and falls back to heuristics on older hosts to identify these regions.
         """
         instrs = self.instructions
         n = len(instrs)
@@ -1839,7 +1923,15 @@ class DecompilerGeneric(DecompilerBase):
                     break
 
     def _render_finally_body(self, sub_instrs: list) -> list:
-        """Render a list of instructions as source lines (for deferred finally)."""
+        """
+        Render a sequence of bytecode instructions into a list of Python source lines suitable for a deferred `finally` body.
+        
+        Parameters:
+            sub_instrs (list): Sequence of BytecodeInstruction objects (a contiguous slice of disassembled instructions) representing the finally-body to render.
+        
+        Returns:
+            list: Ordered lines of Python source (strings) representing the rendered body. Unknown or complex operations are emitted as commented disassembly lines.
+        """
         # Simple stack-based mini-eval to convert the instruction sequence
         # (which can now include stores and complex ops) to source lines.
         stack: list = []
@@ -1957,14 +2049,17 @@ class DecompilerGeneric(DecompilerBase):
         return lines
 
     def _emit_deferred_finally(self, merge_offset: int, header_indent: int = -1) -> None:
-        """Emit deferred except handlers then the finally: block for merge_offset.
-
-        ``header_indent`` is the indent level at which ``except:`` / ``finally:``
-        headers should be written.  When called from the finally-merge label
-        handler, this is ``self.indent_level`` right after the try-body block
-        closed — which is the correct structural level regardless of whether
-        ``_except_header_indent`` was set (it may be -1 when the PUSH_EXC_INFO
-        was pre-suppressed into the deferred handler section).
+        """
+        Emit any pre-rendered except handlers followed by the deferred `finally:` block for a given finally-merge label.
+        
+        This writes lines into the decompiler's reconstructed output (via _append_reconstructed) and temporarily adjusts self.indent_level while emitting. It first emits any stored except-handler lines for the merge label, then emits a `finally:` header and its stored body lines if present. If no deferred handlers or finally body exist for the given merge label, nothing is emitted for that section.
+        
+        Parameters:
+            merge_offset (int): The merge-label offset used as the key into the precomputed
+                `_deferred_except_lines` and `_deferred_finally_lines` mappings.
+            header_indent (int): The indentation level at which to emit `except:` / `finally:`
+                headers. If negative, the method prefers `self._except_header_indent` when
+                set (>= 0) and otherwise uses the current `self.indent_level`.
         """
         # Determine the header indent: prefer the explicitly passed value;
         # fall back to _except_header_indent if set; last resort: current level.
@@ -1992,12 +2087,17 @@ class DecompilerGeneric(DecompilerBase):
             self.indent_level -= 1
 
     def _render_handler_section(self, handler_instrs: list, merge_offset: int) -> list:
-        """Pre-decompile a list of except-handler instructions into source lines.
-
-        Uses a lightweight sub-decompiler that reuses _handle_instruction but
-        captures the output into a fresh buffer instead of self.reconstructed.
-        The sub-decompiler runs with indent_level=0 so that callers can apply
-        their own indentation when replaying the lines.
+        """
+        Render an exception-handler instruction sequence into decompiled source lines.
+        
+        Runs a lightweight sub-decompiler (same backend class) with indent_level=0 over handler_instrs so the caller can replay the returned lines at the desired indentation.
+        
+        Parameters:
+            handler_instrs (list): A list of disassembled instructions that form the handler body.
+            merge_offset (int): Merge-label offset associated with this handler (used by callers to correlate deferred emission).
+        
+        Returns:
+            list: Decompiled source lines (each element is a string); may be empty.
         """
         if not handler_instrs:
             return []
@@ -2059,10 +2159,10 @@ class DecompilerGeneric(DecompilerBase):
 
     def _handle_instruction(self, instr: BytecodeInstruction):  # noqa: C901
         """
-        Handle a single disassembled bytecode instruction, updating the decompiler's internal state and emitting reconstructed source lines when appropriate.
+        Process a single disassembled bytecode instruction, update the decompiler's internal state, and emit reconstructed source lines when appropriate.
         
         Parameters:
-            instr (BytecodeInstruction): The disassembled instruction to process; this method may push/pop from the decompiler expression stack, append lines to the reconstructed source buffer, and modify control-flow state such as indentation level, block stack, program counter, and pre-scan suppression/mapping structures.
+            instr (BytecodeInstruction): The instruction to handle; this method may mutate the decompiler's expression stack, block/indentation state, program counter, and reconstructed output buffer.
         """
         opname = instr.opname
         # Suppress then-branch instructions of detected ternary expressions;
@@ -3481,6 +3581,11 @@ class Decompiler39(DecompilerGeneric):
 
     # FIX-05 + FIX-04: manual disassembler with EXTENDED_ARG support
     def _disassemble(self):
+        """
+        Disassembles the contained code object's bytecode (Python 3.9 format) into self.instructions.
+        
+        Parses co_code into a sequence of BytecodeInstruction entries with resolved argument values (for names, consts, varnames, free/cell vars, comparison operators and jump targets), handles EXTENDED_ARG accumulation, skips padding zero bytes, and then marks instructions that are jump targets by scanning jump opcodes' resolved targets.
+        """
         bytecode = self.code_obj.co_code
         extended_arg = 0
         i = 0
@@ -3577,6 +3682,15 @@ class Decompiler39(DecompilerGeneric):
         ]
 
     def _prescan_try_structure(self) -> None:
+        """
+        Pre-scan bytecode to classify SETUP_FINALLY targets and mark finally-body instruction ranges to suppress.
+        
+        Calls the superclass prescan then records non-exception SETUP_FINALLY targets in self._finally_targets and merges or creates self._finally_body_suppress to include instruction offsets that belong to the exception-path copy of a finally body. The method detects exception-handler entries (typed or bare), with-exit handlers, and tiny cleanup-only handlers (e.g., `LOAD_CONST None` followed by delete + `RERAISE`) and treats those as exception handlers rather than user `finally:` blocks; any SETUP_FINALLY target not classified as an exception handler is treated as a user `finally` and its exception-path copy is added to self._finally_body_suppress.
+        
+        Side effects:
+        - Ensures self._finally_targets is a set of offsets that are finalizer entry targets.
+        - Ensures self._finally_body_suppress exists and is extended with offsets to skip when emitting the exception-path copy of finally bodies.
+        """
         super()._prescan_try_structure()
         # NOTE: do NOT reset self._finally_body_suppress here — super() may have
         # populated it via the generic deferred-finally mechanism for PUSH_EXC_INFO
@@ -3658,6 +3772,14 @@ class Decompiler39(DecompilerGeneric):
     # FIX-06: clean instruction dispatch for 3.9-specific opcodes
     def _handle_instruction(self, instr: BytecodeInstruction):
         # Suppress exception-path finally bodies
+        """
+        Handle a single disassembled bytecode instruction and update the decompiler's reconstruction state.
+        
+        This method dispatches on the instruction's opname and performs the appropriate reconstruction actions for that opcode: it may push or pop expression fragments on the internal stack, append emitted source lines to self.reconstructed, open or close control-flow blocks, adjust self.indent_level, modify self.blocks and various suppression/scan tables, and advance or adjust self.pc. For opcodes not specialized here the handler delegates to the superclass implementation.
+        
+        Parameters:
+            instr (BytecodeInstruction): The disassembled instruction to process (uses fields such as opname, arg, argval, offset, and is_jump_target).
+        """
         if getattr(self, "_finally_body_suppress", set()) and instr.offset in self._finally_body_suppress:
             return
         
@@ -4289,6 +4411,23 @@ class Decompiler314(Decompiler311Plus):
     Handles the new LOAD_SPECIAL opcodes and structure for with statements.
     """
     def _handle_instruction(self, instr: BytecodeInstruction):
+        """
+        Dispatch a single disassembled instruction to the decompiler's reconstruction logic, including Python 3.14-specific handling for with-statement preambles and normal-path cleanup suppression.
+        
+        This method:
+        - Recognizes and skips LOAD_SPECIAL opcodes used for with/async-with scaffolding unless part of a detected call sequence.
+        - Detects a Python 3.14 with-preamble pattern (COPY 1 followed by a LOAD_SPECIAL/CALL sequence), emits a corresponding "with <ctx>" header, increments indentation, and pushes a with-body block; it may consume following STORE_/POP_TOP instructions and advance the program counter.
+        - Records and suppresses normal-path __exit__ cleanup sequences by populating an internal _with_exit_suppress set so those instructions are ignored later.
+        - Suppresses a common three-None CALL/POP_TOP cleanup pattern and removes any internal "_with_info" sentinel left on the stack.
+        - Ensures any internal with-sentinel (`("_with_info", ...)`) is removed from the expression stack before emitting a return, while preserving the runtime return value.
+        - Delegates all non-specialized or remaining instruction handling to the superclass implementation.
+        
+        Parameters:
+            instr (BytecodeInstruction): The instruction to process; its opname, opcode, arg, argval, and offset are used to match patterns and drive stack/block changes.
+        
+        Side effects:
+            May mutate self.pc, self.stack, self.blocks, self.indent_level, self.reconstructed, and may create or update self._with_exit_suppress. Delegates to super()._handle_instruction for further emission when appropriate.
+        """
         opname = instr.opname
         
         # Suppress normal-path __exit__ body calls (identified by range scan)
