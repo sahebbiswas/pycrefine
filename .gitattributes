@@ -1,0 +1,7 @@
+# Set default behavior for all files
+* text=auto eol=lf
+
+# Denote all text files that should always use LF endings
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
