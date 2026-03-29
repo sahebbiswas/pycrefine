@@ -28,6 +28,7 @@ The script is entirely self-contained with no third-party dependencies required.
 *   **Automatic Version Navigation:** Reads the magic number from the `.pyc` header and seamlessly routes execution to the appropriate decompiler logic.
 *   **Cross-Version Parsing:** You can run `pycrefine` on newer Python versions (e.g., 3.12) and perfectly parse a `.pyc` compiled by an older version (e.g., 3.9), avoiding any native bytecode incompatibility issues.
 *   **PEP 552 Support:** Correctly processes both timestamp-based and hash-based `.pyc` headers introduced dynamically in Python 3.7.
+*   **Dispatch Table Architecture:** The decompiler engine uses a fast, modular opcode dispatch mapping, making it trivial to extend and maintain handlers for newer Python versions.
 
 ### Example Decompilation
 
@@ -102,10 +103,5 @@ For Continuous Integration pipelines, you can format the scoring output as JSON 
 
 These constraints are an inherent part of the stack-machine approach parsing strategy in CPython bytecode:
 
-- **`elif` chains** — sometimes predictably collapsed and rendered as nested `if/else` blocks.
-- **`while True: break`** — trivially optimised by CPython producing totally empty bytecode outputs.
-- **Comprehensions** (List / Generator expressions) — appear as functional `<listcomp>()` references instead of inline bracket syntax.
-- **`with` statement** — header is emitted but block body handling defaults to partial interpretations.
-- **`lambda`** — not explicitly distinguished from standard anonymous `MAKE_FUNCTION` components.
 - **`match/case`** (3.10+) — structural pattern matching opcodes are not natively supported.
 - **`async/await`** — concurrent execution coroutine opcodes are not completely reconstructed.

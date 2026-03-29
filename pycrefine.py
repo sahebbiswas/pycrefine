@@ -481,6 +481,9 @@ class DecompilerBase:
 # ---------------------------------------------------------------------------
 
 class DecompilerGeneric(DecompilerBase):
+    def __init_subclass__(cls, **kw):
+        super().__init_subclass__(**kw)
+
     def __init__(self, code_obj: types.CodeType, indent_level: int = 0):
         """
         Initialize the decompiler state for generic Python bytecode reconstruction.
@@ -539,6 +542,7 @@ class DecompilerGeneric(DecompilerBase):
         self._wrapper_body_suppress: set = set()
         self._pending_finally_merge: Optional[int] = None
         self._nop_to_push_exc: dict = {}
+        self._build_dispatch()
 
     # ------------------------------------------------------------------
     # Main loop
@@ -2157,6 +2161,86 @@ class DecompilerGeneric(DecompilerBase):
     # Instruction dispatch
     # ------------------------------------------------------------------
 
+    def _build_dispatch(self):
+        self._dispatch = {
+            # Loads
+            "LOAD_CONST": self._op_load, "LOAD_NAME": self._op_load, "LOAD_FAST": self._op_load,
+            "LOAD_GLOBAL": self._op_load, "LOAD_SMALL_INT": self._op_load, "LOAD_FAST_BORROW": self._op_load,
+            "LOAD_CONST_BORROW": self._op_load, "LOAD_DEREF": self._op_load, 
+            "LOAD_FAST_BORROW_LOAD_FAST_BORROW": self._op_load, "LOAD_GLOBAL_MODULE": self._op_load,
+            
+            # Stores
+            "STORE_NAME": self._op_store, "STORE_FAST": self._op_store, "STORE_GLOBAL": self._op_store,
+            "STORE_ATTR": self._op_store_attr, "STORE_SUBSCR": self._op_store_subscr,
+            
+            # Imports
+            "IMPORT_NAME": self._op_import_name, "IMPORT_FROM": self._op_import_from,
+            
+            # Subscripts
+            "BINARY_SUBSCR": self._op_binary_subscr,
+            
+            # Exceptions
+            "RAISE_VARARGS": self._op_raise_varargs, "PUSH_EXC_INFO": self._op_push_exc_info,
+            "CHECK_EXC_MATCH": self._op_check_exc_match, "POP_EXCEPT": self._op_cleanup,
+            "RERAISE": self._op_cleanup, "COPY": self._op_cleanup,
+            "SETUP_FINALLY": self._op_setup_finally, "SETUP_EXCEPT": self._op_setup_finally,
+            "SETUP_WITH": self._op_setup_with, "BEFORE_WITH": self._op_before_with,
+            "WITH_EXCEPT_START": self._op_with_except_start, "BEGIN_FINALLY": self._op_with_except_start,
+            
+            # Functions
+            "MAKE_FUNCTION": self._op_make_function, "SET_FUNCTION_ATTRIBUTE": self._op_set_function_attribute,
+            
+            # Returns
+            "RETURN_VALUE": self._op_return_value, "RETURN_CONST": self._op_return_const,
+            
+            # Pops
+            "POP_TOP": self._op_pop_top,
+            
+            # Load build class
+            "LOAD_BUILD_CLASS": self._op_load_build_class,
+            
+            # Stack manip
+            "ROT_TWO": self._op_stack_manip, "ROT_THREE": self._op_stack_manip, "ROT_FOUR": self._op_stack_manip,
+            "DUP_TOP": self._op_dup_top, "DUP_TOP_TWO": self._op_dup_top,
+            
+            # Strings
+            "FORMAT_VALUE": self._op_fstring, "FORMAT_SIMPLE": self._op_fstring,
+            "BUILD_STRING": self._op_build_string,
+            
+            # Forward jump
+            "JUMP_FORWARD": self._op_jump,
+            
+            # Iteration
+            "FOR_ITER": self._op_for_iter,
+            
+            # Collections
+            "BUILD_TUPLE": self._op_build_collection, "BUILD_LIST": self._op_build_collection,
+            "BUILD_SET": self._op_build_collection, "BUILD_MAP": self._op_build_map,
+            "BUILD_CONST_KEY_MAP": self._op_build_const_key_map,
+            "GET_ITER": self._op_no_op, "UNPACK_SEQUENCE": self._op_no_op,
+            "LIST_EXTEND": self._op_list_extend, "DICT_MERGE": self._op_dict_merge,
+            "DICT_UPDATE": self._op_dict_merge,
+            
+            # Secondary loads
+            "LOAD_ATTR": self._op_load_attr, "LOAD_METHOD": self._op_load_attr,
+            "LOAD_SUPER_ATTR": self._op_load_super_attr,
+            "LOAD_FROM_DICT_OR_GLOBALS": self._op_load_from_dict_or_globals,
+            
+            # Coroutines
+            "YIELD_VALUE": self._op_yield_value,
+            
+            # Deletes
+            "DELETE_NAME": self._op_delete, "DELETE_FAST": self._op_delete, "DELETE_GLOBAL": self._op_delete,
+            
+            # Error
+            "LOAD_ASSERTION_ERROR": self._op_load_assertion_error,
+            
+            # Nops
+            "PUSH_NULL": self._op_no_op, "RESUME": self._op_no_op, "PRECALL": self._op_no_op, "CACHE": self._op_no_op,
+            "COPY_FREE_VARS": self._op_no_op, "NOT_TAKEN": self._op_no_op, "MAKE_CELL": self._op_no_op,
+            "END_FOR": self._op_no_op, "POP_ITER": self._op_no_op, "YIELD_FROM": self._op_no_op,
+            "NOP": self._op_nop,
+        }
     def _handle_instruction(self, instr: BytecodeInstruction):  # noqa: C901
         """
         Process a single disassembled bytecode instruction, update the decompiler's internal state, and emit reconstructed source lines when appropriate.
@@ -2201,136 +2285,174 @@ class DecompilerGeneric(DecompilerBase):
         if instr.offset in getattr(self, "_wrapper_body_suppress", ()):
             return
 
-        # ── loads ──────────────────────────────────────────────────────
-        if opname in (
-            "LOAD_CONST", "LOAD_NAME", "LOAD_FAST", "LOAD_GLOBAL",
-            "LOAD_SMALL_INT", "LOAD_FAST_BORROW", "LOAD_CONST_BORROW",
-            "LOAD_DEREF", "LOAD_FAST_BORROW_LOAD_FAST_BORROW",
-            "LOAD_GLOBAL_MODULE",
-        ):
-            if isinstance(instr.argval, types.CodeType):
-                self.stack.append(("code", instr.argval))
-            elif opname == "LOAD_CONST" and instr.arg == 0 and isinstance(instr.argval, str) and self.has_doc:
-                pass  # already emitted as docstring
-            elif "LOAD_FAST_BORROW_LOAD_FAST_BORROW" in opname:
-                # fused opcode — pushes two names
-                names = instr.argval
-                if isinstance(names, (list, tuple)):
-                    for n in names:
-                        self.stack.append(str(n))
-                else:
-                    self.stack.append(str(names))
+        handler = self._dispatch.get(opname)
+        if handler:
+            handler(instr)
+        else:
+            self._op_unknown(instr)
+
+    def _op_unknown(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        if "BINARY" in opname and opname != "BINARY_SUBSCR":
+            self._op_binary(instr)
+        elif "INPLACE" in opname:
+            self._op_inplace(instr)
+        elif "CALL" in opname and opname not in ("CALL_INTRINSIC_1", "CALL_INTRINSIC_2"):
+            self._op_call(instr)
+        elif "COMPARE_OP" in opname:
+            self._op_compare(instr)
+        elif "CONTAINS_OP" in opname:
+            self._op_contains(instr)
+        elif "IS_OP" in opname:
+            self._op_is(instr)
+        elif "TO_BOOL" in opname:
+            pass  # value already on stack
+        elif "LOAD_FAST" in opname or "LOAD_GLOBAL" in opname:
+            self._op_load_fallback(instr)
+        elif self._is_backward_instruction(instr):
+            self._op_jump(instr)
+        elif self._is_compound_cjump(opname):
+            self._op_conditional_jump(instr)
+
+    def _op_load(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        if isinstance(instr.argval, types.CodeType):
+            self.stack.append(("code", instr.argval))
+        elif opname == "LOAD_CONST" and instr.arg == 0 and isinstance(instr.argval, str) and self.has_doc:
+            pass  # already emitted as docstring
+        elif "LOAD_FAST_BORROW_LOAD_FAST_BORROW" in opname:
+            # fused opcode — pushes two names
+            names = instr.argval
+            if isinstance(names, (list, tuple)):
+                for n in names:
+                    self.stack.append(str(n))
             else:
-                val = instr.argval
-                if val is None and opname == "LOAD_SMALL_INT":
-                    val = instr.arg
-                if opname == "LOAD_GLOBAL_MODULE" and isinstance(val, (list, tuple)) and val:
-                    val = val[0]
-                if "CONST" in opname or "SMALL_INT" in opname:
-                    self.stack.append(self._format_val(val))
-                else:
-                    self.stack.append(str(val))
+                self.stack.append(str(names))
+        else:
+            val = instr.argval
+            if val is None and opname == "LOAD_SMALL_INT":
+                val = instr.arg
+            if opname == "LOAD_GLOBAL_MODULE" and isinstance(val, (list, tuple)) and val:
+                val = val[0]
+            if "CONST" in opname or "SMALL_INT" in opname:
+                self.stack.append(self._format_val(val))
+            else:
+                self.stack.append(str(val))
 
         # ── stores ─────────────────────────────────────────────────────
-        elif opname in ("STORE_NAME", "STORE_FAST", "STORE_GLOBAL"):
-            # Suppress the 'as e' STORE that was already emitted in the except header
-            if instr.offset == getattr(self, "_exc_as_store_offset", -1):
-                self._exc_as_store_offset = -1
-                return
-            if self.stack:
-                val = self.stack.pop()
-                # Suppress: IMPORT_FROM already emitted `from X import Y`
-                if isinstance(val, tuple) and len(val) == 2 and val[0] == "_from_import_done":
-                    return
-                name = str(instr.argval)
-                # Suppress except-cleanup: `e = None` before `del e`
-                # This covers both the normal-exit path AND the re-raise path.
-                cleanup = getattr(self, "_exc_cleanup_name", None)
-                bound = getattr(self, "_exc_bound_names", set())
-                if (cleanup and name == cleanup and str(val) == "None") or                    (name in bound and str(val) == "None"):
-                    return
-                if name in (
-                    "__module__", "__qualname__", "__firstlineno__",
-                    "__classdictcell__", "__classcell__",
-                    "__static_attributes__", "__classdict__",
-                ):
-                    return
-                if isinstance(val, tuple) and len(val) >= 2 and val[0] == "import":
-                    _, imp_name, fromlist, level = val
-                    if str(fromlist) in ("None", "()"):
-                        self._append_reconstructed(f"import {imp_name}")
-                    else:
-                        inames = str(fromlist).strip("()").replace("'", "").replace(" ", "")
-                        self._append_reconstructed(f"from {imp_name} import {inames}")
-                elif isinstance(val, tuple) and len(val) >= 2 and val[0] in ("func", "class"):
-                    self._append_reconstructed(str(val[1]), indent_multiline=True)
-                    if self.indent_level == 0:
-                        self.reconstructed.append("")
-                elif name == "__doc__":
-                    doc_text = str(val).strip("'\"").strip()
-                    if doc_text:
-                        self._append_reconstructed(f'"""\n{doc_text}\n"""', indent_multiline=True)
-                        self.reconstructed.append("")
-                elif val == name:
-                    pass  # suppress redundant x = x
-                else:
-                    self._append_reconstructed(f"{name} = {val}", indent_multiline=False)
 
-        elif opname == "STORE_ATTR":
-            if len(self.stack) >= 2:
-                obj = self.stack.pop()
-                val = self.stack.pop()
-                self._append_reconstructed(f"{obj}.{instr.argval} = {val}")
+    def _op_store(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        # Suppress the 'as e' STORE that was already emitted in the except header
+        if instr.offset == getattr(self, "_exc_as_store_offset", -1):
+            self._exc_as_store_offset = -1
+            return
+        if self.stack:
+            val = self.stack.pop()
+            # Suppress: IMPORT_FROM already emitted `from X import Y`
+            if isinstance(val, tuple) and len(val) == 2 and val[0] == "_from_import_done":
+                return
+            name = str(instr.argval)
+            # Suppress except-cleanup: `e = None` before `del e`
+            # This covers both the normal-exit path AND the re-raise path.
+            cleanup = getattr(self, "_exc_cleanup_name", None)
+            bound = getattr(self, "_exc_bound_names", set())
+            if (cleanup and name == cleanup and str(val) == "None") or                    (name in bound and str(val) == "None"):
+                return
+            if name in (
+                "__module__", "__qualname__", "__firstlineno__",
+                "__classdictcell__", "__classcell__",
+                "__static_attributes__", "__classdict__",
+            ):
+                return
+            if isinstance(val, tuple) and len(val) >= 2 and val[0] == "import":
+                _, imp_name, fromlist, level = val
+                if str(fromlist) in ("None", "()"):
+                    self._append_reconstructed(f"import {imp_name}")
+                else:
+                    inames = str(fromlist).strip("()").replace("'", "").replace(" ", "")
+                    self._append_reconstructed(f"from {imp_name} import {inames}")
+            elif isinstance(val, tuple) and len(val) >= 2 and val[0] in ("func", "class"):
+                self._append_reconstructed(str(val[1]), indent_multiline=True)
+                if self.indent_level == 0:
+                    self.reconstructed.append("")
+            elif name == "__doc__":
+                doc_text = str(val).strip("'\"").strip()
+                if doc_text:
+                    self._append_reconstructed(f'"""\n{doc_text}\n"""', indent_multiline=True)
+                    self.reconstructed.append("")
+            elif val == name:
+                pass  # suppress redundant x = x
+            else:
+                self._append_reconstructed(f"{name} = {val}", indent_multiline=False)
+
+
+    def _op_store_attr(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        if len(self.stack) >= 2:
+            obj = self.stack.pop()
+            val = self.stack.pop()
+            self._append_reconstructed(f"{obj}.{instr.argval} = {val}")
 
         # FIX-12: STORE_SUBSCR (x[key] = val)
-        elif opname == "STORE_SUBSCR":
-            if len(self.stack) >= 3:
-                key = self.stack.pop()
-                container = self.stack.pop()
-                val = self.stack.pop()
-                self._append_reconstructed(f"{container}[{key}] = {val}")
+
+    def _op_store_subscr(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        if len(self.stack) >= 3:
+            key = self.stack.pop()
+            container = self.stack.pop()
+            val = self.stack.pop()
+            self._append_reconstructed(f"{container}[{key}] = {val}")
 
         # ── imports ────────────────────────────────────────────────────
-        elif opname == "IMPORT_NAME":
-            if len(self.stack) >= 2:
-                fromlist = self.stack.pop()
-                level = self.stack.pop()
-                self.stack.append(("import", instr.argval, fromlist, level))
 
-        elif opname == "IMPORT_FROM":
-            # TOS is the ("import", module, fromlist, level) tuple from IMPORT_NAME.
-            # Emit `from module import name` immediately and leave the module tuple
-            # on the stack (POP_TOP will clean it up after all IMPORT_FROM/STORE
-            # pairs are done).
-            if self.stack and isinstance(self.stack[-1], tuple) and self.stack[-1][0] == "import":
-                imp_tuple = self.stack[-1]
-                mod_name = str(imp_tuple[1])
-                sym = str(instr.argval)
-                self._append_reconstructed(f"from {mod_name} import {sym}")
-                # Push a sentinel so STORE_NAME for this symbol is suppressed
-                self.stack.append(("_from_import_done", sym))
-            else:
-                self.stack.append(instr.argval)
+    def _op_import_name(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        if len(self.stack) >= 2:
+            fromlist = self.stack.pop()
+            level = self.stack.pop()
+            self.stack.append(("import", instr.argval, fromlist, level))
+
+
+    def _op_import_from(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        # TOS is the ("import", module, fromlist, level) tuple from IMPORT_NAME.
+        # Emit `from module import name` immediately and leave the module tuple
+        # on the stack (POP_TOP will clean it up after all IMPORT_FROM/STORE
+        # pairs are done).
+        if self.stack and isinstance(self.stack[-1], tuple) and self.stack[-1][0] == "import":
+            imp_tuple = self.stack[-1]
+            mod_name = str(imp_tuple[1])
+            sym = str(instr.argval)
+            self._append_reconstructed(f"from {mod_name} import {sym}")
+            # Push a sentinel so STORE_NAME for this symbol is suppressed
+            self.stack.append(("_from_import_done", sym))
+        else:
+            self.stack.append(instr.argval)
 
         # ── subscript / attr ───────────────────────────────────────────
-        elif opname == "BINARY_SUBSCR":
-            if len(self.stack) >= 2:
-                sub = self.stack.pop()
-                container = self.stack.pop()
-                self.stack.append(f"{container}[{sub}]")
+
+    def _op_binary_subscr(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        if len(self.stack) >= 2:
+            sub = self.stack.pop()
+            container = self.stack.pop()
+            self.stack.append(f"{container}[{sub}]")
 
         # ── exceptions ─────────────────────────────────────────────────
-        elif opname == "RAISE_VARARGS":
-            num = int(instr.arg) if instr.arg is not None else 0
-            if num == 2:
-                cause = self.stack.pop() if self.stack else "None"
-                exc = self.stack.pop() if self.stack else "Exception"
-                self._append_reconstructed(f"raise {exc} from {cause}")
-            elif num == 1:
-                val = self.stack.pop() if self.stack else "Exception"
-                self._append_reconstructed(f"raise {val}")
-            else:
-                self._append_reconstructed("raise")
+
+    def _op_raise_varargs(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        num = int(instr.arg) if instr.arg is not None else 0
+        if num == 2:
+            cause = self.stack.pop() if self.stack else "None"
+            exc = self.stack.pop() if self.stack else "Exception"
+            self._append_reconstructed(f"raise {exc} from {cause}")
+        elif num == 1:
+            val = self.stack.pop() if self.stack else "Exception"
+            self._append_reconstructed(f"raise {val}")
+        else:
+            self._append_reconstructed("raise")
 
         # FIX-10 / FIX-14: try/except/finally structural blocks.
         # Modern CPython (3.11+) exception handling structure:
@@ -2350,1083 +2472,1161 @@ class DecompilerGeneric(DecompilerBase):
         #   >> M:      PUSH_EXC_INFO               ← finally-handler entry
         #              <finally body>
         #              RERAISE 0
-        elif opname == "PUSH_EXC_INFO":
-            # Silently suppress re-raise wrappers and with-exit handlers
-            if instr.offset in getattr(self, "_suppress_push_exc_offsets", ()):
-                return
 
-            # Close try body block if tracked
-            if self.blocks and self.blocks[-1][1] == "try_body":
-                self.blocks.pop()
-                self.indent_level -= 1
-
-            # Record the indent at which except headers should be emitted
-            self._except_header_indent = self.indent_level
-            # Peek: is there a LOAD + CHECK_EXC_MATCH coming?
-            look = self.pc
-            while look < len(self.instructions) and self.instructions[look].opname in (
-                "RESUME", "NOP", "CACHE", "NOT_TAKEN"
-            ):
-                look += 1
-            if look < len(self.instructions) and self.instructions[look].opname in (
-                "LOAD_NAME", "LOAD_GLOBAL", "LOAD_FAST", "LOAD_DEREF"
-            ):
-                self.stack.append("_exc_info")
-                return  # defer header to CHECK_EXC_MATCH
-            # Bare except (no type check)
-            self._append_reconstructed("except:")
-            self.indent_level += 1
-
-        elif opname == "CHECK_EXC_MATCH":
-            exc_type = self.stack.pop() if self.stack else "Exception"
-            if self.stack and str(self.stack[-1]) == "_exc_info":
-                self.stack.pop()
-            # Reset indent to the except-header level (handles multi-except chains
-            # where the first handler incremented indent but the second check fires
-            # without a new PUSH_EXC_INFO reset).
-            if self._except_header_indent >= 0:
-                self.indent_level = self._except_header_indent
-            # Peek ahead from the current position to find the optional
-            # STORE_NAME / STORE_FAST that binds the 'as varname' in except.
-            #
-            # The bytecode varies by version:
-            #   3.12: POP_JUMP_IF_FALSE -> STORE_NAME e
-            #   3.14: POP_JUMP_IF_FALSE -> POP_TOP -> STORE_NAME e
-            #         (may include additional CACHE or other slots)
-            #
-            # Strategy: skip forward through "harmless" single-cycle opcodes
-            # (POP_JUMP_IF_*, POP_TOP, CACHE, NOP, COPY, RESUME) until we
-            # either find a STORE or hit something that clearly belongs to
-            # the handler body (a LOAD, BINARY, COMPARE, RETURN, RERAISE...).
-            #
-            # The window is capped at 10 instructions to prevent runaway.
-            # Scan forward from the current PC to find the optional
-            # STORE_NAME / STORE_FAST that binds 'as varname' in except.
-            #
-            # The binding zone varies by Python version:
-            #   3.12 no-as:  POP_JUMP_IF_FALSE -> POP_TOP    -> LOAD_CONST  -> body
-            #   3.12 as-e:   POP_JUMP_IF_FALSE -> STORE_NAME e -> body
-            #   3.14 no-as:  POP_JUMP_IF_FALSE -> POP_TOP    -> LOAD_CONST  -> body
-            #   3.14 as-e:   POP_JUMP_IF_FALSE -> POP_TOP    -> STORE_NAME e -> body
-            #
-            # The correct discriminator is NOT "POP_TOP = no binding".
-            # On 3.14, POP_TOP appears in BOTH cases (it pops the exc_type from
-            # the CHECK_EXC_MATCH result). The real signal is whether STORE_NAME
-            # appears before any LOAD_* or other body-start instruction.
-            #
-            # Rules:
-            #  1. Skip POP_JUMP_IF_* opcodes (the type-match conditional gate)
-            #  2. Skip POP_TOP, CACHE, NOP, RESUME, COPY (neutral in all versions)
-            #  3. If STORE_NAME / STORE_FAST found -> that IS the 'as e' binding
-            #  4. Stop (no binding) at: any LOAD_*, RERAISE, RETURN_*, JUMP_*,
-            #     or a jump-target boundary (entered a new block)
-            #  5. Cap at 8 steps
-            _SKIP = frozenset({
-                "POP_TOP", "CACHE", "NOP", "RESUME", "COPY", "NOT_TAKEN",
-            })
-            _STOP = frozenset({
-                "LOAD_CONST", "LOAD_NAME", "LOAD_FAST", "LOAD_GLOBAL",
-                "LOAD_DEREF", "LOAD_SMALL_INT", "LOAD_ATTR", "PUSH_NULL",
-                "RERAISE", "RAISE_VARARGS", "RETURN_CONST", "RETURN_VALUE",
-                "JUMP_FORWARD",
-            })
-            as_name = None
-            look = self.pc
-            # Step 1: skip conditional jumps
-            while (look < len(self.instructions)
-                   and "POP_JUMP_IF" in self.instructions[look].opname):
-                look += 1
-            # Steps 2-5: scan binding zone
-            for _ in range(8):
-                if look >= len(self.instructions):
-                    break
-                ins_l = self.instructions[look]
-                op = ins_l.opname
-                # Step 3: found the 'as e' binding
-                if op in ("STORE_NAME", "STORE_FAST"):
-                    as_name = str(ins_l.argval)
-                    self._exc_as_store_offset = ins_l.offset
-                    break
-                # Step 4: definitively in handler body — no binding
-                if op in _STOP or self._is_backward_jump(op):
-                    break
-                # Step 4: new block boundary — no binding
-                if ins_l.is_jump_target:
-                    break
-                # Step 2: neutral opcode — skip past it
-                if op in _SKIP:
-                    look += 1
-                    continue
-                # Unknown opcode — stop safely
-                break
-            if as_name is None:
-                self._exc_as_store_offset = -1
-            self._exc_cleanup_name = as_name
-            # Also record in a persistent set for re-raise-path cleanup suppression
-            if as_name:
-                self._exc_bound_names.add(as_name)
-            if as_name:
-                self._append_reconstructed(f"except {exc_type} as {as_name}:")
-            else:
-                self._append_reconstructed(f"except {exc_type}:")
-            self.indent_level += 1
-            # sentinel: suppresses the POP_JUMP_IF_FALSE that follows from
-            # opening a spurious nested 'if' block
-            self.stack.append("_exc_match")
-
-        elif opname in ("POP_EXCEPT", "RERAISE", "COPY"):
-            pass  # cleanup suppression (_exc_cleanup_name) stays active until DELETE_NAME fires
-
-        elif opname in ("SETUP_FINALLY", "SETUP_EXCEPT"):
-            # Legacy 3.9/3.10 try/except via SETUP_* opcodes
-            self._append_reconstructed("try:")
-            self.indent_level += 1
-            jump_target = self._get_jump_target(instr)
-            self.blocks.append((jump_target, "try_body"))
-
-        elif opname == "SETUP_WITH":
-            ctx = self.stack.pop() if self.stack else "ctx"
-            # Peek ahead for the STORE that binds the 'as' variable (3.9/3.10).
-            # In 3.9 the instruction immediately after SETUP_WITH is always
-            # STORE_FAST / STORE_NAME binding the __enter__() return value.
-            as_var = None
-            _SKIP_SW = frozenset({"RESUME", "CACHE", "NOP", "NOT_TAKEN"})
-            look = self.pc
-            while look < len(self.instructions) and self.instructions[look].opname in _SKIP_SW:
-                look += 1
-            if look < len(self.instructions) and self.instructions[look].opname in (
-                "STORE_FAST", "STORE_NAME", "STORE_GLOBAL"
-            ):
-                as_var = str(self.instructions[look].argval)
-                self.pc = look + 1   # consume the STORE so it isn't processed again
-            if as_var:
-                self._append_reconstructed(f"with {ctx} as {as_var}:")
-            else:
-                self._append_reconstructed(f"with {ctx}:")
-            self.indent_level += 1
-            jump_target = self._get_jump_target(instr)
-            self.blocks.append((jump_target, "with"))
-            # In Python 3.9 the normal with-exit sequence immediately preceding the
-            # exception handler looks like:
-            #   LOAD_CONST None; DUP_TOP; DUP_TOP; CALL_FUNCTION 3; POP_TOP; JUMP_FORWARD
-            # Suppress these so they don't produce spurious 'except:' / func() lines.
-            t_idx = next(
-                (i for i, x in enumerate(self.instructions) if x.offset == jump_target), -1
-            )
-            if t_idx > 0:
-                j = t_idx - 1
-                # Walk backwards to collect the exit-call block
-                suppress_start = None
-                while j >= 0:
-                    op = self.instructions[j].opname
-                    if op in ("LOAD_CONST", "DUP_TOP", "CALL_FUNCTION",
-                              "POP_TOP", "JUMP_FORWARD", "JUMP_ABSOLUTE", "POP_BLOCK"):
-                        suppress_start = self.instructions[j].offset
-                        j -= 1
-                    else:
-                        break
-                if suppress_start is not None:
-                    _fb = getattr(self, "_finally_body_suppress", set())
-                    for k in range(j + 1, t_idx):
-                        op = self.instructions[k].opname
-                        if op not in ("LOAD_CONST", "DUP_TOP", "CALL_FUNCTION",
-                                      "POP_TOP", "JUMP_FORWARD", "JUMP_ABSOLUTE", "POP_BLOCK"):
-                            break
-                        _fb.add(self.instructions[k].offset)
-                    self._finally_body_suppress = _fb
-
-        elif opname == "BEFORE_WITH":
-            # FIX-15: BEFORE_WITH — Python 3.11+ context-manager entry opcode.
-            # At this point TOS is the context manager object (result of CALL).
-            # BEFORE_WITH calls __enter__(), pushes the __exit__ callable, and
-            # leaves the __enter__ return value on top of the stack.
-            # The STORE_FAST / STORE_NAME that immediately follows binds the
-            # 'as' variable.
-            ctx = self.stack.pop() if self.stack else "ctx"
-            # Peek ahead for the STORE that binds the 'as' variable name.
-            as_var = None
-            _SKIP_BW = frozenset({"RESUME", "CACHE", "NOP", "NOT_TAKEN"})
-            look = self.pc
-            while look < len(self.instructions) and self.instructions[look].opname in _SKIP_BW:
-                look += 1
-            if look < len(self.instructions) and self.instructions[look].opname in (
-                "STORE_FAST", "STORE_NAME", "STORE_GLOBAL"
-            ):
-                as_var = str(self.instructions[look].argval)
-                # Advance pc past the STORE so it is not processed again
-                self.pc = look + 1
-            if as_var:
-                self._append_reconstructed(f"with {ctx} as {as_var}:")
-            else:
-                self._append_reconstructed(f"with {ctx}:")
-            self.indent_level += 1
-            # Find the PUSH_EXC_INFO that guards this with-block's exit handler
-            # and record it as the block boundary so we can de-indent properly.
-            # The with-handler PUSH_EXC_INFO is the one with the highest offset
-            # (the __exit__ call handler, at the very end of the function).
-            with_exc_offsets = [
-                ins.offset for ins in self.instructions
-                if ins.opname == "PUSH_EXC_INFO"
-                and ins.offset > instr.offset
-                # The with-exit PUSH_EXC_INFO is NOT in _finally_push_offsets
-                # (it handles the __exit__ call, not user finally: code).
-            ]
-            if with_exc_offsets:
-                # Use the last (highest-offset) PUSH_EXC_INFO — that is the one
-                # that handles the __exit__ on exceptional exit from the with body.
-                self.blocks.append((max(with_exc_offsets), "with"))
-            # Also record the _except_header_indent so finally: de-indents correctly
-            self._except_header_indent = self.indent_level - 1
-
-        elif opname in ("WITH_EXCEPT_START", "BEGIN_FINALLY"):
-            pass
-
-        # ── functions ──────────────────────────────────────────────────
-        elif opname == "MAKE_FUNCTION":
-            # Stack layout at MAKE_FUNCTION (TOS = top):
-            #   TOS:   code object  (always present)
-            #   TOS-1: name string  (Python <= 3.10 only; 3.11+ removed it)
-            #   then below, depending on flags bitmask (arg):
-            #     0x01  positional defaults tuple
-            #     0x02  kwonly defaults dict
-            #     0x04  annotations dict
-            #     0x08  closure freevars tuple
-            flags = int(instr.arg) if instr.arg is not None else 0
-
-            # 1. Pop code object (always TOS)
-            code_obj_val = None
-            if self.stack and isinstance(self.stack[-1], tuple) and self.stack[-1][0] == "code":
-                code_obj_val = self.stack.pop()
-            elif len(self.stack) >= 2:
-                # Older Python: name string is TOS, code object below
-                self.stack.pop()  # discard name string
-                if self.stack and isinstance(self.stack[-1], tuple) and self.stack[-1][0] == "code":
-                    code_obj_val = self.stack.pop()
-
-            # 2. Pop optional flag items that were pushed below the code object
-            #    (in CPython they are pushed in order: defaults, kw_defaults,
-            #     annotations, closure — so TOS after code removal is closure
-            #     if 0x08 set, then annotations if 0x04, etc.)
-            closure  = str(self.stack.pop()) if (flags & 0x08) and self.stack else None
-            annots   = str(self.stack.pop()) if (flags & 0x04) and self.stack else None
-            kw_defs  = str(self.stack.pop()) if (flags & 0x02) and self.stack else None
-            defaults = self.stack.pop()      if (flags & 0x01) and self.stack else None
-
-            if code_obj_val is not None and isinstance(code_obj_val, tuple) and code_obj_val[0] == "code":
-                inner_code = code_obj_val[1]
-                positional = list(inner_code.co_varnames[: inner_code.co_argcount])
-
-                # Attach default values to trailing positional args
-                if defaults is not None:
-                    raw = str(defaults)
-                    # defaults is repr of a tuple e.g. "('Hello',)" or "('Hello', 0)"
-                    # Strip outer parens/quotes and split carefully
-                    inner = raw.strip()
-                    if inner.startswith("(") and inner.endswith(")"):
-                        inner = inner[1:-1]
-                    # Split on comma but not inside nested parens/quotes (simple case)
-                    defs = [d.strip() for d in inner.split(",") if d.strip()]
-                    # Remove trailing empty string from tuple repr like "('x',)"
-                    if defs and defs[-1] == "":
-                        defs = defs[:-1]
-                    n_pos = len(positional)
-                    n_defs = len(defs)
-                    n_no_default = n_pos - n_defs
-                    for i, d in enumerate(defs):
-                        idx = n_no_default + i
-                        if 0 <= idx < n_pos:
-                            positional[idx] = f"{positional[idx]}={d}"
-
-                dec_class = _pick_decompiler_class(self)
-                dec = dec_class(inner_code, indent_level=1)
-                body = dec.decompile()
-                sig = f"def {inner_code.co_name}({', '.join(positional)}):"
-                self.stack.append(("func", f"{sig}\n{body}"))
-            else:
-                self.stack.append("make_function(?)")
-
-        # ── SET_FUNCTION_ATTRIBUTE (Python 3.14+) ─────────────────────
-        elif opname == "SET_FUNCTION_ATTRIBUTE":
-            # 3.14 uses SET_FUNCTION_ATTRIBUTE to attach defaults/annotations
-            # to a function after MAKE_FUNCTION.
-            # Stack layout: TOS=func_tuple, TOS-1=attribute_value
-            # arg bitmask: 0x01=defaults, 0x02=kwonly_defaults, 0x04=annotations, 0x08=closure
-            attr_flags = int(instr.arg) if instr.arg is not None else 0
-            func_val = self.stack.pop() if self.stack else None
-            attr_val = self.stack.pop() if self.stack else None
-
-            if (func_val is not None and isinstance(func_val, tuple)
-                    and func_val[0] == "func" and attr_val is not None
-                    and (attr_flags & 0x01)):  # positional defaults
-                # Rewrite the function signature to include defaults
-                func_text = str(func_val[1])
-                lines_f = func_text.split("\n")
-                sig_line = lines_f[0] if lines_f else ""
-                # Parse: "def name(args):" -> attach defaults from attr_val
-                if sig_line.startswith("def ") and "(" in sig_line:
-                    raw = str(attr_val).strip()
-                    # attr_val is repr of tuple e.g. "(10,)" or "(10, 'hello')"
-                    inner = raw
-                    if inner.startswith("(") and inner.endswith(")"):
-                        inner = inner[1:-1]
-                    defs = [d.strip() for d in inner.split(",") if d.strip()]
-                    # Get arg list from sig
-                    paren_start = sig_line.index("(") + 1
-                    paren_end = sig_line.rindex(")")
-                    args_str = sig_line[paren_start:paren_end]
-                    args = [a.strip() for a in args_str.split(",") if a.strip()]
-                    n_no_def = len(args) - len(defs)
-                    for i, d in enumerate(defs):
-                        idx = n_no_def + i
-                        if 0 <= idx < len(args) and "=" not in args[idx]:
-                            args[idx] = f"{args[idx]}={d}"
-                    new_sig = sig_line[:paren_start] + ", ".join(args) + sig_line[paren_end:]
-                    lines_f[0] = new_sig
-                    self.stack.append(("func", "\n".join(lines_f)))
-                else:
-                    self.stack.append(func_val)
-            else:
-                # Non-defaults attribute or unrecognised — push func back unchanged
-                if func_val is not None:
-                    self.stack.append(func_val)
-
-        # ── return ─────────────────────────────────────────────────────
-        elif opname == "RETURN_VALUE":
-            if self.stack:
-                val = self.stack.pop()
-                val_str = str(val)
-                # Use the new predicate for smarter suppression
-                is_compiler_gen = (val_str == "None" and self.is_compiler_generated_return(self.pc - 1))
-                
-                if is_compiler_gen:
-                    pass
-                elif "__class__" in val_str or "__classdict__" in val_str:
-                    pass
-                else:
-                    self._append_reconstructed(f"return {val}")
+    def _op_push_exc_info(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        # Silently suppress re-raise wrappers and with-exit handlers
+        if instr.offset in getattr(self, "_suppress_push_exc_offsets", ()):
             return
 
-        elif opname == "RETURN_CONST":
-            # RETURN_CONST None has two meanings:
-            #   - Inside a 'while True:' (NOP-driven, unconditional) block: it's `break`
-            #   - Everywhere else: compiler-generated exit sentinel — suppress if effectively last
-            if instr.argval is None:
-                in_while_true = any(
-                    b[1] == "while" and b[0] in getattr(self, "_while_true_ends", set())
-                    for b in self.blocks
-                )
-                if in_while_true:
-                    self._append_reconstructed("break")
-                elif not self.is_compiler_generated_return(self.pc - 1):
-                    self._append_reconstructed("return None")
-                return
+        # Close try body block if tracked
+        if self.blocks and self.blocks[-1][1] == "try_body":
+            self.blocks.pop()
+            self.indent_level -= 1
 
-            val = instr.argval
+        # Record the indent at which except headers should be emitted
+        self._except_header_indent = self.indent_level
+        # Peek: is there a LOAD + CHECK_EXC_MATCH coming?
+        look = self.pc
+        while look < len(self.instructions) and self.instructions[look].opname in (
+            "RESUME", "NOP", "CACHE", "NOT_TAKEN"
+        ):
+            look += 1
+        if look < len(self.instructions) and self.instructions[look].opname in (
+            "LOAD_NAME", "LOAD_GLOBAL", "LOAD_FAST", "LOAD_DEREF"
+        ):
+            self.stack.append("_exc_info")
+            return  # defer header to CHECK_EXC_MATCH
+        # Bare except (no type check)
+        self._append_reconstructed("except:")
+        self.indent_level += 1
+
+
+    def _op_check_exc_match(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        exc_type = self.stack.pop() if self.stack else "Exception"
+        if self.stack and str(self.stack[-1]) == "_exc_info":
+            self.stack.pop()
+        # Reset indent to the except-header level (handles multi-except chains
+        # where the first handler incremented indent but the second check fires
+        # without a new PUSH_EXC_INFO reset).
+        if self._except_header_indent >= 0:
+            self.indent_level = self._except_header_indent
+        # Peek ahead from the current position to find the optional
+        # STORE_NAME / STORE_FAST that binds the 'as varname' in except.
+        #
+        # The bytecode varies by version:
+        #   3.12: POP_JUMP_IF_FALSE -> STORE_NAME e
+        #   3.14: POP_JUMP_IF_FALSE -> POP_TOP -> STORE_NAME e
+        #         (may include additional CACHE or other slots)
+        #
+        # Strategy: skip forward through "harmless" single-cycle opcodes
+        # (POP_JUMP_IF_*, POP_TOP, CACHE, NOP, COPY, RESUME) until we
+        # either find a STORE or hit something that clearly belongs to
+        # the handler body (a LOAD, BINARY, COMPARE, RETURN, RERAISE...).
+        #
+        # The window is capped at 10 instructions to prevent runaway.
+        # Scan forward from the current PC to find the optional
+        # STORE_NAME / STORE_FAST that binds 'as varname' in except.
+        #
+        # The binding zone varies by Python version:
+        #   3.12 no-as:  POP_JUMP_IF_FALSE -> POP_TOP    -> LOAD_CONST  -> body
+        #   3.12 as-e:   POP_JUMP_IF_FALSE -> STORE_NAME e -> body
+        #   3.14 no-as:  POP_JUMP_IF_FALSE -> POP_TOP    -> LOAD_CONST  -> body
+        #   3.14 as-e:   POP_JUMP_IF_FALSE -> POP_TOP    -> STORE_NAME e -> body
+        #
+        # The correct discriminator is NOT "POP_TOP = no binding".
+        # On 3.14, POP_TOP appears in BOTH cases (it pops the exc_type from
+        # the CHECK_EXC_MATCH result). The real signal is whether STORE_NAME
+        # appears before any LOAD_* or other body-start instruction.
+        #
+        # Rules:
+        #  1. Skip POP_JUMP_IF_* opcodes (the type-match conditional gate)
+        #  2. Skip POP_TOP, CACHE, NOP, RESUME, COPY (neutral in all versions)
+        #  3. If STORE_NAME / STORE_FAST found -> that IS the 'as e' binding
+        #  4. Stop (no binding) at: any LOAD_*, RERAISE, RETURN_*, JUMP_*,
+        #     or a jump-target boundary (entered a new block)
+        #  5. Cap at 8 steps
+        _SKIP = frozenset({
+            "POP_TOP", "CACHE", "NOP", "RESUME", "COPY", "NOT_TAKEN",
+        })
+        _STOP = frozenset({
+            "LOAD_CONST", "LOAD_NAME", "LOAD_FAST", "LOAD_GLOBAL",
+            "LOAD_DEREF", "LOAD_SMALL_INT", "LOAD_ATTR", "PUSH_NULL",
+            "RERAISE", "RAISE_VARARGS", "RETURN_CONST", "RETURN_VALUE",
+            "JUMP_FORWARD",
+        })
+        as_name = None
+        look = self.pc
+        # Step 1: skip conditional jumps
+        while (look < len(self.instructions)
+               and "POP_JUMP_IF" in self.instructions[look].opname):
+            look += 1
+        # Steps 2-5: scan binding zone
+        for _ in range(8):
+            if look >= len(self.instructions):
+                break
+            ins_l = self.instructions[look]
+            op = ins_l.opname
+            # Step 3: found the 'as e' binding
+            if op in ("STORE_NAME", "STORE_FAST"):
+                as_name = str(ins_l.argval)
+                self._exc_as_store_offset = ins_l.offset
+                break
+            # Step 4: definitively in handler body — no binding
+            if op in _STOP or self._is_backward_jump(op):
+                break
+            # Step 4: new block boundary — no binding
+            if ins_l.is_jump_target:
+                break
+            # Step 2: neutral opcode — skip past it
+            if op in _SKIP:
+                look += 1
+                continue
+            # Unknown opcode — stop safely
+            break
+        if as_name is None:
+            self._exc_as_store_offset = -1
+        self._exc_cleanup_name = as_name
+        # Also record in a persistent set for re-raise-path cleanup suppression
+        if as_name:
+            self._exc_bound_names.add(as_name)
+        if as_name:
+            self._append_reconstructed(f"except {exc_type} as {as_name}:")
+        else:
+            self._append_reconstructed(f"except {exc_type}:")
+        self.indent_level += 1
+        # sentinel: suppresses the POP_JUMP_IF_FALSE that follows from
+        # opening a spurious nested 'if' block
+        self.stack.append("_exc_match")
+
+
+    def _op_cleanup(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        pass  # cleanup suppression (_exc_cleanup_name) stays active until DELETE_NAME fires
+
+
+    def _op_setup_finally(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        # Legacy 3.9/3.10 try/except via SETUP_* opcodes
+        self._append_reconstructed("try:")
+        self.indent_level += 1
+        jump_target = self._get_jump_target(instr)
+        self.blocks.append((jump_target, "try_body"))
+
+
+    def _op_setup_with(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        ctx = self.stack.pop() if self.stack else "ctx"
+        # Peek ahead for the STORE that binds the 'as' variable (3.9/3.10).
+        # In 3.9 the instruction immediately after SETUP_WITH is always
+        # STORE_FAST / STORE_NAME binding the __enter__() return value.
+        as_var = None
+        _SKIP_SW = frozenset({"RESUME", "CACHE", "NOP", "NOT_TAKEN"})
+        look = self.pc
+        while look < len(self.instructions) and self.instructions[look].opname in _SKIP_SW:
+            look += 1
+        if look < len(self.instructions) and self.instructions[look].opname in (
+            "STORE_FAST", "STORE_NAME", "STORE_GLOBAL"
+        ):
+            as_var = str(self.instructions[look].argval)
+            self.pc = look + 1   # consume the STORE so it isn't processed again
+        if as_var:
+            self._append_reconstructed(f"with {ctx} as {as_var}:")
+        else:
+            self._append_reconstructed(f"with {ctx}:")
+        self.indent_level += 1
+        jump_target = self._get_jump_target(instr)
+        self.blocks.append((jump_target, "with"))
+        # In Python 3.9 the normal with-exit sequence immediately preceding the
+        # exception handler looks like:
+        #   LOAD_CONST None; DUP_TOP; DUP_TOP; CALL_FUNCTION 3; POP_TOP; JUMP_FORWARD
+        # Suppress these so they don't produce spurious 'except:' / func() lines.
+        t_idx = next(
+            (i for i, x in enumerate(self.instructions) if x.offset == jump_target), -1
+        )
+        if t_idx > 0:
+            j = t_idx - 1
+            # Walk backwards to collect the exit-call block
+            suppress_start = None
+            while j >= 0:
+                op = self.instructions[j].opname
+                if op in ("LOAD_CONST", "DUP_TOP", "CALL_FUNCTION",
+                          "POP_TOP", "JUMP_FORWARD", "JUMP_ABSOLUTE", "POP_BLOCK"):
+                    suppress_start = self.instructions[j].offset
+                    j -= 1
+                else:
+                    break
+            if suppress_start is not None:
+                _fb = getattr(self, "_finally_body_suppress", set())
+                for k in range(j + 1, t_idx):
+                    op = self.instructions[k].opname
+                    if op not in ("LOAD_CONST", "DUP_TOP", "CALL_FUNCTION",
+                                  "POP_TOP", "JUMP_FORWARD", "JUMP_ABSOLUTE", "POP_BLOCK"):
+                        break
+                    _fb.add(self.instructions[k].offset)
+                self._finally_body_suppress = _fb
+
+
+    def _op_before_with(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        # FIX-15: BEFORE_WITH — Python 3.11+ context-manager entry opcode.
+        # At this point TOS is the context manager object (result of CALL).
+        # BEFORE_WITH calls __enter__(), pushes the __exit__ callable, and
+        # leaves the __enter__ return value on top of the stack.
+        # The STORE_FAST / STORE_NAME that immediately follows binds the
+        # 'as' variable.
+        ctx = self.stack.pop() if self.stack else "ctx"
+        # Peek ahead for the STORE that binds the 'as' variable name.
+        as_var = None
+        _SKIP_BW = frozenset({"RESUME", "CACHE", "NOP", "NOT_TAKEN"})
+        look = self.pc
+        while look < len(self.instructions) and self.instructions[look].opname in _SKIP_BW:
+            look += 1
+        if look < len(self.instructions) and self.instructions[look].opname in (
+            "STORE_FAST", "STORE_NAME", "STORE_GLOBAL"
+        ):
+            as_var = str(self.instructions[look].argval)
+            # Advance pc past the STORE so it is not processed again
+            self.pc = look + 1
+        if as_var:
+            self._append_reconstructed(f"with {ctx} as {as_var}:")
+        else:
+            self._append_reconstructed(f"with {ctx}:")
+        self.indent_level += 1
+        # Find the PUSH_EXC_INFO that guards this with-block's exit handler
+        # and record it as the block boundary so we can de-indent properly.
+        # The with-handler PUSH_EXC_INFO is the one with the highest offset
+        # (the __exit__ call handler, at the very end of the function).
+        with_exc_offsets = [
+            ins.offset for ins in self.instructions
+            if ins.opname == "PUSH_EXC_INFO"
+            and ins.offset > instr.offset
+            # The with-exit PUSH_EXC_INFO is NOT in _finally_push_offsets
+            # (it handles the __exit__ call, not user finally: code).
+        ]
+        if with_exc_offsets:
+            # Use the last (highest-offset) PUSH_EXC_INFO — that is the one
+            # that handles the __exit__ on exceptional exit from the with body.
+            self.blocks.append((max(with_exc_offsets), "with"))
+        # Also record the _except_header_indent so finally: de-indents correctly
+        self._except_header_indent = self.indent_level - 1
+
+
+    def _op_with_except_start(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        pass
+
+        # ── functions ──────────────────────────────────────────────────
+
+    def _op_make_function(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        # Stack layout at MAKE_FUNCTION (TOS = top):
+        #   TOS:   code object  (always present)
+        #   TOS-1: name string  (Python <= 3.10 only; 3.11+ removed it)
+        #   then below, depending on flags bitmask (arg):
+        #     0x01  positional defaults tuple
+        #     0x02  kwonly defaults dict
+        #     0x04  annotations dict
+        #     0x08  closure freevars tuple
+        flags = int(instr.arg) if instr.arg is not None else 0
+
+        # 1. Pop code object (always TOS)
+        code_obj_val = None
+        if self.stack and isinstance(self.stack[-1], tuple) and self.stack[-1][0] == "code":
+            code_obj_val = self.stack.pop()
+        elif len(self.stack) >= 2:
+            # Older Python: name string is TOS, code object below
+            self.stack.pop()  # discard name string
+            if self.stack and isinstance(self.stack[-1], tuple) and self.stack[-1][0] == "code":
+                code_obj_val = self.stack.pop()
+
+        # 2. Pop optional flag items that were pushed below the code object
+        #    (in CPython they are pushed in order: defaults, kw_defaults,
+        #     annotations, closure — so TOS after code removal is closure
+        #     if 0x08 set, then annotations if 0x04, etc.)
+        closure  = str(self.stack.pop()) if (flags & 0x08) and self.stack else None
+        annots   = str(self.stack.pop()) if (flags & 0x04) and self.stack else None
+        kw_defs  = str(self.stack.pop()) if (flags & 0x02) and self.stack else None
+        defaults = self.stack.pop()      if (flags & 0x01) and self.stack else None
+
+        if code_obj_val is not None and isinstance(code_obj_val, tuple) and code_obj_val[0] == "code":
+            inner_code = code_obj_val[1]
+            positional = list(inner_code.co_varnames[: inner_code.co_argcount])
+
+            # Attach default values to trailing positional args
+            if defaults is not None:
+                raw = str(defaults)
+                # defaults is repr of a tuple e.g. "('Hello',)" or "('Hello', 0)"
+                # Strip outer parens/quotes and split carefully
+                inner = raw.strip()
+                if inner.startswith("(") and inner.endswith(")"):
+                    inner = inner[1:-1]
+                # Split on comma but not inside nested parens/quotes (simple case)
+                defs = [d.strip() for d in inner.split(",") if d.strip()]
+                # Remove trailing empty string from tuple repr like "('x',)"
+                if defs and defs[-1] == "":
+                    defs = defs[:-1]
+                n_pos = len(positional)
+                n_defs = len(defs)
+                n_no_default = n_pos - n_defs
+                for i, d in enumerate(defs):
+                    idx = n_no_default + i
+                    if 0 <= idx < n_pos:
+                        positional[idx] = f"{positional[idx]}={d}"
+
+            dec_class = _pick_decompiler_class(self)
+            dec = dec_class(inner_code, indent_level=1)
+            body = dec.decompile()
+            sig = f"def {inner_code.co_name}({', '.join(positional)}):"
+            self.stack.append(("func", f"{sig}\n{body}"))
+        else:
+            self.stack.append("make_function(?)")
+
+        # ── SET_FUNCTION_ATTRIBUTE (Python 3.14+) ─────────────────────
+
+    def _op_set_function_attribute(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        # 3.14 uses SET_FUNCTION_ATTRIBUTE to attach defaults/annotations
+        # to a function after MAKE_FUNCTION.
+        # Stack layout: TOS=func_tuple, TOS-1=attribute_value
+        # arg bitmask: 0x01=defaults, 0x02=kwonly_defaults, 0x04=annotations, 0x08=closure
+        attr_flags = int(instr.arg) if instr.arg is not None else 0
+        func_val = self.stack.pop() if self.stack else None
+        attr_val = self.stack.pop() if self.stack else None
+
+        if (func_val is not None and isinstance(func_val, tuple)
+                and func_val[0] == "func" and attr_val is not None
+                and (attr_flags & 0x01)):  # positional defaults
+            # Rewrite the function signature to include defaults
+            func_text = str(func_val[1])
+            lines_f = func_text.split("\n")
+            sig_line = lines_f[0] if lines_f else ""
+            # Parse: "def name(args):" -> attach defaults from attr_val
+            if sig_line.startswith("def ") and "(" in sig_line:
+                raw = str(attr_val).strip()
+                # attr_val is repr of tuple e.g. "(10,)" or "(10, 'hello')"
+                inner = raw
+                if inner.startswith("(") and inner.endswith(")"):
+                    inner = inner[1:-1]
+                defs = [d.strip() for d in inner.split(",") if d.strip()]
+                # Get arg list from sig
+                paren_start = sig_line.index("(") + 1
+                paren_end = sig_line.rindex(")")
+                args_str = sig_line[paren_start:paren_end]
+                args = [a.strip() for a in args_str.split(",") if a.strip()]
+                n_no_def = len(args) - len(defs)
+                for i, d in enumerate(defs):
+                    idx = n_no_def + i
+                    if 0 <= idx < len(args) and "=" not in args[idx]:
+                        args[idx] = f"{args[idx]}={d}"
+                new_sig = sig_line[:paren_start] + ", ".join(args) + sig_line[paren_end:]
+                lines_f[0] = new_sig
+                self.stack.append(("func", "\n".join(lines_f)))
+            else:
+                self.stack.append(func_val)
+        else:
+            # Non-defaults attribute or unrecognised — push func back unchanged
+            if func_val is not None:
+                self.stack.append(func_val)
+
+        # ── return ─────────────────────────────────────────────────────
+
+    def _op_return_value(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        if self.stack:
+            val = self.stack.pop()
             val_str = str(val)
-            self._append_reconstructed("return " + repr(val))
+            # Use the new predicate for smarter suppression
+            is_compiler_gen = (val_str == "None" and self.is_compiler_generated_return(self.pc - 1))
+            
+            if is_compiler_gen:
+                pass
+            elif "__class__" in val_str or "__classdict__" in val_str:
+                pass
+            else:
+                self._append_reconstructed(f"return {val}")
+        return
+
+
+    def _op_return_const(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        # RETURN_CONST None has two meanings:
+        #   - Inside a 'while True:' (NOP-driven, unconditional) block: it's `break`
+        #   - Everywhere else: compiler-generated exit sentinel — suppress if effectively last
+        if instr.argval is None:
+            in_while_true = any(
+                b[1] == "while" and b[0] in getattr(self, "_while_true_ends", set())
+                for b in self.blocks
+            )
+            if in_while_true:
+                self._append_reconstructed("break")
+            elif not self.is_compiler_generated_return(self.pc - 1):
+                self._append_reconstructed("return None")
+            return
+
+        val = instr.argval
+        val_str = str(val)
+        self._append_reconstructed("return " + repr(val))
 
         # ── POP_TOP ────────────────────────────────────────────────────
-        elif opname == "POP_TOP":
-            if self.stack:
-                stmt = self.stack.pop()
-                # Silently discard: code objects, function/class stubs,
-                # import module tuples (consumed by IMPORT_FROM already),
-                # and internal sentinels.
-                if isinstance(stmt, tuple) and stmt[0] in (
-                    "code", "func", "import", "_from_import_done"
-                ):
-                    return
-                if str(stmt) in ("None", "_exc_info", "_exc_match", "_exc"):
-                    return
-                self._append_reconstructed(str(stmt))
+
+    def _op_pop_top(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        if self.stack:
+            stmt = self.stack.pop()
+            # Silently discard: code objects, function/class stubs,
+            # import module tuples (consumed by IMPORT_FROM already),
+            # and internal sentinels.
+            if isinstance(stmt, tuple) and stmt[0] in (
+                "code", "func", "import", "_from_import_done"
+            ):
+                return
+            if str(stmt) in ("None", "_exc_info", "_exc_match", "_exc"):
+                return
+            self._append_reconstructed(str(stmt))
 
         # ── binary arithmetic ──────────────────────────────────────────
-        elif "BINARY" in opname and opname != "BINARY_SUBSCR":
-            if len(self.stack) >= 2:
-                right = self.stack.pop()
-                left = self.stack.pop()
-                op_map = {
-                    "BINARY_ADD": "+", "BINARY_SUBTRACT": "-",
-                    "BINARY_MULTIPLY": "*", "BINARY_TRUE_DIVIDE": "/",
-                    "BINARY_FLOOR_DIVIDE": "//", "BINARY_MODULO": "%",
-                    "BINARY_POWER": "**", "BINARY_LSHIFT": "<<",
-                    "BINARY_RSHIFT": ">>", "BINARY_AND": "&",
-                    "BINARY_OR": "|", "BINARY_XOR": "^",
-                    "BINARY_MATRIX_MULTIPLY": "@",
-                }
-                op = op_map.get(opname, "?")
-                l_str = str(left)
-                r_str = str(right)
-                if " " in l_str and not (l_str.startswith("(") and l_str.endswith(")")):
-                    l_str = f"({l_str})"
-                if " " in r_str and not (r_str.startswith("(") and r_str.endswith(")")):
-                    r_str = f"({r_str})"
-                self.stack.append(f"{l_str} {op} {r_str}")
+
+    def _op_binary(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        if len(self.stack) >= 2:
+            right = self.stack.pop()
+            left = self.stack.pop()
+            op_map = {
+                "BINARY_ADD": "+", "BINARY_SUBTRACT": "-",
+                "BINARY_MULTIPLY": "*", "BINARY_TRUE_DIVIDE": "/",
+                "BINARY_FLOOR_DIVIDE": "//", "BINARY_MODULO": "%",
+                "BINARY_POWER": "**", "BINARY_LSHIFT": "<<",
+                "BINARY_RSHIFT": ">>", "BINARY_AND": "&",
+                "BINARY_OR": "|", "BINARY_XOR": "^",
+                "BINARY_MATRIX_MULTIPLY": "@",
+            }
+            op = op_map.get(opname, "?")
+            l_str = str(left)
+            r_str = str(right)
+            if " " in l_str and not (l_str.startswith("(") and l_str.endswith(")")):
+                l_str = f"({l_str})"
+            if " " in r_str and not (r_str.startswith("(") and r_str.endswith(")")):
+                r_str = f"({r_str})"
+            self.stack.append(f"{l_str} {op} {r_str}")
 
         # FIX-09: INPLACE_* → augmented assignment
-        elif "INPLACE" in opname:
-            if len(self.stack) >= 2:
-                right = self.stack.pop()
-                left = self.stack.pop()
-                inplace_map = {
-                    "INPLACE_ADD": "+=", "INPLACE_SUBTRACT": "-=",
-                    "INPLACE_MULTIPLY": "*=", "INPLACE_TRUE_DIVIDE": "/=",
-                    "INPLACE_FLOOR_DIVIDE": "//=", "INPLACE_MODULO": "%=",
-                    "INPLACE_POWER": "**=", "INPLACE_LSHIFT": "<<=",
-                    "INPLACE_RSHIFT": ">>=", "INPLACE_AND": "&=",
-                    "INPLACE_OR": "|=", "INPLACE_XOR": "^=",
-                    "INPLACE_MATRIX_MULTIPLY": "@=",
-                }
-                op = inplace_map.get(opname, "?=")
-                # Emit as statement directly; the result will be stored by STORE_*
-                self.stack.append(f"({left} {op} {right})")
+
+    def _op_inplace(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        if len(self.stack) >= 2:
+            right = self.stack.pop()
+            left = self.stack.pop()
+            inplace_map = {
+                "INPLACE_ADD": "+=", "INPLACE_SUBTRACT": "-=",
+                "INPLACE_MULTIPLY": "*=", "INPLACE_TRUE_DIVIDE": "/=",
+                "INPLACE_FLOOR_DIVIDE": "//=", "INPLACE_MODULO": "%=",
+                "INPLACE_POWER": "**=", "INPLACE_LSHIFT": "<<=",
+                "INPLACE_RSHIFT": ">>=", "INPLACE_AND": "&=",
+                "INPLACE_OR": "|=", "INPLACE_XOR": "^=",
+                "INPLACE_MATRIX_MULTIPLY": "@=",
+            }
+            op = inplace_map.get(opname, "?=")
+            # Emit as statement directly; the result will be stored by STORE_*
+            self.stack.append(f"({left} {op} {right})")
 
         # ── calls ──────────────────────────────────────────────────────
-        elif "CALL" in opname and opname not in (
-            "CALL_INTRINSIC_1", "CALL_INTRINSIC_2",
-        ):
-            num_args = int(instr.arg) if instr.arg is not None else 0
 
-            # FIX-07: keyword argument handling
-            # CALL_KW: TOS is a tuple of kw-names; then num_args values (kw last)
-            kw_names: List[str] = []
-            if opname == "CALL_KW" or ("kwnames" in str(instr.argval)):
+    def _op_call(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        num_args = int(instr.arg) if instr.arg is not None else 0
+
+        # FIX-07: keyword argument handling
+        # CALL_KW: TOS is a tuple of kw-names; then num_args values (kw last)
+        kw_names: List[str] = []
+        if opname == "CALL_KW" or ("kwnames" in str(instr.argval)):
+            if self.stack:
+                raw_kw = self.stack.pop()
+                s_kw = str(raw_kw).strip("()")
+                if s_kw:
+                    kw_names = [n.strip("'\" ") for n in s_kw.split(",") if n.strip()]
+                num_kw = len(kw_names)
+                num_pos = num_args - num_kw
+
+                kw_vals: List[str] = []
+                for _ in range(num_kw):
+                    kw_vals.insert(0, str(self.stack.pop()) if self.stack else "?")
+                pos_vals: List[str] = []
+                for _ in range(num_pos):
+                    pos_vals.insert(0, str(self.stack.pop()) if self.stack else "?")
+
+                final_args = pos_vals + [
+                    f"{k}={v}" for k, v in zip(kw_names, kw_vals)
+                ]
+        else:
+            vals: List[str] = []
+            for _ in range(num_args):
                 if self.stack:
-                    raw_kw = self.stack.pop()
-                    s_kw = str(raw_kw).strip("()")
-                    if s_kw:
-                        kw_names = [n.strip("'\" ") for n in s_kw.split(",") if n.strip()]
-                    num_kw = len(kw_names)
-                    num_pos = num_args - num_kw
+                    v = self.stack.pop()
+                    if isinstance(v, tuple) and len(v) >= 2 and v[0] in ("func", "class"):
+                        vals.insert(0, str(v[1]))
+                    else:
+                        vals.insert(0, str(v))
+            final_args = vals
 
-                    kw_vals: List[str] = []
-                    for _ in range(num_kw):
-                        kw_vals.insert(0, str(self.stack.pop()) if self.stack else "?")
-                    pos_vals: List[str] = []
-                    for _ in range(num_pos):
-                        pos_vals.insert(0, str(self.stack.pop()) if self.stack else "?")
+        func_val = self.stack.pop() if self.stack else "unknown_func"
+        if str(func_val) == "None" and self.stack:
+            func_val = self.stack.pop()
 
-                    final_args = pos_vals + [
-                        f"{k}={v}" for k, v in zip(kw_names, kw_vals)
-                    ]
-            else:
-                vals: List[str] = []
-                for _ in range(num_args):
-                    if self.stack:
-                        v = self.stack.pop()
-                        if isinstance(v, tuple) and len(v) >= 2 and v[0] in ("func", "class"):
-                            vals.insert(0, str(v[1]))
-                        else:
-                            vals.insert(0, str(v))
-                final_args = vals
-
-            func_val = self.stack.pop() if self.stack else "unknown_func"
-            if str(func_val) == "None" and self.stack:
-                func_val = self.stack.pop()
-
-            # ── Decorator pattern detection ───────────────────────────────
-            # When MAKE_FUNCTION is immediately followed by CALL, the pattern is
-            # either:
-            # (a) a decorator application: @decorator def name(...): body
-            #     Stack: [..., decorator_expr, ('func', 'def name(...):\n body')]
-            # (b) a genexpr/lambda called immediately (already handled below)
-            #
-            # Distinguish: decorator bodies have a plain function name (no angle
-            # brackets like <genexpr>, <lambda>, <listcomp> etc.).
-            if isinstance(func_val, tuple) and func_val[0] == "func":
-                body_text = str(func_val[1])
-                # Is this a named function (not a genexpr/lambda/comprehension)?
-                first_line = body_text.strip().split("\n")[0] if body_text.strip() else ""
-                if not _is_anonymous_func_body(first_line) and self.stack:
-                    decorator_expr = str(self.stack.pop())
-                    # Strip NULL sentinel if present
-                    if " + NULL" in decorator_expr or "|NULL" in decorator_expr:
-                        decorator_expr = decorator_expr.split(" + ")[0].split("|")[0]
-                    # Emit as a decorated function definition
-                    deco_line = f"@{decorator_expr}"
-                    self.stack.append(("func", f"{deco_line}\n{body_text}"))
-                    return
-                # Anonymous function or no decorator — genexpr/lambda handling
-                rendered = _render_func_tuple(body_text, final_args)
-                self.stack.append(rendered)
+        # ── Decorator pattern detection ───────────────────────────────
+        # When MAKE_FUNCTION is immediately followed by CALL, the pattern is
+        # either:
+        # (a) a decorator application: @decorator def name(...): body
+        #     Stack: [..., decorator_expr, ('func', 'def name(...):\n body')]
+        # (b) a genexpr/lambda called immediately (already handled below)
+        #
+        # Distinguish: decorator bodies have a plain function name (no angle
+        # brackets like <genexpr>, <lambda>, <listcomp> etc.).
+        if isinstance(func_val, tuple) and func_val[0] == "func":
+            body_text = str(func_val[1])
+            # Is this a named function (not a genexpr/lambda/comprehension)?
+            first_line = body_text.strip().split("\n")[0] if body_text.strip() else ""
+            if not _is_anonymous_func_body(first_line) and self.stack:
+                decorator_expr = str(self.stack.pop())
+                # Strip NULL sentinel if present
+                if " + NULL" in decorator_expr or "|NULL" in decorator_expr:
+                    decorator_expr = decorator_expr.split(" + ")[0].split("|")[0]
+                # Emit as a decorated function definition
+                deco_line = f"@{decorator_expr}"
+                self.stack.append(("func", f"{deco_line}\n{body_text}"))
                 return
+            # Anonymous function or no decorator — genexpr/lambda handling
+            rendered = _render_func_tuple(body_text, final_args)
+            self.stack.append(rendered)
+            return
 
-            func = str(func_val)
-            if " + NULL" in func or "|NULL" in func:
-                func = func.split(" + ")[0].split("|")[0]
+        func = str(func_val)
+        if " + NULL" in func or "|NULL" in func:
+            func = func.split(" + ")[0].split("|")[0]
 
-            # class builder detection
-            if func == "__build_class__" and len(final_args) >= 2:
-                body_text = str(final_args[0])
-                cls_name = str(final_args[1]).strip("'\"")
-                bases = final_args[2:]
-                bases_str = f"({', '.join(str(b) for b in bases)})" if bases else ""
-                lines = body_text.split("\n")
-                if len(lines) > 1:
-                    real_body = "\n".join(lines[1:])
-                    self.stack.append(("class", f"class {cls_name}{bases_str}:\n{real_body}"))
-                else:
-                    self.stack.append(("class", f"class {cls_name}{bases_str}: pass"))
-            elif func == "super" and not final_args:
-                self.stack.append("super()")
+        # class builder detection
+        if func == "__build_class__" and len(final_args) >= 2:
+            body_text = str(final_args[0])
+            cls_name = str(final_args[1]).strip("'\"")
+            bases = final_args[2:]
+            bases_str = f"({', '.join(str(b) for b in bases)})" if bases else ""
+            lines = body_text.split("\n")
+            if len(lines) > 1:
+                real_body = "\n".join(lines[1:])
+                self.stack.append(("class", f"class {cls_name}{bases_str}:\n{real_body}"))
             else:
-                self.stack.append(f"{func}({', '.join(str(a) for a in final_args)})")
+                self.stack.append(("class", f"class {cls_name}{bases_str}: pass"))
+        elif func == "super" and not final_args:
+            self.stack.append("super()")
+        else:
+            self.stack.append(f"{func}({', '.join(str(a) for a in final_args)})")
 
-        elif opname == "LOAD_BUILD_CLASS":
-            self.stack.append("__build_class__")
+
+    def _op_load_build_class(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        self.stack.append("__build_class__")
 
         # ── comparisons ────────────────────────────────────────────────
-        elif "COMPARE_OP" in opname:
-            if len(self.stack) >= 2:
-                right = self.stack.pop()
-                left = self.stack.pop()
-                op = str(instr.argval) if instr.argval else "=="
-                if "(" in op and ")" in op:
-                    m = re.search(r'\(([^)]+)\)', op)
-                    if m:
-                        op = m.group(1)
-                if str(left) == "__name__" and str(right) == "'__main__'" and op == "==":
-                    self.stack.append('__name__ == "__main__"')
-                else:
-                    self.stack.append(f"{left} {op} {right}")
 
-        elif "CONTAINS_OP" in opname:
-            if len(self.stack) >= 2:
-                container = self.stack.pop()
-                item = self.stack.pop()
-                op = "not in" if bool(instr.arg) else "in"
-                self.stack.append(f"{item} {op} {container}")
-
-        elif "IS_OP" in opname:
-            if len(self.stack) >= 2:
-                right = self.stack.pop()
-                left = self.stack.pop()
-                op = "is not" if bool(instr.arg) else "is"
+    def _op_compare(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        if len(self.stack) >= 2:
+            right = self.stack.pop()
+            left = self.stack.pop()
+            op = str(instr.argval) if instr.argval else "=="
+            if "(" in op and ")" in op:
+                m = re.search(r'\(([^)]+)\)', op)
+                if m:
+                    op = m.group(1)
+            if str(left) == "__name__" and str(right) == "'__main__'" and op == "==":
+                self.stack.append('__name__ == "__main__"')
+            else:
                 self.stack.append(f"{left} {op} {right}")
 
-        elif "TO_BOOL" in opname:
-            pass  # value already on stack, bool wrapping not needed
 
-        # ── stack manipulation ─────────────────────────────────────────
-        elif opname in ("ROT_TWO", "ROT_THREE", "ROT_FOUR"):
-            if opname == "ROT_TWO" and len(self.stack) >= 2:
-                a, b = self.stack.pop(), self.stack.pop()
-                self.stack.extend([a, b])
-            elif opname == "ROT_THREE" and len(self.stack) >= 3:
-                a = self.stack.pop()
-                b = self.stack.pop()
-                c = self.stack.pop()
-                self.stack.extend([a, c, b])
-            elif opname == "ROT_FOUR" and len(self.stack) >= 4:
-                a = self.stack.pop()
-                b = self.stack.pop()
-                c = self.stack.pop()
-                d = self.stack.pop()
-                self.stack.extend([a, d, c, b])
+    def _op_contains(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        if len(self.stack) >= 2:
+            container = self.stack.pop()
+            item = self.stack.pop()
+            op = "not in" if bool(instr.arg) else "in"
+            self.stack.append(f"{item} {op} {container}")
 
-        elif opname in ("DUP_TOP", "DUP_TOP_TWO"):
-            if opname == "DUP_TOP" and self.stack:
-                self.stack.append(self.stack[-1])
-            elif opname == "DUP_TOP_TWO" and len(self.stack) >= 2:
-                self.stack.extend([self.stack[-2], self.stack[-1]])
+
+    def _op_is(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        if len(self.stack) >= 2:
+            right = self.stack.pop()
+            left = self.stack.pop()
+            op = "is not" if bool(instr.arg) else "is"
+            self.stack.append(f"{left} {op} {right}")
+
+
+    def _op_stack_manip(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        if opname == "ROT_TWO" and len(self.stack) >= 2:
+            a, b = self.stack.pop(), self.stack.pop()
+            self.stack.extend([a, b])
+        elif opname == "ROT_THREE" and len(self.stack) >= 3:
+            a = self.stack.pop()
+            b = self.stack.pop()
+            c = self.stack.pop()
+            self.stack.extend([a, c, b])
+        elif opname == "ROT_FOUR" and len(self.stack) >= 4:
+            a = self.stack.pop()
+            b = self.stack.pop()
+            c = self.stack.pop()
+            d = self.stack.pop()
+            self.stack.extend([a, d, c, b])
+
+
+    def _op_dup_top(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        if opname == "DUP_TOP" and self.stack:
+            self.stack.append(self.stack[-1])
+        elif opname == "DUP_TOP_TWO" and len(self.stack) >= 2:
+            self.stack.extend([self.stack[-2], self.stack[-1]])
 
         # ── f-strings ──────────────────────────────────────────────────
-        elif opname in ("FORMAT_VALUE", "FORMAT_SIMPLE"):
-            if self.stack:
-                val = self.stack.pop()
-                self.stack.append(f"{{{val}}}")
 
-        elif opname == "BUILD_STRING":
-            parts = []
-            num = int(instr.arg) if instr.arg is not None else 0
-            for _ in range(num):
-                if self.stack:
-                    parts.insert(0, self.stack.pop())
-            has_fmt = any("{" in str(p) for p in parts)
-            content = "".join(
-                str(p).strip("'\"") if has_fmt else str(p) for p in parts
-            )
-            self.stack.append(f'f"{content}"' if has_fmt else f'"{content}"')
+    def _op_fstring(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        if self.stack:
+            val = self.stack.pop()
+            self.stack.append(f"{{{val}}}")
+
+
+    def _op_build_string(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        parts = []
+        num = int(instr.arg) if instr.arg is not None else 0
+        for _ in range(num):
+            if self.stack:
+                parts.insert(0, self.stack.pop())
+        has_fmt = any("{" in str(p) for p in parts)
+        content = "".join(
+            str(p).strip("'\"") if has_fmt else str(p) for p in parts
+        )
+        self.stack.append(f'f"{content}"' if has_fmt else f'"{content}"')
 
         # ── jumps / control flow ───────────────────────────────────────
-        elif opname == "JUMP_FORWARD" or self._is_backward_instruction(instr):
-            jump_target = self._get_jump_target(instr)
 
-            # FIX-11: detect while loop.
-            # 3.11+ CPython compiles `while cond: body` as:
-            #   A:  <condition>; POP_JUMP_IF_FALSE(end)  ← condition check #1
-            #   B:  <body>
-            #   C:  <condition>; POP_JUMP_IF_FALSE(end-2) ← condition check #2 (dup)
-            #   D:  JUMP_BACKWARD(B)
-            #   end-2: RETURN_CONST None  (loop-exhausted path — suppress)
-            #   end:   RETURN_CONST None  (skipped path — suppress)
-            #
-            # When we see JUMP_BACKWARD(B) we:
-            #   1. Find the start of the duplicated condition block (first
-            #      instruction at or after B whose offset is ≥ the last body
-            #      instruction + 2). Anything from there through JUMP_BACKWARD
-            #      is duplicate — register those offsets for suppression.
-            #   2. Retroactively rewrite the 'if' header → 'while'.
-            #   3. Drain spurious stack items pushed by the dup condition.
-            if self._is_backward_instruction(instr):
-                body_start = jump_target
+    def _op_jump(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        jump_target = self._get_jump_target(instr)
 
-                # FIX-17: JUMP_BACKWARD instructions that exit except/finally
-                # handlers (they jump to a finally-merge label) must NOT be
-                # treated as loop back-edges.  Skip them silently.
-                if instr.offset in getattr(self, "_exc_handler_jump_offsets", ()):
-                    return
+        # FIX-11: detect while loop.
+        # 3.11+ CPython compiles `while cond: body` as:
+        #   A:  <condition>; POP_JUMP_IF_FALSE(end)  ← condition check #1
+        #   B:  <body>
+        #   C:  <condition>; POP_JUMP_IF_FALSE(end-2) ← condition check #2 (dup)
+        #   D:  JUMP_BACKWARD(B)
+        #   end-2: RETURN_CONST None  (loop-exhausted path — suppress)
+        #   end:   RETURN_CONST None  (skipped path — suppress)
+        #
+        # When we see JUMP_BACKWARD(B) we:
+        #   1. Find the start of the duplicated condition block (first
+        #      instruction at or after B whose offset is ≥ the last body
+        #      instruction + 2). Anything from there through JUMP_BACKWARD
+        #      is duplicate — register those offsets for suppression.
+        #   2. Retroactively rewrite the 'if' header → 'while'.
+        #   3. Drain spurious stack items pushed by the dup condition.
+        if self._is_backward_instruction(instr):
+            body_start = jump_target
 
-                # If the prescan successfully identified the loop guard
-                # (guard_offset in _while_header_targets), it already arranged for
-                # the POP_JUMP_IF_FALSE handler to open a "while" block instead of
-                # an "if" block.  Nothing more to do — just return.
-                if body_start in self._while_header_targets:
-                    return  # prescan handled it
-
-                # Fallback for Python 3.14+ where the prescan could not identify
-                # the guard (e.g. guard offset >= body_start in a do-while layout,
-                # or argval unresolved in a way the broadened search still misses).
-                # Retroactively rewrite the most recent "if" header → "while".
-                #
-                # Also suppress dup-condition instructions that already executed:
-                # find where the dup region starts (first instruction after the
-                # last STORE in the body) and drain extra stack items.
-                dup_start = instr.offset
-                for ins in self.instructions:
-                    if body_start <= ins.offset < instr.offset:
-                        if ins.opname in (
-                            "STORE_NAME", "STORE_FAST", "STORE_GLOBAL",
-                            "STORE_ATTR", "STORE_SUBSCR",
-                        ):
-                            dup_start = ins.offset + 2
-
-                dup_depth = 0
-                for ins in self.instructions:
-                    if dup_start <= ins.offset < instr.offset:
-                        if ins.opname in (
-                            "LOAD_CONST", "LOAD_NAME", "LOAD_FAST",
-                            "LOAD_GLOBAL", "LOAD_DEREF", "LOAD_SMALL_INT",
-                        ):
-                            dup_depth += 1
-                        elif ins.opname in ("COMPARE_OP", "BINARY_OP"):
-                            dup_depth -= 1
-                for _ in range(max(0, dup_depth)):
-                    if self.stack:
-                        self.stack.pop()
-
-                # Find the most recently emitted "if" header and rewrite it.
-                for bi in range(len(self.blocks) - 1, -1, -1):
-                    boff, btype = self.blocks[bi]
-                    if btype == "if" and boff >= instr.offset:
-                        for idx in range(len(self.reconstructed) - 1, -1, -1):
-                            if self.reconstructed[idx].lstrip().startswith("if "):
-                                self.reconstructed[idx] = self.reconstructed[idx].replace(
-                                    "if ", "while ", 1
-                                )
-                                self.blocks[bi] = (boff, "while")
-                                self._while_true_ends.discard(boff)
-                                break
-                        break
-
-                return  # never treat JUMP_BACKWARD as else-opener
-
-
-
-            # Detect `break`: JUMP_FORWARD that jumps to the end of a while block.
-            for b_off, b_type in reversed(self.blocks):
-                if b_type == "while" and jump_target == b_off:
-                    self._append_reconstructed("break")
-                    return
-                if b_type == "while":
-                    break  # only check innermost while
-
-            if self.blocks and self.blocks[-1][1] == "if":
-                is_loop_back = opname == "JUMP_BACKWARD" and jump_target <= instr.offset
-                if self.blocks[-1][0] <= instr.offset + 2 or is_loop_back:
-                    target_of_else = (
-                        jump_target if opname == "JUMP_FORWARD" else self.blocks[-1][0]
-                    )
-                    self.blocks.pop()
-                    last_idx = len(self.reconstructed) - 1
-                    while last_idx >= 0 and not self.reconstructed[last_idx].strip():
-                        last_idx -= 1
-                    if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
-                        self._append_reconstructed("pass")
-                    self.indent_level -= 1
-
-                    # elif detection
-                    next_i = self.pc
-                    while (
-                        next_i < len(self.instructions)
-                        and self.instructions[next_i].opname in ("RESUME", "CACHE", "NOP", "NOT_TAKEN")
-                    ):
-                        next_i += 1
-
-                    is_elif = False
-                    if next_i < len(self.instructions) and (
-                        "JUMP_IF" in self.instructions[next_i].opname
-                        or "FOR_ITER" in self.instructions[next_i].opname
-                    ):
-                        orig_num = len(self.reconstructed)
-                        self._handle_instruction(self.instructions[next_i])
-                        self.pc = next_i + 1
-                        for i in range(orig_num, len(self.reconstructed)):
-                            line = self.reconstructed[i]
-                            if "if " in line:
-                                head, sep, tail = line.partition("if ")
-                                self.reconstructed[i] = f"{head}elif {tail}"
-                                is_elif = True
-                                break
-
-                    if not is_elif:
-                        meaningful_range_end = (
-                            target_of_else
-                            if opname == "JUMP_FORWARD"
-                            else (
-                                self.blocks[-1][0]
-                                if self.blocks
-                                else (self.instructions[-1].offset + 2)
-                            )
-                        )
-                        meaningful = False
-                        for b_idx in range(self.pc, len(self.instructions)):
-                            ins = self.instructions[b_idx]
-                            if ins.offset >= meaningful_range_end:
-                                break
-                            if ins.opname not in ("RESUME", "CACHE", "NOP", "END_FOR", "POP_ITER", "NOT_TAKEN"):
-                                meaningful = True
-                                break
-                        if meaningful:
-                            self._append_reconstructed("else:")
-                            self.indent_level += 1
-                            self.blocks.append((meaningful_range_end, "else"))
-
-        # ── no-ops ─────────────────────────────────────────────────────
-        elif opname in (
-            "PUSH_NULL", "RESUME", "PRECALL", "CACHE", "COPY_FREE_VARS", "NOT_TAKEN",
-            "MAKE_CELL", "END_FOR", "POP_ITER",
-            "YIELD_FROM", "COPY",
-        ):
-            pass
-
-        elif opname == "NOP":
-            # NOP in CPython 3.11+ serves several roles:
-            #   1. try-block entry marker — any NOP whose offset is in
-            #      _try_nop_offsets (which includes offset 2 for the outermost
-            #      try, plus any inner NOPs detected by _prescan_try_structure).
-            #   2. while-True loop header — when JUMP_BACKWARD exists AND there
-            #      are no POP_JUMP_IF_FALSE/TRUE instructions before the body.
-            # Regular while-loops (while cond: body) do NOT trigger here; they
-            # are detected retroactively by the JUMP_BACKWARD handler.
-            is_try_nop = (
-                instr.offset == 2 or
-                instr.offset in getattr(self, "_try_nop_offsets", ())
-            )
-            if is_try_nop:
-                if self._has_exception_handler():
-                    # Find the PUSH_EXC_INFO that handles THIS try body, using
-                    # the exception-table-derived map from prescan.  Fall back to
-                    # scanning for the nearest PUSH_EXC_INFO if the map is empty.
-                    nop_map = getattr(self, "_nop_to_push_exc", {})
-                    next_pei = nop_map.get(instr.offset, -1)
-                    if next_pei < 0:
-                        for ins in self.instructions:
-                            if ins.opname == "PUSH_EXC_INFO" and ins.offset > instr.offset:
-                                if ins.offset not in getattr(self, "_suppress_push_exc_offsets", ()):
-                                    next_pei = ins.offset
-                                    break
-                    # Only emit try: if not already inside a try block
-                    already_in_try = any(b[1] in ("try_body",) for b in self.blocks)
-                    if not already_in_try or instr.is_jump_target or instr.offset != 2:
-                        self._append_reconstructed("try:")
-                        self.indent_level += 1
-                        if next_pei > 0:
-                            # Use the finally-merge label as block end when present
-                            pef_map = getattr(self, "_push_exc_to_finally_merge", {})
-                            merge = pef_map.get(next_pei)
-                            block_end = merge if (merge is not None and merge > instr.offset) else next_pei
-                            self.blocks.append((block_end, "try_body"))
-                    return
-            # while True: — only at offset 2 for the unconditional infinite loop
-            if instr.offset == 2:
-                if self._has_jump_backward() and not self._loop_cond_before_body(instr.offset + 2):
-                    self._append_reconstructed("while True:")
-                    self.indent_level += 1
-                    end_offset = self._find_jump_backward_end()
-                    if end_offset > 0:
-                        self.blocks.append((end_offset, "while"))
-                        self._while_true_ends.add(end_offset)
-
-        elif self._is_compound_cjump(opname):
-            # ── Ternary expression detection ──────────────────────────────
-            # If _prescan_ternaries identified this jump as a ternary, evaluate
-            # both branches speculatively and push the ternary expression onto
-            # the stack instead of opening a control-flow block.
-            if instr.offset in getattr(self, "_ternary_jumps", {}):
-                store_name, then_instrs, else_instrs, is_true = \
-                    self._ternary_jumps[instr.offset]
-                cond_expr = str(self.stack.pop()) if self.stack else "?"
-                then_expr = self._eval_ternary_branch(then_instrs)
-                else_expr = self._eval_ternary_branch(else_instrs)
-                # POP_JUMP_IF_TRUE jumps to else-branch when True,
-                # so: x = then_expr if NOT cond else else_expr
-                # POP_JUMP_IF_FALSE jumps to else-branch when False,
-                # so: x = then_expr if cond else else_expr
-                if is_true:
-                    self.stack.append(f"{then_expr} if not {cond_expr} else {else_expr}")
-                else:
-                    self.stack.append(f"{then_expr} if {cond_expr} else {else_expr}")
-                # Skip past the else-branch instructions up to (but not including)
-                # the else-STORE: they have already been evaluated speculatively.
-                # The else-STORE fires normally and emits the assignment.
-                jump_target = self._get_jump_target(instr)
-                while self.pc < len(self.instructions):
-                    if self.instructions[self.pc].offset >= jump_target:
-                        break
-                    self.pc += 1
+            # FIX-17: JUMP_BACKWARD instructions that exit except/finally
+            # handlers (they jump to a finally-merge label) must NOT be
+            # treated as loop back-edges.  Skip them silently.
+            if instr.offset in getattr(self, "_exc_handler_jump_offsets", ()):
                 return
 
-            # Suppress dup-condition instructions pre-identified by pre-scan.
-            if instr.offset in self._while_body_offsets:
+            # If the prescan successfully identified the loop guard
+            # (guard_offset in _while_header_targets), it already arranged for
+            # the POP_JUMP_IF_FALSE handler to open a "while" block instead of
+            # an "if" block.  Nothing more to do — just return.
+            if body_start in self._while_header_targets:
+                return  # prescan handled it
+
+            # Fallback for Python 3.14+ where the prescan could not identify
+            # the guard (e.g. guard offset >= body_start in a do-while layout,
+            # or argval unresolved in a way the broadened search still misses).
+            # Retroactively rewrite the most recent "if" header → "while".
+            #
+            # Also suppress dup-condition instructions that already executed:
+            # find where the dup region starts (first instruction after the
+            # last STORE in the body) and drain extra stack items.
+            dup_start = instr.offset
+            for ins in self.instructions:
+                if body_start <= ins.offset < instr.offset:
+                    if ins.opname in (
+                        "STORE_NAME", "STORE_FAST", "STORE_GLOBAL",
+                        "STORE_ATTR", "STORE_SUBSCR",
+                    ):
+                        dup_start = ins.offset + 2
+
+            dup_depth = 0
+            for ins in self.instructions:
+                if dup_start <= ins.offset < instr.offset:
+                    if ins.opname in (
+                        "LOAD_CONST", "LOAD_NAME", "LOAD_FAST",
+                        "LOAD_GLOBAL", "LOAD_DEREF", "LOAD_SMALL_INT",
+                    ):
+                        dup_depth += 1
+                    elif ins.opname in ("COMPARE_OP", "BINARY_OP"):
+                        dup_depth -= 1
+            for _ in range(max(0, dup_depth)):
                 if self.stack:
                     self.stack.pop()
+
+            # Find the most recently emitted "if" header and rewrite it.
+            for bi in range(len(self.blocks) - 1, -1, -1):
+                boff, btype = self.blocks[bi]
+                if btype == "if" and boff >= instr.offset:
+                    for idx in range(len(self.reconstructed) - 1, -1, -1):
+                        if self.reconstructed[idx].lstrip().startswith("if "):
+                            self.reconstructed[idx] = self.reconstructed[idx].replace(
+                                "if ", "while ", 1
+                            )
+                            self.blocks[bi] = (boff, "while")
+                            self._while_true_ends.discard(boff)
+                            break
+                    break
+
+            return  # never treat JUMP_BACKWARD as else-opener
+
+
+
+        # Detect `break`: JUMP_FORWARD that jumps to the end of a while block.
+        for b_off, b_type in reversed(self.blocks):
+            if b_type == "while" and jump_target == b_off:
+                self._append_reconstructed("break")
                 return
-            if self.stack:
-                cond = self.stack.pop()
-                # Suppress the POP_JUMP after CHECK_EXC_MATCH.
-                if str(cond) in ("_exc_match", "_exc_info"):
-                    return
-                compound_cond_map = getattr(self, "_compound_cond_map", {})
-                compound_cond = compound_cond_map.get(instr.offset)
-                compound_precomputed = False
-                if compound_cond is not None:
-                    cond = compound_cond
-                    compound_precomputed = True
-                else:
-                    if "IF_NONE" in opname and "NOT" not in opname:
-                        # Fires on None; body runs on NOT None
-                        cond = f"{cond} is not None"
-                    elif "IF_NOT_NONE" in opname:
-                        # Fires on NOT None; body runs on None
-                        cond = f"{cond} is None"
+            if b_type == "while":
+                break  # only check innermost while
 
-                is_true = "IF_TRUE" in opname
-                jump_target = self._get_jump_target(instr)
+        if self.blocks and self.blocks[-1][1] == "if":
+            is_loop_back = opname == "JUMP_BACKWARD" and jump_target <= instr.offset
+            if self.blocks[-1][0] <= instr.offset + 2 or is_loop_back:
+                target_of_else = (
+                    jump_target if opname == "JUMP_FORWARD" else self.blocks[-1][0]
+                )
+                self.blocks.pop()
+                last_idx = len(self.reconstructed) - 1
+                while last_idx >= 0 and not self.reconstructed[last_idx].strip():
+                    last_idx -= 1
+                if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
+                    self._append_reconstructed("pass")
+                self.indent_level -= 1
 
-                # If pre-scan identified this as a while-loop guard, emit 'while'.
-                body_start = jump_target  # where the loop body begins... actually
-                # jump_target is the loop END (where we jump if condition fails).
-                # The body_start is jump_target's complement: right after this instr.
-                next_body_offset = instr.offset + 4  # skip past COMPARE_OP cache slot
-                # Use the pre-scanned mapping: guard_offset -> body_start
-                for bs, go in self._while_header_targets.items():
-                    if go == instr.offset:
-                        # This POP_JUMP is the while-loop guard
-                        if compound_precomputed:
-                            self._append_reconstructed(f"while {cond}:")
-                        elif is_true:
-                            self._append_reconstructed(f"while not {cond}:")
-                        else:
-                            self._append_reconstructed(f"while {cond}:")
+                # elif detection
+                next_i = self.pc
+                while (
+                    next_i < len(self.instructions)
+                    and self.instructions[next_i].opname in ("RESUME", "CACHE", "NOP", "NOT_TAKEN")
+                ):
+                    next_i += 1
+
+                is_elif = False
+                if next_i < len(self.instructions) and (
+                    "JUMP_IF" in self.instructions[next_i].opname
+                    or "FOR_ITER" in self.instructions[next_i].opname
+                ):
+                    orig_num = len(self.reconstructed)
+                    self._handle_instruction(self.instructions[next_i])
+                    self.pc = next_i + 1
+                    for i in range(orig_num, len(self.reconstructed)):
+                        line = self.reconstructed[i]
+                        if "if " in line:
+                            head, sep, tail = line.partition("if ")
+                            self.reconstructed[i] = f"{head}elif {tail}"
+                            is_elif = True
+                            break
+
+                if not is_elif:
+                    meaningful_range_end = (
+                        target_of_else
+                        if opname == "JUMP_FORWARD"
+                        else (
+                            self.blocks[-1][0]
+                            if self.blocks
+                            else (self.instructions[-1].offset + 2)
+                        )
+                    )
+                    meaningful = False
+                    for b_idx in range(self.pc, len(self.instructions)):
+                        ins = self.instructions[b_idx]
+                        if ins.offset >= meaningful_range_end:
+                            break
+                        if ins.opname not in ("RESUME", "CACHE", "NOP", "END_FOR", "POP_ITER", "NOT_TAKEN"):
+                            meaningful = True
+                            break
+                    if meaningful:
+                        self._append_reconstructed("else:")
                         self.indent_level += 1
-                        self.blocks.append((jump_target, "while"))
-                        return
+                        self.blocks.append((meaningful_range_end, "else"))
 
-                # and/or chain: same target as current if-block
-                if self.blocks and self.blocks[-1][1] == "if" and self.blocks[-1][0] == jump_target:
-                    prev_line = self.reconstructed.pop()
-                    p_line = prev_line.strip()
-                    prev_cond = p_line[3:].rstrip(":") if p_line.startswith("if ") else p_line.rstrip(":")
-                    self.indent_level -= 1
-                    if compound_precomputed:
-                        self._append_reconstructed(f"if {prev_cond} and {cond}:")
-                    elif is_true:
-                        self._append_reconstructed(f"if {prev_cond} or not {cond}:")
-                    else:
-                        self._append_reconstructed(f"if {prev_cond} and {cond}:")
+        # ── no-ops ─────────────────────────────────────────────────────
+
+    def _op_no_op(self, instr: BytecodeInstruction):
+        pass
+
+    def _op_nop(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        # NOP in CPython 3.11+ serves several roles:
+        #   1. try-block entry marker — any NOP whose offset is in
+        #      _try_nop_offsets (which includes offset 2 for the outermost
+        #      try, plus any inner NOPs detected by _prescan_try_structure).
+        #   2. while-True loop header — when JUMP_BACKWARD exists AND there
+        #      are no POP_JUMP_IF_FALSE/TRUE instructions before the body.
+        # Regular while-loops (while cond: body) do NOT trigger here; they
+        # are detected retroactively by the JUMP_BACKWARD handler.
+        is_try_nop = (
+            instr.offset == 2 or
+            instr.offset in getattr(self, "_try_nop_offsets", ())
+        )
+        if is_try_nop:
+            if self._has_exception_handler():
+                # Find the PUSH_EXC_INFO that handles THIS try body, using
+                # the exception-table-derived map from prescan.  Fall back to
+                # scanning for the nearest PUSH_EXC_INFO if the map is empty.
+                nop_map = getattr(self, "_nop_to_push_exc", {})
+                next_pei = nop_map.get(instr.offset, -1)
+                if next_pei < 0:
+                    for ins in self.instructions:
+                        if ins.opname == "PUSH_EXC_INFO" and ins.offset > instr.offset:
+                            if ins.offset not in getattr(self, "_suppress_push_exc_offsets", ()):
+                                next_pei = ins.offset
+                                break
+                # Only emit try: if not already inside a try block
+                already_in_try = any(b[1] in ("try_body",) for b in self.blocks)
+                if not already_in_try or instr.is_jump_target or instr.offset != 2:
+                    self._append_reconstructed("try:")
                     self.indent_level += 1
+                    if next_pei > 0:
+                        # Use the finally-merge label as block end when present
+                        pef_map = getattr(self, "_push_exc_to_finally_merge", {})
+                        merge = pef_map.get(next_pei)
+                        block_end = merge if (merge is not None and merge > instr.offset) else next_pei
+                        self.blocks.append((block_end, "try_body"))
+                return
+        # while True: — only at offset 2 for the unconditional infinite loop
+        if instr.offset == 2:
+            if self._has_jump_backward() and not self._loop_cond_before_body(instr.offset + 2):
+                self._append_reconstructed("while True:")
+                self.indent_level += 1
+                end_offset = self._find_jump_backward_end()
+                if end_offset > 0:
+                    self.blocks.append((end_offset, "while"))
+                    self._while_true_ends.add(end_offset)
+
+
+    def _op_conditional_jump(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        # ── Ternary expression detection ──────────────────────────────
+        # If _prescan_ternaries identified this jump as a ternary, evaluate
+        # both branches speculatively and push the ternary expression onto
+        # the stack instead of opening a control-flow block.
+        if instr.offset in getattr(self, "_ternary_jumps", {}):
+            store_name, then_instrs, else_instrs, is_true = \
+                self._ternary_jumps[instr.offset]
+            cond_expr = str(self.stack.pop()) if self.stack else "?"
+            then_expr = self._eval_ternary_branch(then_instrs)
+            else_expr = self._eval_ternary_branch(else_instrs)
+            # POP_JUMP_IF_TRUE jumps to else-branch when True,
+            # so: x = then_expr if NOT cond else else_expr
+            # POP_JUMP_IF_FALSE jumps to else-branch when False,
+            # so: x = then_expr if cond else else_expr
+            if is_true:
+                self.stack.append(f"{then_expr} if not {cond_expr} else {else_expr}")
+            else:
+                self.stack.append(f"{then_expr} if {cond_expr} else {else_expr}")
+            # Skip past the else-branch instructions up to (but not including)
+            # the else-STORE: they have already been evaluated speculatively.
+            # The else-STORE fires normally and emits the assignment.
+            jump_target = self._get_jump_target(instr)
+            while self.pc < len(self.instructions):
+                if self.instructions[self.pc].offset >= jump_target:
+                    break
+                self.pc += 1
+            return
+
+        # Suppress dup-condition instructions pre-identified by pre-scan.
+        if instr.offset in self._while_body_offsets:
+            if self.stack:
+                self.stack.pop()
+            return
+        if self.stack:
+            cond = self.stack.pop()
+            # Suppress the POP_JUMP after CHECK_EXC_MATCH.
+            if str(cond) in ("_exc_match", "_exc_info"):
+                return
+            compound_cond_map = getattr(self, "_compound_cond_map", {})
+            compound_cond = compound_cond_map.get(instr.offset)
+            compound_precomputed = False
+            if compound_cond is not None:
+                cond = compound_cond
+                compound_precomputed = True
+            else:
+                if "IF_NONE" in opname and "NOT" not in opname:
+                    # Fires on None; body runs on NOT None
+                    cond = f"{cond} is not None"
+                elif "IF_NOT_NONE" in opname:
+                    # Fires on NOT None; body runs on None
+                    cond = f"{cond} is None"
+
+            is_true = "IF_TRUE" in opname
+            jump_target = self._get_jump_target(instr)
+
+            # If pre-scan identified this as a while-loop guard, emit 'while'.
+            body_start = jump_target  # where the loop body begins... actually
+            # jump_target is the loop END (where we jump if condition fails).
+            # The body_start is jump_target's complement: right after this instr.
+            next_body_offset = instr.offset + 4  # skip past COMPARE_OP cache slot
+            # Use the pre-scanned mapping: guard_offset -> body_start
+            for bs, go in self._while_header_targets.items():
+                if go == instr.offset:
+                    # This POP_JUMP is the while-loop guard
+                    if compound_precomputed:
+                        self._append_reconstructed(f"while {cond}:")
+                    elif is_true:
+                        self._append_reconstructed(f"while not {cond}:")
+                    else:
+                        self._append_reconstructed(f"while {cond}:")
+                    self.indent_level += 1
+                    self.blocks.append((jump_target, "while"))
                     return
 
+            # and/or chain: same target as current if-block
+            if self.blocks and self.blocks[-1][1] == "if" and self.blocks[-1][0] == jump_target:
+                prev_line = self.reconstructed.pop()
+                p_line = prev_line.strip()
+                prev_cond = p_line[3:].rstrip(":") if p_line.startswith("if ") else p_line.rstrip(":")
+                self.indent_level -= 1
                 if compound_precomputed:
-                    self._append_reconstructed(f"if {cond}:")
+                    self._append_reconstructed(f"if {prev_cond} and {cond}:")
                 elif is_true:
-                    self._append_reconstructed(f"if not {cond}:")
+                    self._append_reconstructed(f"if {prev_cond} or not {cond}:")
                 else:
-                    self._append_reconstructed(f"if {cond}:")
+                    self._append_reconstructed(f"if {prev_cond} and {cond}:")
                 self.indent_level += 1
+                return
 
-                meaning_idx = -1
-                for i, ins in enumerate(self.instructions):
-                    if ins.offset == jump_target:
-                        meaning_idx = i
-                        break
+            if compound_precomputed:
+                self._append_reconstructed(f"if {cond}:")
+            elif is_true:
+                self._append_reconstructed(f"if not {cond}:")
+            else:
+                self._append_reconstructed(f"if {cond}:")
+            self.indent_level += 1
 
-                if meaning_idx > 0:
-                    prev = self.instructions[meaning_idx - 1]
-                    if prev.opname in (
-                        "RETURN_VALUE", "RETURN_CONST", "RAISE_VARARGS",
-                        "BREAK_LOOP", "JUMP_FORWARD",
-                    ):
-                        self.blocks.append((jump_target, "if"))
-                        return
+            meaning_idx = -1
+            for i, ins in enumerate(self.instructions):
+                if ins.offset == jump_target:
+                    meaning_idx = i
+                    break
 
-                self.blocks.append((jump_target, "if"))
+            if meaning_idx > 0:
+                prev = self.instructions[meaning_idx - 1]
+                if prev.opname in (
+                    "RETURN_VALUE", "RETURN_CONST", "RAISE_VARARGS",
+                    "BREAK_LOOP", "JUMP_FORWARD",
+                ):
+                    self.blocks.append((jump_target, "if"))
+                    return
+
+            self.blocks.append((jump_target, "if"))
 
 
 
         # ── for loop ───────────────────────────────────────────────────
-        elif opname == "FOR_ITER":
-            if self.stack:
-                iterator = self.stack.pop()
-                var_name = "_item"
-                # Peek ahead for STORE_* or UNPACK_SEQUENCE to get var name(s).
-                # Skip no-op / hint instructions that may appear between FOR_ITER
-                # and the STORE in some Python versions (e.g. NOT_TAKEN on 3.14).
-                _SKIP_OPS = frozenset({"RESUME", "CACHE", "NOP", "NOT_TAKEN",
-                                       "COPY_FREE_VARS"})
-                if self.pc < len(self.instructions):
-                    peek_pc = self.pc
-                    while (peek_pc < len(self.instructions)
-                           and self.instructions[peek_pc].opname in _SKIP_OPS):
-                        peek_pc += 1
-                    if peek_pc < len(self.instructions):
-                        next_instr = self.instructions[peek_pc]
-                        if next_instr.opname in ("STORE_NAME", "STORE_FAST"):
-                            var_name = str(next_instr.argval)
-                        elif next_instr.opname == "UNPACK_SEQUENCE":
-                            count = int(next_instr.arg) if next_instr.arg else 2
-                            names = []
-                            look = peek_pc + 1
-                            while look < len(self.instructions) and len(names) < count:
-                                li = self.instructions[look]
-                                if li.opname in ("STORE_NAME", "STORE_FAST"):
-                                    names.append(str(li.argval))
-                                    look += 1
-                                else:
-                                    break
-                            if len(names) == count:
-                                var_name = ", ".join(names)
-                                self.pc = look  # skip the stores we peeked
-                self._append_reconstructed(f"for {var_name} in {iterator}:")
-                self.indent_level += 1
-                jump_target = self._get_jump_target(instr)
-                self.blocks.append((jump_target, "for"))
-                self.stack.append(var_name)
+
+    def _op_for_iter(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        if self.stack:
+            iterator = self.stack.pop()
+            var_name = "_item"
+            # Peek ahead for STORE_* or UNPACK_SEQUENCE to get var name(s).
+            # Skip no-op / hint instructions that may appear between FOR_ITER
+            # and the STORE in some Python versions (e.g. NOT_TAKEN on 3.14).
+            _SKIP_OPS = frozenset({"RESUME", "CACHE", "NOP", "NOT_TAKEN",
+                                   "COPY_FREE_VARS"})
+            if self.pc < len(self.instructions):
+                peek_pc = self.pc
+                while (peek_pc < len(self.instructions)
+                       and self.instructions[peek_pc].opname in _SKIP_OPS):
+                    peek_pc += 1
+                if peek_pc < len(self.instructions):
+                    next_instr = self.instructions[peek_pc]
+                    if next_instr.opname in ("STORE_NAME", "STORE_FAST"):
+                        var_name = str(next_instr.argval)
+                    elif next_instr.opname == "UNPACK_SEQUENCE":
+                        count = int(next_instr.arg) if next_instr.arg else 2
+                        names = []
+                        look = peek_pc + 1
+                        while look < len(self.instructions) and len(names) < count:
+                            li = self.instructions[look]
+                            if li.opname in ("STORE_NAME", "STORE_FAST"):
+                                names.append(str(li.argval))
+                                look += 1
+                            else:
+                                break
+                        if len(names) == count:
+                            var_name = ", ".join(names)
+                            self.pc = look  # skip the stores we peeked
+            self._append_reconstructed(f"for {var_name} in {iterator}:")
+            self.indent_level += 1
+            jump_target = self._get_jump_target(instr)
+            self.blocks.append((jump_target, "for"))
+            self.stack.append(var_name)
 
         # ── collection builders ────────────────────────────────────────
-        elif opname == "BUILD_TUPLE":
-            items = []
-            num = int(instr.arg) if instr.arg is not None else 0
-            for _ in range(num):
-                if self.stack:
-                    items.insert(0, str(self.stack.pop()))
+
+    def _op_build_collection(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        items = []
+        num = int(instr.arg) if instr.arg is not None else 0
+        for _ in range(num):
+            if self.stack:
+                items.insert(0, str(self.stack.pop()))
+        self.stack.append(f"({', '.join(items)})")
+
+
+    def _op_build_collection(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        items = []
+        num = int(instr.arg) if instr.arg is not None else 0
+        for _ in range(num):
+            if self.stack:
+                items.insert(0, str(self.stack.pop()))
+        self.stack.append("[" + ", ".join(items) + "]")
+
+
+    def _op_build_collection(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        items = []
+        num = int(instr.arg) if instr.arg is not None else 0
+        for _ in range(num):
+            if self.stack:
+                items.insert(0, str(self.stack.pop()))
+        
+        if opname == "BUILD_TUPLE":
             self.stack.append(f"({', '.join(items)})")
-
         elif opname == "BUILD_LIST":
-            items = []
-            num = int(instr.arg) if instr.arg is not None else 0
-            for _ in range(num):
-                if self.stack:
-                    items.insert(0, str(self.stack.pop()))
             self.stack.append("[" + ", ".join(items) + "]")
-
         elif opname == "BUILD_SET":
-            items = []
-            num = int(instr.arg) if instr.arg is not None else 0
-            for _ in range(num):
-                if self.stack:
-                    items.insert(0, str(self.stack.pop()))
             self.stack.append("{" + ", ".join(items) + "}")
 
         # FIX-08: BUILD_MAP
-        elif opname == "BUILD_MAP":
-            num = int(instr.arg) if instr.arg is not None else 0
-            pairs = []
-            for _ in range(num):
-                val = str(self.stack.pop()) if self.stack else "?"
-                key = str(self.stack.pop()) if self.stack else "?"
-                pairs.insert(0, f"{key}: {val}")
-            self.stack.append("{" + ", ".join(pairs) + "}")
 
-        elif opname == "BUILD_CONST_KEY_MAP":
-            # TOS is tuple of keys; below are values
-            keys_raw = str(self.stack.pop()) if self.stack else "()"
-            keys = [k.strip("'\" ") for k in keys_raw.strip("()").split(",") if k.strip()]
-            num = int(instr.arg) if instr.arg is not None else len(keys)
-            vals_list = []
-            for _ in range(num):
-                vals_list.insert(0, str(self.stack.pop()) if self.stack else "?")
-            pairs = [f"'{k}': {v}" for k, v in zip(keys, vals_list)]
-            self.stack.append("{" + ", ".join(pairs) + "}")
+    def _op_build_map(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        num = int(instr.arg) if instr.arg is not None else 0
+        pairs = []
+        for _ in range(num):
+            val = str(self.stack.pop()) if self.stack else "?"
+            key = str(self.stack.pop()) if self.stack else "?"
+            pairs.insert(0, f"{key}: {val}")
+        self.stack.append("{" + ", ".join(pairs) + "}")
 
-        elif opname in ("GET_ITER", "UNPACK_SEQUENCE"):
-            pass  # handled contextually in FOR_ITER peek above
 
-        elif opname == "LIST_EXTEND":
-            if len(self.stack) >= 2:
-                it = str(self.stack.pop())
-                lst = str(self.stack.pop())
-                if lst == "[]":
-                    self.stack.append(f"[*{it}]" if it.startswith("(") else f"list({it})")
-                else:
-                    self.stack.append(f"[*{lst}, *{it}]")
+    def _op_build_const_key_map(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        # TOS is tuple of keys; below are values
+        keys_raw = str(self.stack.pop()) if self.stack else "()"
+        keys = [k.strip("'\" ") for k in keys_raw.strip("()").split(",") if k.strip()]
+        num = int(instr.arg) if instr.arg is not None else len(keys)
+        vals_list = []
+        for _ in range(num):
+            vals_list.insert(0, str(self.stack.pop()) if self.stack else "?")
+        pairs = [f"'{k}': {v}" for k, v in zip(keys, vals_list)]
+        self.stack.append("{" + ", ".join(pairs) + "}")
 
-        elif opname == "DICT_MERGE":
-            if len(self.stack) >= 2:
-                src = str(self.stack.pop())
-                base = str(self.stack.pop())
-                self.stack.append(f"{{**{base}, **{src}}}")
 
-        elif opname == "DICT_UPDATE":
-            if len(self.stack) >= 2:
-                src = str(self.stack.pop())
-                base = str(self.stack.pop())
-                self.stack.append(f"{{**{base}, **{src}}}")
+    def _op_list_extend(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        if len(self.stack) >= 2:
+            it = str(self.stack.pop())
+            lst = str(self.stack.pop())
+            if lst == "[]":
+                self.stack.append(f"[*{it}]" if it.startswith("(") else f"list({it})")
+            else:
+                self.stack.append(f"[*{lst}, *{it}]")
+
+
+    def _op_dict_merge(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        if len(self.stack) >= 2:
+            src = str(self.stack.pop())
+            base = str(self.stack.pop())
+            self.stack.append(f"{{**{base}, **{src}}}")
+
+
+    def _op_dict_merge(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        if len(self.stack) >= 2:
+            src = str(self.stack.pop())
+            base = str(self.stack.pop())
+            self.stack.append(f"{{**{base}, **{src}}}")
 
         # ── secondary LOAD paths (dead-code guard — already handled above
         #    for the primary names; this catches any variant not in the top
         #    LOAD_* list, e.g. new fused opcodes in future versions) ──────
-        elif "LOAD_FAST" in opname or "LOAD_GLOBAL" in opname:
-            if isinstance(instr.argval, (tuple, list)):
-                for n in instr.argval:
-                    self.stack.append(str(n))
-            else:
-                self.stack.append(str(instr.argval))
 
-        elif opname in ("LOAD_ATTR", "LOAD_METHOD"):
-            obj = self.stack.pop() if self.stack else "obj"
-            name = str(instr.argval)
-            if " + " in name:
-                name = name.split(" + ")[0]
-            s_obj = str(obj).strip("'\"") if str(obj) in ("self", "cls") else str(obj)
-            self.stack.append(f"{s_obj}.{name}")
-
-        elif opname == "LOAD_SUPER_ATTR":
-            name = str(instr.argval)
-            if " + " in name:
-                name = name.split(" + ")[0]
-            self.stack.append(f"super().{name}")
-
-        elif opname == "LOAD_FROM_DICT_OR_GLOBALS":
+    def _op_load_fallback(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        if isinstance(instr.argval, (tuple, list)):
+            for n in instr.argval:
+                self.stack.append(str(n))
+        else:
             self.stack.append(str(instr.argval))
 
-        elif opname == "YIELD_VALUE":
-            val = self.stack.pop() if self.stack else "None"
-            self._append_reconstructed(f"yield {val}")
 
-        elif opname == "DELETE_NAME" or opname == "DELETE_FAST" or opname == "DELETE_GLOBAL":
-            # Suppress except-cleanup `del e` for any except-bound name.
-            bound = getattr(self, "_exc_bound_names", set())
-            if str(instr.argval) in bound:
-                if str(instr.argval) == getattr(self, "_exc_cleanup_name", None):
-                    self._exc_cleanup_name = None
-                return
-            self._append_reconstructed(f"del {instr.argval}")
+    def _op_load_attr(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        obj = self.stack.pop() if self.stack else "obj"
+        name = str(instr.argval)
+        if " + " in name:
+            name = name.split(" + ")[0]
+        s_obj = str(obj).strip("'\"") if str(obj) in ("self", "cls") else str(obj)
+        self.stack.append(f"{s_obj}.{name}")
+
+
+    def _op_load_super_attr(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        name = str(instr.argval)
+        if " + " in name:
+            name = name.split(" + ")[0]
+        self.stack.append(f"super().{name}")
+
+
+    def _op_load_from_dict_or_globals(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        self.stack.append(str(instr.argval))
+
+
+    def _op_yield_value(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        val = self.stack.pop() if self.stack else "None"
+        self._append_reconstructed(f"yield {val}")
+
+
+    def _op_delete(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        # Suppress except-cleanup `del e` for any except-bound name.
+        bound = getattr(self, "_exc_bound_names", set())
+        if str(instr.argval) in bound:
+            if str(instr.argval) == getattr(self, "_exc_cleanup_name", None):
+                self._exc_cleanup_name = None
+            return
+        self._append_reconstructed(f"del {instr.argval}")
 
         # ── assert ─────────────────────────────────────────────────────
-        elif opname == "LOAD_ASSERTION_ERROR":
-            self.stack.append("AssertionError")
+
+    def _op_load_assertion_error(self, instr: BytecodeInstruction):
+        opname = instr.opname
+        self.stack.append("AssertionError")
+
 
 
 # ---------------------------------------------------------------------------
