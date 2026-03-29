@@ -570,9 +570,9 @@ class TestExceptions(unittest.TestCase):
         out = decompile(src)
         assert_contains(out, "try:", "except ValueError:", "finally:", "print('done')")
         lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
-        try_pos    = next(i for i, l in enumerate(lines) if l == "try:")
-        except_pos = next(i for i, l in enumerate(lines) if l.startswith("except"))
-        finally_pos = next(i for i, l in enumerate(lines) if l == "finally:")
+        try_pos    = next(i for i, ln in enumerate(lines) if ln == "try:")
+        except_pos = next(i for i, ln in enumerate(lines) if ln.startswith("except"))
+        finally_pos = next(i for i, ln in enumerate(lines) if ln == "finally:")
         self.assertLess(try_pos, except_pos, "try: must come before except:")
         self.assertLess(except_pos, finally_pos, "except: must come before finally:")
 
@@ -641,8 +641,8 @@ class TestExceptions(unittest.TestCase):
         )
         out = decompile(src)
         lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
-        except_pos  = next((i for i, l in enumerate(lines) if l.startswith("except")), -1)
-        finally_pos = next((i for i, l in enumerate(lines) if l == "finally:"), -1)
+        except_pos  = next((i for i, ln in enumerate(lines) if ln.startswith("except")), -1)
+        finally_pos = next((i for i, ln in enumerate(lines) if ln == "finally:"), -1)
         self.assertGreater(finally_pos, except_pos,
                            f"finally: appeared before except: in:\n{out}")
 

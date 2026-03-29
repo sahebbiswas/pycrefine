@@ -245,6 +245,7 @@ class BytecodeInstruction:
     offset: int
     starts_line: Optional[int]
     is_jump_target: bool
+    argrepr: str = ""
 
 
 
@@ -378,6 +379,7 @@ class DecompilerBase:
                 offset=instr.offset,
                 starts_line=instr.starts_line,
                 is_jump_target=instr.is_jump_target,
+                argrepr=instr.argrepr,
             ))
 
     def decompile(self) -> str:
@@ -413,6 +415,30 @@ class DecompilerBase:
             return False
         return True
 
+    def is_compiler_generated_return(self, instr_index: int) -> bool:
+        """
+        Determine if the return at instr_index is the implicit 'return None'
+        added by the compiler at the end of a function or module.
+        Must be the final unbranched exit point.
+        """
+        # Save current state for lookahead
+        old_pc = self.pc
+        self.pc = instr_index + 1
+        effectively_last = self.is_effectively_last()
+        self.pc = old_pc
+
+        if not effectively_last:
+            return False
+
+        # If we're inside any user-facing control flow block, it's likely 
+        # an explicit return in the source.
+        # (excluding internal markers like finally_wrapper/exc_cleanup if they wrap the end)
+        user_blocks = {"if", "else", "for", "while", "try_body", "except", "finally_body"}
+        for _, btype in getattr(self, "blocks", []):
+            if btype in user_blocks:
+                return False
+
+        return True
 
 # ---------------------------------------------------------------------------
 # Generic decompiler (3.10–3.13 primary path)
@@ -544,8 +570,7 @@ class DecompilerGeneric(DecompilerBase):
     def _close_blocks(self, offset: int):
         """Close any blocks whose end offset we have reached or passed."""
         _NO_PASS_TYPES = frozenset({
-            "try_body", "exc_cleanup", "with", "with_body", "for",
-            "else", "finally_body", "finally_wrapper",
+            "exc_cleanup", "finally_wrapper",
         })
         _NO_INDENT_TYPES = frozenset({"finally_wrapper"})
 
@@ -568,9 +593,6 @@ class DecompilerGeneric(DecompilerBase):
         if not line:
             return
             
-        # Suppress redundant trailing 'return None'
-        if line == "return None" and self.is_effectively_last():
-            return
 
         # Blank line before major blocks
         if line.startswith(("def ", "class ", "if ", "for ", "while ", "try:")) and self.reconstructed:
@@ -1804,19 +1826,29 @@ class DecompilerGeneric(DecompilerBase):
     def _render_finally_body(self, sub_instrs: list) -> list:
         """Render a list of instructions as source lines (for deferred finally)."""
         # Simple stack-based mini-eval to convert the instruction sequence
-        # (which is always simple call sequences) to source lines.
+        # (which can now include stores and complex ops) to source lines.
         stack: list = []
         lines: list = []
+
+        # Standard decompiler skip ops
+        _SKIP = {"RESUME", "CACHE", "NOP", "NOT_TAKEN"}
+
         for ins in sub_instrs:
             op = ins.opname
-            if op in ("RESUME", "CACHE", "NOP", "NOT_TAKEN", "POP_TOP"):
-                if op == "POP_TOP" and stack:
-                    stmt = stack.pop()
-                    if str(stmt) not in ("None", "_exc_info", "_exc_match", "_exc"):
-                        lines.append(str(stmt))
+            if op in _SKIP:
                 continue
+
+            if op == "POP_TOP":
+                if stack:
+                    stmt = str(stack.pop())
+                    # Only emit as a line if it's not a boring constant or sentinel
+                    if stmt not in ("None", "_exc_info", "_exc_match", "True", "False"):
+                        lines.append(stmt)
+                continue
+
+            # --- Loading ---
             if op in ("LOAD_CONST", "LOAD_NAME", "LOAD_FAST", "LOAD_GLOBAL",
-                      "LOAD_SMALL_INT", "LOAD_GLOBAL_MODULE"):
+                      "LOAD_SMALL_INT", "LOAD_GLOBAL_MODULE", "LOAD_DEREF"):
                 if isinstance(ins.argval, types.CodeType):
                     stack.append(("code", ins.argval))
                 else:
@@ -1827,33 +1859,84 @@ class DecompilerGeneric(DecompilerBase):
                     if op in ("LOAD_CONST", "LOAD_SMALL_INT"):
                         stack.append(repr(val))
                     else:
-                        # Strip NULL/self prefix from LOAD_GLOBAL argval
                         s = str(val)
-                        if " + NULL" in s or "|NULL" in s or "|self" in s:
-                            s = s.split(" + ")[0].split("|")[0]
+                        if " + NULL" in s: s = s.split(" + ")[0]
+                        if "|" in s: s = s.split("|")[0]
                         stack.append(s)
-            elif op in ("LOAD_ATTR", "LOAD_METHOD", "GET_ATTR"):
+                continue
+
+            if op in ("LOAD_ATTR", "LOAD_METHOD", "GET_ATTR"):
                 obj = stack.pop() if stack else "obj"
-                name = str(ins.argval)
-                if " + " in name:
-                    name = name.split(" + ")[0]
+                name = str(ins.argval).split(" + ")[0].split("|")[0]
                 stack.append(f"{obj}.{name}")
-            elif op == "CALL":
-                num = int(ins.arg) if ins.arg is not None else 0
+                continue
+
+            # --- Storing / Deleting ---
+            if op in ("STORE_NAME", "STORE_FAST", "STORE_GLOBAL", "STORE_DEREF"):
+                val = stack.pop() if stack else "None"
+                target = str(ins.argval)
+                lines.append(f"{target} = {val}")
+                continue
+
+            if op in ("DELETE_NAME", "DELETE_FAST", "DELETE_GLOBAL"):
+                target = str(ins.argval)
+                lines.append(f"del {target}")
+                continue
+
+            # --- Control flow (simple) ---
+            if op in ("RETURN_VALUE", "RETURN_CONST"):
+                if op == "RETURN_CONST":
+                    val = repr(ins.argval)
+                else:
+                    val = stack.pop() if stack else "None"
+                lines.append(f"return {val}")
+                continue
+
+            # --- Expression Building ---
+            if op == "CALL":
+                num = int(ins.arg or 0)
                 args = []
                 for _ in range(num):
                     args.insert(0, str(stack.pop()) if stack else "?")
                 func = stack.pop() if stack else "?"
-                if " + NULL" in str(func) or "|NULL" in str(func):
-                    func = str(func).split(" + ")[0].split("|")[0]
-                stack.append(f"{func}({', '.join(args)})")
-            elif op in ("LOAD_DEREF",):
-                stack.append(str(ins.argval))
+                # Clean func name from NULL/self markers
+                s_func = str(func).split(" + ")[0].split("|")[0]
+                stack.append(f"{s_func}({', '.join(args)})")
+                continue
+
+            if op == "BINARY_OP":
+                rhs = stack.pop() if stack else "?"
+                lhs = stack.pop() if stack else "?"
+                op_sym = str(ins.argrepr) if ins.argrepr else "+"
+                stack.append(f"({lhs} {op_sym} {rhs})")
+                continue
+
+            if op == "BUILD_LIST":
+                num = int(ins.arg or 0)
+                items = [str(stack.pop()) if stack else "?" for _ in range(num)]
+                stack.append(f"[{', '.join(reversed(items))}]")
+                continue
+
+            if op == "BUILD_MAP":
+                num = int(ins.arg or 0)
+                pairs = []
+                for _ in range(num):
+                    v = stack.pop() if stack else "?"
+                    k = stack.pop() if stack else "?"
+                    pairs.insert(0, f"{k}: {v}")
+                stack.append(f"{{ {', '.join(pairs)} }}")
+                continue
+
+            # --- Fallback ---
+            # For truly complex or unknown ops, emit disassembly as a comment
+            lines.append(f"# {ins.opname} {ins.argrepr or ''}")
+
         # Flush remaining stack items as statements
         for item in stack:
             s = str(item)
-            if s not in ("None", "_exc_info", "_exc_match"):
+            if s not in ("None", "_exc_info", "_exc_match", "True", "False"):
                 lines.append(s)
+
         return lines
 
     def _emit_deferred_finally(self, merge_offset: int, header_indent: int = -1) -> None:
@@ -2289,7 +2372,7 @@ class DecompilerGeneric(DecompilerBase):
             # Peek ahead for the STORE that binds the 'as' variable (3.9/3.10).
             # In 3.9 the instruction immediately after SETUP_WITH is always
             # STORE_FAST / STORE_NAME binding the __enter__() return value.
-            as_var = "_result"
+            as_var = None
             _SKIP_SW = frozenset({"RESUME", "CACHE", "NOP", "NOT_TAKEN"})
             look = self.pc
             while look < len(self.instructions) and self.instructions[look].opname in _SKIP_SW:
@@ -2299,7 +2382,10 @@ class DecompilerGeneric(DecompilerBase):
             ):
                 as_var = str(self.instructions[look].argval)
                 self.pc = look + 1   # consume the STORE so it isn't processed again
-            self._append_reconstructed(f"with {ctx} as {as_var}:")
+            if as_var:
+                self._append_reconstructed(f"with {ctx} as {as_var}:")
+            else:
+                self._append_reconstructed(f"with {ctx}:")
             self.indent_level += 1
             jump_target = self._get_jump_target(instr)
             self.blocks.append((jump_target, "with"))
@@ -2492,15 +2578,14 @@ class DecompilerGeneric(DecompilerBase):
             if self.stack:
                 val = self.stack.pop()
                 val_str = str(val)
-                is_last = self.is_effectively_last()
-                if val_str == "None" and is_last:
+                # Use the new predicate for smarter suppression
+                is_compiler_gen = (val_str == "None" and self.is_compiler_generated_return(self.pc - 1))
+                
+                if is_compiler_gen:
                     pass
                 elif "__class__" in val_str or "__classdict__" in val_str:
                     pass
-                elif self.starts_as_function:
-                    if val_str != "None" or not is_last:
-                        self._append_reconstructed(f"return {val}")
-                elif val_str != "None" and not is_last:
+                else:
                     self._append_reconstructed(f"return {val}")
             return
 
@@ -2515,22 +2600,13 @@ class DecompilerGeneric(DecompilerBase):
                 )
                 if in_while_true:
                     self._append_reconstructed("break")
-                elif not self.is_effectively_last():
-                    if self.starts_as_function:
-                        # Only return if it's NOT the implicit None-return for a function
-                        # (this occurs inside a block that logically ends here)
-                        pass
+                elif not self.is_compiler_generated_return(self.pc - 1):
+                    self._append_reconstructed("return None")
                 return
+
             val = instr.argval
             val_str = str(val)
-            is_last = self.is_effectively_last()
-            if val_str == "None" and is_last:
-                pass
-            elif self.starts_as_function:
-                if val_str != "None" or not is_last:
-                    self._append_reconstructed("return " + repr(val))
-            elif val_str != "None":
-                self._append_reconstructed("return " + repr(val))
+            self._append_reconstructed("return " + repr(val))
 
         # ── POP_TOP ────────────────────────────────────────────────────
         elif opname == "POP_TOP":
