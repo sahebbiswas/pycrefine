@@ -28,7 +28,7 @@ The script is entirely self-contained with no third-party dependencies required.
 *   **Automatic Version Navigation:** Reads the magic number from the `.pyc` header and seamlessly routes execution to the appropriate decompiler logic.
 *   **Cross-Version Parsing:** You can run `pycrefine` on newer Python versions (e.g., 3.12) and perfectly parse a `.pyc` compiled by an older version (e.g., 3.9), avoiding any native bytecode incompatibility issues.
 *   **PEP 552 Support:** Correctly processes both timestamp-based and hash-based `.pyc` headers introduced dynamically in Python 3.7.
-*   **Dispatch Table Architecture:** The decompiler engine uses a fast, modular opcode dispatch mapping, making it trivial to extend and maintain handlers for newer Python versions.
+*   **Dispatch Table Architecture:** The decompiler engine uses a modular opcode dispatch mapping designed to simplify extending and maintaining opcode handlers across newer Python versions.
 
 ### Example Decompilation
 
