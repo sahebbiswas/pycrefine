@@ -3022,13 +3022,23 @@ class DecompilerGeneric(DecompilerBase):
             if matched_while:
                 return
                 
-            # Non-break forward jump -> reconstruct as else-branch 
-            # (unless it's an exc_handler_jump which jumps out of an except block)
+            # Non-break forward jump -> reconstruct as else-branch only when a
+            # prior if-block whose target matches jump_target is actually open.
+            # (Exception-handler jumps are always excluded.)
             if instr.offset not in getattr(self, "_exc_handler_jump_offsets", ()):
-                self.indent_level -= 1
-                self._append_reconstructed("else:")
-                self.indent_level += 1
-                self.blocks.append((jump_target, "else"))
+                # Find the most recent "if" block in self.blocks.
+                prior_if_target = None
+                for b_off, b_type in reversed(self.blocks):
+                    if b_type == "if":
+                        prior_if_target = b_off
+                        break
+                # Only emit else: when the if-block targets the same offset
+                # this JUMP_FORWARD is jumping to (i.e. the if/else split).
+                if prior_if_target is not None and prior_if_target == jump_target:
+                    self.indent_level -= 1
+                    self._append_reconstructed("else:")
+                    self.indent_level += 1
+                    self.blocks.append((jump_target, "else"))
             return
         # detect while loop.
         # 3.11+ CPython compiles `while cond: body` as:
