@@ -1891,7 +1891,7 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
             I(0, "LOAD_NAME",        0, "n",  4, None, False),
             I(0, "LOAD_CONST",       1, 3,    6, None, False),
             I(0, "COMPARE_OP",       0, "<",  8, None, False),
-            I(0, "POP_JUMP_IF_FALSE",18, 18, 10, None, False),
+            I(0, "POP_JUMP_IF_FALSE",22, 22, 10, None, False),
             # body at offset 12
             I(0, "LOAD_NAME",        0, "n", 12, None, False),
             I(0, "LOAD_CONST",       2, 1,   14, None, False),
@@ -3018,9 +3018,204 @@ class TestCompoundConditions(unittest.TestCase):
             "    return False\n"
         )
         out = decompile(src)
+        src = (
+            "def test(x, y):\n"
+            "    if x > 0:\n"
+            "        if y > 0:\n"
+            "            return 1\n"
+            "        return 2\n"
+            "    return 0\n"
+        )
+        out = decompile(src)
+        assert_contains(out, "if x > 0:", "if y > 0:", "return 1", "return 2", "return 0")
+        header_count = sum(1 for line in out.splitlines() if line.lstrip().startswith("if "))
+        self.assertEqual(header_count, 2)
+
+    def test_compound_with_function_calls(self):
+        """
+        Verify that function calls with parentheses do not disrupt precedence tracking.
+        """
+        src = "def f(x, y):\n    if len(x) > 0 and (y is None or x[0] == 1):\n        return True\n    return False\n"
+        out = decompile(src)
+        # Verify that len(x) is NOT wrapped, but (y is None or x[0] == 1) IS wrapped correctly.
+        self.assertTrue("len(x) > 0 and (y is None or x[0] == 1)" in out)
+        header_count = sum(1 for line in out.splitlines() if line.lstrip().startswith("if "))
+        self.assertEqual(header_count, 1)
+
+    def test_compound_flat_shared_target(self):
+        """
+        Verify that contiguous flat operands with shared jump targets (common in None checks)
+        do not trigger RecursionError and are grouped correctly.
+        """
+        src = (
+            "def test(a, b, c, d, e):\n"
+            "    if a is None and b is None and c is None and d is None and e is None:\n"
+            "        return True\n"
+            "    return False\n"
+        )
+        out = decompile(src)
         assert_contains(out, "if a is None and b is None and c is None and d is None and e is None:")
         header_count = sum(1 for line in out.splitlines() if line.lstrip().startswith("if "))
         self.assertEqual(header_count, 1)
+
+
+# ---------------------------------------------------------------------------
+# Infinite loops (while True:) — regression for guard mis-identification
+# ---------------------------------------------------------------------------
+
+class TestInfiniteLoops(unittest.TestCase):
+    """Regression tests for correct decompilation of while-True loops.
+
+    The core bug fixed was that an outer if-guard (whose target jumped beyond
+    the JUMP_BACKWARD) was being misidentified as the while-loop guard.  The
+    fix adds a fall-through reachability check: only guards whose fall-through
+    lands directly at the loop body_start are accepted.
+    """
+
+    def test_simple_while_true(self):
+        """A bare while True loop must decompile to 'while True:', not a for/if."""
+        src = (
+            "def f():\n"
+            "    while True:\n"
+            "        x = 1\n"
+        )
+        out = decompile(src)
+        self.assertIn("while True:", out, f"'while True:' missing from output:\n{out}")
+        self.assertNotIn("while x", out, f"Unexpected non-True while condition:\n{out}")
+
+    def test_while_true_with_break_cond(self):
+        """while True loop with a break condition must emit while True: and not
+        treat the break condition as the while guard."""
+        src = (
+            "def f():\n"
+            "    while True:\n"
+            "        x = 1\n"
+            "        if x > 0:\n"
+            "            break\n"
+        )
+        out = decompile(src)
+        self.assertIn("while True:", out, f"'while True:' missing:\n{out}")
+        # The if-guard inside must not become the while condition
+        self.assertNotIn("while x", out)
+
+    def test_outer_if_inner_while_true(self):
+        """An outer 'if' enclosing an inner 'while True' must NOT collapse the
+        'if' into a while.  This is the exact pattern from test_infinite.py."""
+        src = (
+            "def me(type_char):\n"
+            "    if type_char == '{':\n"
+            "        res = {}\n"
+            "        while True:\n"
+            "            k = 1\n"
+            "            if k is None:\n"
+            "                break\n"
+            "            res[k] = 2\n"
+            "        return res\n"
+        )
+        out = decompile(src)
+        # The outer block must be an 'if', not a 'while'
+        self.assertNotIn(
+            "while type_char", out,
+            f"Outer 'if type_char == ...' incorrectly emitted as 'while':\n{out}",
+        )
+        self.assertIn(
+            "if type_char == '{':", out,
+            f"Outer 'if type_char == ...' missing:\n{out}",
+        )
+        # The inner loop must be emitted as 'while True:'
+        self.assertIn(
+            "while True:", out,
+            f"Inner 'while True:' missing:\n{out}",
+        )
+
+    def test_outer_if_inner_while_true_no_duplicate_while(self):
+        """Exactly one 'while True:' header must appear — not zero, not two."""
+        src = (
+            "def me(type_char):\n"
+            "    if type_char == '{':\n"
+            "        res = {}\n"
+            "        while True:\n"
+            "            k = 1\n"
+            "            if k is None:\n"
+            "                break\n"
+            "            res[k] = 2\n"
+            "        return res\n"
+        )
+        out = decompile(src)
+        count = out.count("while True:")
+        self.assertEqual(
+            count, 1,
+            f"Expected exactly 1 'while True:' header, got {count}:\n{out}",
+        )
+
+    def test_test_infinite_pattern(self):
+        """Full reproduction of test_infinite.py: outer if → dict init → while True
+        loop that reads keys until None, then stores values."""
+        src = (
+            "import random\n"
+            "\n"
+            "def load():\n"
+            "    return random.randint(0, 10)\n"
+            "\n"
+            "def me(type_char):\n"
+            "    if type_char == '{':\n"
+            "        res_dict = {}\n"
+            "        while True:\n"
+            "            key = load()\n"
+            "            if key is None:\n"
+            "                break\n"
+            "            res_dict[key] = load()\n"
+            "        return res_dict\n"
+        )
+        out = decompile(src)
+        # Must be an 'if', not a 'while' for the outer check
+        self.assertNotIn(
+            "while type_char", out,
+            f"Outer condition misidentified as while-guard:\n{out}",
+        )
+        assert_contains(out, "if type_char == '{':", "while True:", "res_dict", "load()")
+
+    def test_while_true_not_misidentified_as_if(self):
+        """A top-level while True loop (no outer if) must not be emitted as if."""
+        src = (
+            "def f(items):\n"
+            "    while True:\n"
+            "        x = items.pop()\n"
+            "        if x is None:\n"
+            "            break\n"
+        )
+        out = decompile(src)
+        self.assertIn("while True:", out, f"'while True:' missing:\n{out}")
+        # Must not have a bare 'if items' or similar as loop guard
+        lines = [ln.strip() for ln in out.splitlines() if ln.strip().startswith("while ")]
+        for ln in lines:
+            self.assertIn("True", ln, f"Non-True while condition: {ln!r}")
+
+    def test_while_true_body_indented(self):
+        """Body of a while True loop must be indented relative to the header."""
+        src = (
+            "def f():\n"
+            "    while True:\n"
+            "        x = 1\n"
+            "        if x > 5:\n"
+            "            break\n"
+        )
+        out = decompile(src)
+        lines = out.splitlines()
+        while_lines = [(i, ln) for i, ln in enumerate(lines) if "while True:" in ln]
+        self.assertTrue(while_lines, f"No 'while True:' found:\n{out}")
+        while_indent = len(while_lines[0][1]) - len(while_lines[0][1].lstrip())
+        body_lines = [
+            ln for ln in lines[while_lines[0][0]+1:]
+            if ln.strip() and not ln.strip().startswith("def ")
+        ]
+        if body_lines:
+            body_indent = len(body_lines[0]) - len(body_lines[0].lstrip())
+            self.assertGreater(
+                body_indent, while_indent,
+                f"Body not indented deeper than while True: header:\n{out}",
+            )
+
 
 
 # ---------------------------------------------------------------------------

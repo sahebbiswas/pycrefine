@@ -1451,6 +1451,13 @@ class DecompilerGeneric(DecompilerBase):
             #
             # Also: dis may leave argval unresolved on 3.14, so compute the
             # absolute target two ways and take the larger.
+            # Trivial opcodes that can appear between a guard's fall-through
+            # and the loop body_start without meaning the guard is not a real
+            # while-guard (e.g. NOT_TAKEN hint, NOP, RESUME, etc.).
+            _TRIVIAL_OPS = frozenset({
+                "NOP", "RESUME", "NOT_TAKEN", "CACHE", "COPY_FREE_VARS",
+            })
+
             guard_offset = -1
             guard_dist = float('inf')   # distance from body_start
             for ins in self.instructions:
@@ -1463,13 +1470,32 @@ class DecompilerGeneric(DecompilerBase):
                 if ins.offset > jb.offset:
                     continue
                 # Compute absolute target robustly
-                t_argval  = self._get_jump_target(ins)
-                arg       = ins.arg if ins.arg is not None else 0
-                t_forward = ins.offset + 2 + (arg * 2)
-                t = max(t_argval, t_forward)
+                t_argval = self._get_jump_target(ins)
+                if t_argval >= 0:
+                    t = t_argval
+                else:
+                    arg = ins.arg if ins.arg is not None else 0
+                    # Fallback for unresolved target (e.g. 3.14+ relative jumps)
+                    t = ins.offset + 2 + (arg * 2)
+                
                 # Target must exit the loop (land at or beyond jb)
                 if t < jb.offset:
                     continue
+                # For guards positioned BEFORE body_start: the fall-through
+                # (ins.offset+2) must reach body_start via only trivial
+                # instructions (NOP, NOT_TAKEN, RESUME, CACHE).  If there are
+                # real (store/load/call) instructions between the fall-through
+                # and body_start, this is an outer 'if' guard, not a while-guard.
+                if ins.offset < body_start:
+                    fall_through = ins.offset + 2
+                    only_trivial = True
+                    for scan in self.instructions:
+                        if fall_through <= scan.offset < body_start:
+                            if scan.opname not in _TRIVIAL_OPS:
+                                only_trivial = False
+                                break
+                    if not only_trivial:
+                        continue  # outer if-guard, skip it
                 # Pick the guard closest to body_start (from either direction)
                 dist = abs(ins.offset - body_start)
                 if dist < guard_dist:
@@ -3116,6 +3142,14 @@ class DecompilerGeneric(DecompilerBase):
         opname = instr.opname
         jump_target = self._get_jump_target(instr)
 
+        # Detect `break`: forward jump that lands at the exact end of a while loop.
+        if instr.opname in ("JUMP_FORWARD", "JUMP_ABSOLUTE") and isinstance(jump_target, int) and jump_target > instr.offset:
+            for b_off, b_type in reversed(self.blocks):
+                if b_type == "while" and jump_target == b_off:
+                    self._append_reconstructed("break")
+                    return
+                if b_type == "while":
+                    break  # only check innermost loop
         # FIX-11: detect while loop.
         # 3.11+ CPython compiles `while cond: body` as:
         #   A:  <condition>; POP_JUMP_IF_FALSE(end)  ← condition check #1
@@ -3197,75 +3231,6 @@ class DecompilerGeneric(DecompilerBase):
 
 
 
-        # Detect `break`: JUMP_FORWARD that jumps to the end of a while block.
-        for b_off, b_type in reversed(self.blocks):
-            if b_type == "while" and jump_target == b_off:
-                self._append_reconstructed("break")
-                return
-            if b_type == "while":
-                break  # only check innermost while
-
-        if self.blocks and self.blocks[-1][1] == "if":
-            is_loop_back = opname == "JUMP_BACKWARD" and jump_target <= instr.offset
-            if self.blocks[-1][0] <= instr.offset + 2 or is_loop_back:
-                target_of_else = (
-                    jump_target if opname == "JUMP_FORWARD" else self.blocks[-1][0]
-                )
-                self.blocks.pop()
-                last_idx = len(self.reconstructed) - 1
-                while last_idx >= 0 and not self.reconstructed[last_idx].strip():
-                    last_idx -= 1
-                if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
-                    self._append_reconstructed("pass")
-                self.indent_level -= 1
-
-                # elif detection
-                next_i = self.pc
-                while (
-                    next_i < len(self.instructions)
-                    and self.instructions[next_i].opname in ("RESUME", "CACHE", "NOP", "NOT_TAKEN")
-                ):
-                    next_i += 1
-
-                is_elif = False
-                if next_i < len(self.instructions) and (
-                    "JUMP_IF" in self.instructions[next_i].opname
-                    or "FOR_ITER" in self.instructions[next_i].opname
-                ):
-                    orig_num = len(self.reconstructed)
-                    self._handle_instruction(self.instructions[next_i])
-                    self.pc = next_i + 1
-                    for i in range(orig_num, len(self.reconstructed)):
-                        line = self.reconstructed[i]
-                        if "if " in line:
-                            head, sep, tail = line.partition("if ")
-                            self.reconstructed[i] = f"{head}elif {tail}"
-                            is_elif = True
-                            break
-
-                if not is_elif:
-                    meaningful_range_end = (
-                        target_of_else
-                        if opname == "JUMP_FORWARD"
-                        else (
-                            self.blocks[-1][0]
-                            if self.blocks
-                            else (self.instructions[-1].offset + 2)
-                        )
-                    )
-                    meaningful = False
-                    for b_idx in range(self.pc, len(self.instructions)):
-                        ins = self.instructions[b_idx]
-                        if ins.offset >= meaningful_range_end:
-                            break
-                        if ins.opname not in ("RESUME", "CACHE", "NOP", "END_FOR", "POP_ITER", "NOT_TAKEN"):
-                            meaningful = True
-                            break
-                    if meaningful:
-                        self._append_reconstructed("else:")
-                        self.indent_level += 1
-                        self.blocks.append((meaningful_range_end, "else"))
-
         # ── no-ops ─────────────────────────────────────────────────────
 
     def _op_no_op(self, instr: BytecodeInstruction):
@@ -3277,8 +3242,8 @@ class DecompilerGeneric(DecompilerBase):
         #   1. try-block entry marker — any NOP whose offset is in
         #      _try_nop_offsets (which includes offset 2 for the outermost
         #      try, plus any inner NOPs detected by _prescan_try_structure).
-        #   2. while-True loop header — when JUMP_BACKWARD exists AND there
-        #      are no POP_JUMP_IF_FALSE/TRUE instructions before the body.
+        #   2. while-True loop header — when the NOP is the body_start of a
+        #      while-True loop identified by _prescan_while_loops (sentinel -1).
         # Regular while-loops (while cond: body) do NOT trigger here; they
         # are detected retroactively by the JUMP_BACKWARD handler.
         is_try_nop = (
@@ -3310,7 +3275,49 @@ class DecompilerGeneric(DecompilerBase):
                         block_end = merge if (merge is not None and merge > instr.offset) else next_pei
                         self.blocks.append((block_end, "try_body"))
                 return
-        # while True: — only at offset 2 for the unconditional infinite loop
+
+        # while True: — NOP is the body_start of a while-True loop.
+        # This covers:
+        #   (a) any offset where _prescan_while_loops set the sentinel guard -1,
+        #       e.g. an inner "while True:" loop at a NOP inside a function body.
+        #   (b) Python 3.12: the NOP at body_start-2 (is_jt=False) precedes the
+        #       actual back-edge target (body_start, is_jt=True).  The prescan
+        #       stores body_start (the JUMP_BACKWARD target), so we also match when
+        #       instr.offset + 2 is in _while_true_body_starts.
+        #   (c) offset == 2: the entire function body is an unconditional loop
+        #       (old fallback path, kept for older Python version compatibility).
+        _while_header_targets = getattr(self, "_while_header_targets", {})
+        _while_true_body_starts = {
+            bs for bs, go in _while_header_targets.items() if go == -1
+        }
+        # Determine if this NOP is the while-True header.
+        # Case A: this NOP's offset IS the prescan body_start (common for older/current patterns).
+        # Case B: this NOP's offset+2 IS the prescan body_start (Python 3.12 where the NOP
+        #         precedes the actual JUMP_BACKWARD target by 2 bytes, but has is_jt=False).
+        nop_is_while_true = instr.offset in _while_true_body_starts
+        nop_body_start = instr.offset  # actual back-edge target for loop_end search
+        if not nop_is_while_true and (instr.offset + 2) in _while_true_body_starts:
+            nop_is_while_true = True
+            nop_body_start = instr.offset + 2
+
+        if nop_is_while_true:
+            self._append_reconstructed("while True:")
+            self.indent_level += 1
+            # Find the loop end: offset just after the last backward jump that
+            # targets nop_body_start (the actual back-edge target).
+            loop_end = nop_body_start + 2
+            for ins in self.instructions:
+                if (self._is_backward_instruction(ins)
+                        and self._get_jump_target(ins) == nop_body_start):
+                    loop_end = max(loop_end, ins.offset + 2)
+            self.blocks.append((loop_end, "while"))
+            _wte = getattr(self, "_while_true_ends", set())
+            _wte.add(loop_end)
+            self._while_true_ends = _wte
+            return
+
+        # Old offset-2 fallback: function body IS a while-True loop but was not
+        # caught by _prescan_while_loops (e.g., no is_jump_target on the NOP).
         if instr.offset == 2:
             if self._has_jump_backward() and not self._loop_cond_before_body(instr.offset + 2):
                 self._append_reconstructed("while True:")
@@ -3327,6 +3334,7 @@ class DecompilerGeneric(DecompilerBase):
         # If _prescan_ternaries identified this jump as a ternary, evaluate
         # both branches speculatively and push the ternary expression onto
         # the stack instead of opening a control-flow block.
+
         if instr.offset in getattr(self, "_ternary_jumps", {}):
             store_name, then_instrs, else_instrs, is_true = \
                 self._ternary_jumps[instr.offset]
