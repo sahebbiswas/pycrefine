@@ -1854,15 +1854,15 @@ class DecompilerGeneric(DecompilerBase):
 
         for ins in sub_instrs:
             op = ins.opname
-            if op in _IS_COMP_GEN_SKIP:
-                continue
-
             if op == "POP_TOP":
                 if stack:
                     stmt = str(stack.pop())
                     # Only emit as a line if it's not a boring constant or sentinel
                     if stmt not in ("None", "_exc_info", "_exc_match", "True", "False"):
                         lines.append(stmt)
+                continue
+
+            if op in _IS_COMP_GEN_SKIP:
                 continue
 
             # --- Loading ---
@@ -3010,12 +3010,26 @@ class DecompilerGeneric(DecompilerBase):
 
         # Detect `break`: forward jump that lands at the exact end of a while loop.
         if instr.opname in ("JUMP_FORWARD", "JUMP_ABSOLUTE") and isinstance(jump_target, int) and jump_target > instr.offset:
+            matched_while = False
             for b_off, b_type in reversed(self.blocks):
                 if b_type == "while" and jump_target == b_off:
                     self._append_reconstructed("break")
-                    return
+                    matched_while = True
+                    break
                 if b_type == "while":
                     break  # only check innermost loop
+            
+            if matched_while:
+                return
+                
+            # Non-break forward jump -> reconstruct as else-branch 
+            # (unless it's an exc_handler_jump which jumps out of an except block)
+            if instr.offset not in getattr(self, "_exc_handler_jump_offsets", ()):
+                self.indent_level -= 1
+                self._append_reconstructed("else:")
+                self.indent_level += 1
+                self.blocks.append((jump_target, "else"))
+            return
         # detect while loop.
         # 3.11+ CPython compiles `while cond: body` as:
         #   A:  <condition>; POP_JUMP_IF_FALSE(end)  ← condition check #1
