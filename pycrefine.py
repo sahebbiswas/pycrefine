@@ -111,13 +111,64 @@
 #         by parent; extend here as 3.14 opcodes become known.
 
 import argparse
+import dis
+import importlib.util
+import io
 import marshal
 import re
 import struct
 import sys
+import traceback
 import types
 from typing import List, Optional, Any, Dict, Union, Tuple
 from dataclasses import dataclass
+
+# --- Magic Numbers & Search Windows ---
+_MAX_WITH_EXIT_SEARCH_WINDOW = 200
+_MAX_TERNARY_SEARCH_WINDOW = 20
+_MAX_TERNARY_SHORT_SEARCH_WINDOW = 12
+_MAX_TERNARY_MINI_SEARCH_WINDOW = 8
+
+# --- Constant Instruction Sets ---
+_NO_PASS_TYPES = frozenset({"exc_cleanup", "finally_wrapper"})
+_NO_INDENT_TYPES = frozenset({"finally_wrapper"})
+
+_TERNARY_STORES = frozenset(("STORE_FAST", "STORE_NAME", "STORE_GLOBAL"))
+_TERNARY_SKIP = frozenset(("CACHE", "RESUME", "NOT_TAKEN", "COPY_FREE_VARS"))
+_TERNARY_TERM = frozenset(("RETURN_CONST", "RETURN_VALUE"))
+_TERNARY_PURE = frozenset((
+    "LOAD_FAST", "LOAD_NAME", "LOAD_GLOBAL", "LOAD_CONST", "LOAD_DEREF",
+    "LOAD_SMALL_INT", "LOAD_GLOBAL_MODULE", "LOAD_ATTR", "LOAD_METHOD",
+    "GET_ATTR", "LOAD_FAST_BORROW", "LOAD_FAST_BORROW_LOAD_FAST_BORROW",
+    "LOAD_CONST_BORROW", "CALL", "CALL_FUNCTION", "CALL_METHOD",
+    "COMPARE_OP", "BINARY_OP", "IS_OP", "CONTAINS_OP",
+    "UNARY_NOT", "UNARY_NEGATIVE", "UNARY_POSITIVE", "UNARY_INVERT",
+    "BUILD_TUPLE", "BUILD_LIST", "BUILD_SET", "BUILD_MAP",
+    "PRECALL", "PUSH_NULL", "FORMAT_VALUE", "FORMAT_SIMPLE", "BUILD_STRING",
+    "BINARY_SUBSCR", "TO_BOOL"
+)) | _TERNARY_SKIP | _TERNARY_TERM
+
+_COMPOUND_SKIP = frozenset(("CACHE", "RESUME", "NOT_TAKEN", "COPY_FREE_VARS", "PRECALL", "PUSH_NULL"))
+_COMPOUND_EXPR_OPS = frozenset((
+    "LOAD_FAST", "LOAD_NAME", "LOAD_GLOBAL", "LOAD_CONST", "LOAD_DEREF",
+    "LOAD_SMALL_INT", "LOAD_FAST_BORROW", "LOAD_CONST_BORROW", "LOAD_FAST_BORROW_LOAD_FAST_BORROW",
+    "LOAD_GLOBAL_MODULE", "LOAD_ATTR", "LOAD_METHOD", "GET_ATTR",
+    "CALL", "CALL_FUNCTION", "CALL_METHOD", "COMPARE_OP", "BINARY_OP", "IS_OP", "CONTAINS_OP",
+    "UNARY_NOT", "UNARY_NEGATIVE", "UNARY_POSITIVE", "UNARY_INVERT",
+    "BUILD_TUPLE", "BUILD_LIST", "BUILD_SET", "BUILD_MAP",
+    "TO_BOOL", "FORMAT_VALUE", "FORMAT_SIMPLE", "BUILD_STRING", "BINARY_SUBSCR"
+)) | _COMPOUND_SKIP
+
+_WHILE_TRIVIAL_OPS = frozenset({"NOP", "RESUME", "NOT_TAKEN", "CACHE", "COPY_FREE_VARS"})
+_TRY_SKIP_NOP = frozenset({"RESUME", "CACHE", "NOT_TAKEN"})
+_TRY_LOAD_OPS = frozenset({"LOAD_NAME", "LOAD_GLOBAL", "LOAD_FAST", "LOAD_DEREF", "LOAD_SMALL_INT", "LOAD_GLOBAL_MODULE"})
+_TRY_LOOP_HEADS = frozenset({"FOR_ITER", "GET_ITER", "GET_ANEXT", "GET_AWAITABLE"})
+_TRY_HANDLER_EXIT_OPS = frozenset({"POP_EXCEPT", "DELETE_FAST", "DELETE_NAME", "DELETE_GLOBAL", "STORE_FAST", "STORE_NAME"})
+
+_IS_COMP_GEN_SKIP = frozenset({"POP_TOP", "CACHE", "NOP", "RESUME", "COPY", "NOT_TAKEN"})
+_IS_COMP_GEN_STOP = frozenset({"LOAD_CONST", "LOAD_NAME", "LOAD_FAST", "LOAD_GLOBAL", "LOAD_DEREF", "LOAD_SMALL_INT", "LOAD_ATTR", "PUSH_NULL", "RERAISE", "RAISE_VARARGS", "RETURN_CONST", "RETURN_VALUE", "JUMP_FORWARD"})
+
+_GENERIC_SKIP_OPS = frozenset({"RESUME", "CACHE", "NOP", "NOT_TAKEN", "COPY_FREE_VARS", "EXTENDED_ARG"})
 
 
 def post_process_source(source: str) -> str:
@@ -315,8 +366,7 @@ def _render_func_tuple(body_text: str, args: List[str]) -> str:
     # ── Case 2: lambda ───────────────────────────────────────────────────
     if "<lambda>" in lines[0]:
         # Extract params from 'def <lambda>(params):'
-        import re as _re
-        m = _re.match(r"def\s+<lambda>\s*\(([^)]*)\):", lines[0])
+        m = re.match(r"def\s+<lambda>\s*\(([^)]*)\):", lines[0])
         params = m.group(1).strip() if m else ""
         # Find return expression
         ret_expr = None
@@ -329,8 +379,7 @@ def _render_func_tuple(body_text: str, args: List[str]) -> str:
 
     # ── Case 3: fallback — extract function name if recognisable ─────────
     # e.g. 'def _find_something(...)' used as a first-class callback
-    import re as _re
-    m = _re.match(r"def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", lines[0])
+    m = re.match(r"def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", lines[0])
     if m and "<" not in m.group(1):
         return m.group(1)
 
@@ -369,7 +418,6 @@ class DecompilerBase:
 
     def _disassemble(self):
         """Convert code object bytecode into a list of BytecodeInstruction."""
-        import dis
         for instr in dis.get_instructions(self.code_obj):
             self.instructions.append(BytecodeInstruction(
                 opcode=instr.opcode,
@@ -467,8 +515,7 @@ class DecompilerBase:
         # range in the exception table, it's explicit. Compiler-generated 
         # returns for with/try blocks are always outside the protected range.
         try:
-            import dis as _dis
-            for e in getattr(_dis.Bytecode(self.code_obj), "exception_entries", []):
+            for e in getattr(dis.Bytecode(self.code_obj), "exception_entries", []):
                 if e.start <= instr.offset < e.end:
                     return False
         except (AttributeError, TypeError, ValueError, IndexError):
@@ -525,7 +572,7 @@ class DecompilerGeneric(DecompilerBase):
         # Exception-handler bookkeeping
         self._exc_as_store_offset: int = -1      # offset of 'as e' STORE to skip
         self._exc_cleanup_name: Optional[str] = None   # name to suppress in cleanup
-        self._except_header_indent: int = -1           # indent level for except headers
+        self._except_header_indent: Optional[int] = None           # indent level for except headers
         self._except_end_offset: int = -1             # end of exception zone (suppress JUMP_FWD)
         self._exc_bound_names: set = set()             # all names ever bound in except-as
         # The following sets are populated by _prescan_try_structure() which runs in decompile()
@@ -654,10 +701,7 @@ class DecompilerGeneric(DecompilerBase):
         Parameters:
             offset (int): Bytecode offset used to determine which blocks have ended.
         """
-        _NO_PASS_TYPES = frozenset({
-            "exc_cleanup", "finally_wrapper",
-        })
-        _NO_INDENT_TYPES = frozenset({"finally_wrapper"})
+
 
         while self.blocks and offset >= self.blocks[-1][0]:
             block_end, block_type = self.blocks.pop()
@@ -781,27 +825,6 @@ class DecompilerGeneric(DecompilerBase):
         - _ternary_suppress: a set of instruction offsets that should be skipped during normal
           instruction processing because they are part of a recognized ternary pattern.
         """
-        STORES = frozenset(("STORE_FAST", "STORE_NAME", "STORE_GLOBAL"))
-        SKIP   = frozenset(("CACHE", "RESUME", "NOT_TAKEN", "COPY_FREE_VARS"))
-        # Return/fallthrough terminators that may appear at the end of a then-branch
-        # in Pattern A — treated as no-ops for purity checking purposes.
-        TERM   = frozenset(("RETURN_CONST", "RETURN_VALUE"))
-        PURE   = frozenset((
-            "LOAD_FAST", "LOAD_NAME", "LOAD_GLOBAL", "LOAD_CONST", "LOAD_DEREF",
-            "LOAD_SMALL_INT", "LOAD_GLOBAL_MODULE", "LOAD_ATTR", "LOAD_METHOD",
-            "GET_ATTR",
-            # 3.14 borrow-semantics load variants
-            "LOAD_FAST_BORROW", "LOAD_FAST_BORROW_LOAD_FAST_BORROW",
-            "LOAD_CONST_BORROW",
-            "CALL", "CALL_FUNCTION", "CALL_METHOD",
-            "COMPARE_OP", "BINARY_OP", "IS_OP", "CONTAINS_OP",
-            "UNARY_NOT", "UNARY_NEGATIVE", "UNARY_POSITIVE", "UNARY_INVERT",
-            "BUILD_TUPLE", "BUILD_LIST", "BUILD_SET", "BUILD_MAP",
-            "PRECALL", "PUSH_NULL",
-            "FORMAT_VALUE", "FORMAT_SIMPLE", "BUILD_STRING",
-            "BINARY_SUBSCR",
-            "TO_BOOL",  # 3.14 explicit bool conversion — pure, stack-only
-        )) | SKIP | TERM
 
         self._ternary_jumps: dict = {}
         self._ternary_suppress: set = set()
@@ -818,7 +841,7 @@ class DecompilerGeneric(DecompilerBase):
 
             # ── Collect then-branch instructions ─────────────────────────
             then_raw = self.instructions[idx + 1 : t_idx]
-            then_sig = [x for x in then_raw if x.opname not in SKIP]
+            then_sig = [x for x in then_raw if x.opname not in _TERNARY_SKIP]
 
             if not then_sig:
                 continue
@@ -853,7 +876,7 @@ class DecompilerGeneric(DecompilerBase):
                     continue
                 before_jf = then_sig[:jf_pos]
 
-                then_stores_before_jf = [x for x in before_jf if x.opname in STORES]
+                then_stores_before_jf = [x for x in before_jf if x.opname in _TERNARY_STORES]
 
                 if then_stores_before_jf:
                     # ── B2: then-STORE is before the jump ────────────────
@@ -861,14 +884,14 @@ class DecompilerGeneric(DecompilerBase):
                     store_target = self._get_jump_target(jf)
                     st_idx = offset_to_idx.get(store_target)
                     if st_idx is None:
-                        for fi in range(t_idx, min(t_idx + 20, len(self.instructions))):
-                            if self.instructions[fi].opname in STORES:
+                        for fi in range(t_idx, min(t_idx + _MAX_TERNARY_SEARCH_WINDOW, len(self.instructions))):
+                            if self.instructions[fi].opname in _TERNARY_STORES:
                                 st_idx = fi
                                 break
                     if st_idx is None:
                         continue
                     store_instr = self.instructions[st_idx]
-                    if store_instr.opname not in STORES:
+                    if store_instr.opname not in _TERNARY_STORES:
                         continue
                     if then_s.argval != store_instr.argval:
                         continue
@@ -877,19 +900,19 @@ class DecompilerGeneric(DecompilerBase):
                         if x.offset == then_s.offset
                     )
                     actual_then_expr = [
-                        x for x in before_jf[:ts_pos] if x.opname not in SKIP
+                        x for x in before_jf[:ts_pos] if x.opname not in _TERNARY_SKIP
                     ]
-                    if not all(x.opname in PURE for x in actual_then_expr):
+                    if not all(x.opname in _TERNARY_PURE for x in actual_then_expr):
                         continue
                     if any(x.opname == "POP_TOP" or "POP_JUMP_IF" in x.opname
                            for x in actual_then_expr):
                         continue
                     else_raw    = self.instructions[t_idx : st_idx]
-                    else_instrs = [x for x in else_raw if x.opname not in SKIP]
+                    else_instrs = [x for x in else_raw if x.opname not in _TERNARY_SKIP]
                     if any(x.opname == "POP_TOP" or "POP_JUMP_IF" in x.opname
                            for x in else_instrs):
                         continue
-                    if not all(x.opname in PURE for x in else_instrs):
+                    if not all(x.opname in _TERNARY_PURE for x in else_instrs):
                         continue
                     store_name = str(store_instr.argval)
                     is_true    = "IF_TRUE" in ins.opname
@@ -903,7 +926,7 @@ class DecompilerGeneric(DecompilerBase):
                     continue
 
                 # ── B1: no then-STORE before the jump ────────────────────
-                if not all(x.opname in PURE for x in before_jf):
+                if not all(x.opname in _TERNARY_PURE for x in before_jf):
                     continue
                 if any(x.opname == "POP_TOP" or "POP_JUMP_IF" in x.opname
                        for x in before_jf):
@@ -912,25 +935,25 @@ class DecompilerGeneric(DecompilerBase):
                 store_target = self._get_jump_target(jf)
                 st_idx = offset_to_idx.get(store_target)
                 if st_idx is None:
-                    for fi in range(t_idx, min(t_idx + 20, len(self.instructions))):
-                        if self.instructions[fi].opname in STORES:
+                    for fi in range(t_idx, min(t_idx + _MAX_TERNARY_SEARCH_WINDOW, len(self.instructions))):
+                        if self.instructions[fi].opname in _TERNARY_STORES:
                             st_idx = fi
                             break
                 if st_idx is None:
                     continue
 
                 else_raw    = self.instructions[t_idx : st_idx]
-                else_instrs = [x for x in else_raw if x.opname not in SKIP]
+                else_instrs = [x for x in else_raw if x.opname not in _TERNARY_SKIP]
                 if any(x.opname == "POP_TOP" or "POP_JUMP_IF" in x.opname
                        for x in else_instrs):
                     continue
-                if not all(x.opname in PURE for x in else_instrs):
+                if not all(x.opname in _TERNARY_PURE for x in else_instrs):
                     continue
 
                 if st_idx >= len(self.instructions):
                     continue
                 store_instr = self.instructions[st_idx]
-                if store_instr.opname not in STORES:
+                if store_instr.opname not in _TERNARY_STORES:
                     continue
 
                 store_name = str(store_instr.argval)
@@ -945,7 +968,7 @@ class DecompilerGeneric(DecompilerBase):
                 continue  # done with this POP_JUMP_IF
 
             # ── Pattern A: no JUMP_FORWARD ────────────────────────────────
-            store_idxs = [i for i, x in enumerate(then_sig) if x.opname in STORES]
+            store_idxs = [i for i, x in enumerate(then_sig) if x.opname in _TERNARY_STORES]
             if len(store_idxs) != 1:
                 continue
             store_pos  = store_idxs[0]
@@ -956,17 +979,17 @@ class DecompilerGeneric(DecompilerBase):
                 continue
             if any("POP_JUMP_IF" in x.opname for x in before_store):
                 continue
-            if not all(x.opname in PURE for x in before_store):
+            if not all(x.opname in _TERNARY_PURE for x in before_store):
                 continue
 
             # Find the first STORE in the else-branch
             else_store = None
-            for i in range(t_idx, min(t_idx + 12, len(self.instructions))):
+            for i in range(t_idx, min(t_idx + _MAX_TERNARY_SHORT_SEARCH_WINDOW, len(self.instructions))):
                 xi = self.instructions[i]
-                if xi.opname in STORES:
+                if xi.opname in _TERNARY_STORES:
                     else_store = xi
                     break
-                if xi.opname not in PURE:
+                if xi.opname not in _TERNARY_PURE:
                     break
 
             if else_store is None or else_store.argval != then_store.argval:
@@ -974,7 +997,7 @@ class DecompilerGeneric(DecompilerBase):
 
             es_idx = offset_to_idx[else_store.offset]
             else_raw = self.instructions[t_idx : es_idx]
-            else_instrs = [x for x in else_raw if x.opname not in SKIP]
+            else_instrs = [x for x in else_raw if x.opname not in _TERNARY_SKIP]
             if any(x.opname == "POP_TOP" for x in else_instrs):
                 continue
             if any("POP_JUMP_IF" in x.opname for x in else_instrs):
@@ -1023,20 +1046,6 @@ class DecompilerGeneric(DecompilerBase):
         5. Adds all non-controlling intermediate instructions to
            ``_compound_suppress`` (so they are skipped during normal dispatch).
         """
-        SKIP = frozenset(("CACHE", "RESUME", "NOT_TAKEN", "COPY_FREE_VARS",
-                          "PRECALL", "PUSH_NULL"))
-        EXPR_OPS = frozenset((
-            "LOAD_FAST", "LOAD_NAME", "LOAD_GLOBAL", "LOAD_CONST", "LOAD_DEREF",
-            "LOAD_SMALL_INT", "LOAD_FAST_BORROW", "LOAD_CONST_BORROW",
-            "LOAD_FAST_BORROW_LOAD_FAST_BORROW", "LOAD_GLOBAL_MODULE",
-            "LOAD_ATTR", "LOAD_METHOD", "GET_ATTR",
-            "CALL", "CALL_FUNCTION", "CALL_METHOD",
-            "COMPARE_OP", "BINARY_OP", "IS_OP", "CONTAINS_OP",
-            "UNARY_NOT", "UNARY_NEGATIVE", "UNARY_POSITIVE", "UNARY_INVERT",
-            "BUILD_TUPLE", "BUILD_LIST", "BUILD_SET", "BUILD_MAP",
-            "TO_BOOL", "FORMAT_VALUE", "FORMAT_SIMPLE", "BUILD_STRING",
-            "BINARY_SUBSCR",
-        )) | SKIP
 
         self._compound_cond_map: dict = {}   # controlling_offset -> combined_cond_str
         self._compound_suppress: set = set() # instruction offsets to skip
@@ -1067,16 +1076,16 @@ class DecompilerGeneric(DecompilerBase):
             group: list = []   # list of (jump_instr_idx, jump_instr, expr_instrs_before_it)
             start_i = i
             # Scan backwards from the first jump to find the start of the
-            # first clause's expression (stop at any non-EXPR_OPS instruction,
+            # first clause's expression (stop at any non-_COMPOUND_EXPR_OPS instruction,
             # including a previous jump, RESUME, STORE, etc.).
             first_expr_start = i
             scan_back = i - 1
             while scan_back >= 0:
                 bop = instrs[scan_back].opname
-                if bop in SKIP:
+                if bop in _COMPOUND_SKIP:
                     scan_back -= 1
                     continue
-                if bop in EXPR_OPS:
+                if bop in _COMPOUND_EXPR_OPS:
                     first_expr_start = scan_back
                     scan_back -= 1
                 else:
@@ -1088,17 +1097,17 @@ class DecompilerGeneric(DecompilerBase):
             while j < n:
                 jinstr = instrs[j]
                 is_cjump = self._is_compound_cjump(jinstr.opname)
-                if jinstr.opname in SKIP:
+                if jinstr.opname in _COMPOUND_SKIP:
                     j += 1
                     continue
                 if is_cjump and jinstr.offset not in ternary_offsets:
                     # Collect expression instructions since the previous jump
                     expr_instrs = [
                         instrs[k] for k in range(prev_jump_end_idx, j)
-                        if instrs[k].opname not in SKIP
+                        if instrs[k].opname not in _COMPOUND_SKIP
                     ]
                     # All of them must be pure expression builders
-                    if not all(op.opname in EXPR_OPS for op in expr_instrs):
+                    if not all(op.opname in _COMPOUND_EXPR_OPS for op in expr_instrs):
                         break  # not a clean chain
                     # Start offset of this clause's expression
                     expr_start_off = expr_instrs[0].offset if expr_instrs else jinstr.offset
@@ -1106,7 +1115,7 @@ class DecompilerGeneric(DecompilerBase):
                     prev_jump_end_idx = j + 1
                     j += 1
                     continue
-                if jinstr.opname in EXPR_OPS:
+                if jinstr.opname in _COMPOUND_EXPR_OPS:
                     j += 1
                     continue
                 break  # something else → end of group
@@ -1123,7 +1132,7 @@ class DecompilerGeneric(DecompilerBase):
             last_jump_idx = group[-1][0]
             body_target = -1
             for k in range(last_jump_idx + 1, n):
-                if instrs[k].opname not in SKIP:
+                if instrs[k].opname not in _COMPOUND_SKIP:
                     body_target = instrs[k].offset
                     break
             
@@ -1346,8 +1355,7 @@ class DecompilerGeneric(DecompilerBase):
                 if len(mini_stack) >= 2:
                     right, left = mini_stack.pop(), mini_stack.pop()
                     op_sym = str(ins.argval)
-                    import re as _re
-                    m = _re.search(r"\(([^)]+)\)", op_sym)
+                    m = re.search(r"\(([^)]+)\)", op_sym)
                     if m:
                         op_sym = m.group(1)
                     mini_stack.append(f"{left} {op_sym} {right}")
@@ -1454,9 +1462,7 @@ class DecompilerGeneric(DecompilerBase):
             # Trivial opcodes that can appear between a guard's fall-through
             # and the loop body_start without meaning the guard is not a real
             # while-guard (e.g. NOT_TAKEN hint, NOP, RESUME, etc.).
-            _TRIVIAL_OPS = frozenset({
-                "NOP", "RESUME", "NOT_TAKEN", "CACHE", "COPY_FREE_VARS",
-            })
+
 
             guard_offset = -1
             guard_dist = float('inf')   # distance from body_start
@@ -1491,7 +1497,7 @@ class DecompilerGeneric(DecompilerBase):
                     only_trivial = True
                     for scan in self.instructions:
                         if fall_through <= scan.offset < body_start:
-                            if scan.opname not in _TRIVIAL_OPS:
+                            if scan.opname not in _WHILE_TRIVIAL_OPS:
                                 only_trivial = False
                                 break
                     if not only_trivial:
@@ -1565,18 +1571,12 @@ class DecompilerGeneric(DecompilerBase):
         instrs = self.instructions
         n = len(instrs)
 
-        _SKIP_NOP = frozenset({"RESUME", "CACHE", "NOT_TAKEN"})
-        _LOAD_OPS = frozenset({
-            "LOAD_NAME", "LOAD_GLOBAL", "LOAD_FAST", "LOAD_DEREF",
-            "LOAD_SMALL_INT", "LOAD_GLOBAL_MODULE",
-        })
 
         # ── 0. Try to get exception table coverage from dis ─────────────
         # exception_entries available on Python 3.11+ (same versions that use
         # NOP / PUSH_EXC_INFO rather than SETUP_FINALLY).
         try:
-            import dis as _dis
-            _exc_entries = _dis.Bytecode(self.code_obj).exception_entries
+            _exc_entries = dis.Bytecode(self.code_obj).exception_entries
             # Build a set of offsets that start a try-covered range.
             # Include ALL depths (depth=0 for module-level try, depth=1+ for nested).
             _try_covered_starts = {e.start for e in _exc_entries}
@@ -1594,9 +1594,9 @@ class DecompilerGeneric(DecompilerBase):
                     )
                     if t_idx is not None:
                         look = t_idx + 1
-                        while look < n and instrs[look].opname in _SKIP_NOP:
+                        while look < n and instrs[look].opname in _TRY_SKIP_NOP:
                             look += 1
-                        if look < n and instrs[look].opname in _LOAD_OPS:
+                        if look < n and instrs[look].opname in _TRY_LOAD_OPS:
                             # Check for CHECK_EXC_MATCH within a few steps to
                             # confirm this is a real typed except: handler.
                             look2 = look + 1
@@ -1638,14 +1638,14 @@ class DecompilerGeneric(DecompilerBase):
                 t_idx = next((i for i, ins2 in enumerate(instrs) if ins2.offset == ins.offset), None)
                 if t_idx is not None:
                     look = t_idx + 1
-                    while look < n and instrs[look].opname in _SKIP_NOP:
+                    while look < n and instrs[look].opname in _TRY_SKIP_NOP:
                         look += 1
                     if look < n:
                         # WITH_EXCEPT_START → with-exit handler
                         if instrs[look].opname == "WITH_EXCEPT_START":
                             self._suppress_push_exc_offsets.add(ins.offset)
                         # LOAD_GLOBAL + no CHECK_EXC_MATCH within 3 steps → re-raise wrapper
-                        elif instrs[look].opname in _LOAD_OPS:
+                        elif instrs[look].opname in _TRY_LOAD_OPS:
                             look2 = look + 1
                             found_cem = False
                             for _ in range(4):
@@ -1693,10 +1693,7 @@ class DecompilerGeneric(DecompilerBase):
         # Build offset-to-index map for quick look-up
         off2idx = {ins.offset: i for i, ins in enumerate(instrs)}
         # Loop/iter opcodes that can never be finally-merge labels
-        _LOOP_HEADS = frozenset({"FOR_ITER", "GET_ITER", "GET_ANEXT", "GET_AWAITABLE"})
         # Opcodes that appear in exception-handler cleanup just before the JB
-        _HANDLER_EXIT_OPS = frozenset({"POP_EXCEPT", "DELETE_FAST", "DELETE_NAME",
-                                        "DELETE_GLOBAL", "STORE_FAST", "STORE_NAME"})
 
         from collections import Counter
         jb_targets: Counter = Counter()
@@ -1718,7 +1715,7 @@ class DecompilerGeneric(DecompilerBase):
                 check_idx = jb_idx - back
                 if check_idx < 0:
                     break
-                if instrs[check_idx].opname in _HANDLER_EXIT_OPS:
+                if instrs[check_idx].opname in _TRY_HANDLER_EXIT_OPS:
                     preceded_by_handler_exit = True
                     break
                 # Stop early if we cross a non-trivial boundary
@@ -1730,7 +1727,7 @@ class DecompilerGeneric(DecompilerBase):
         for target_off, count in jb_targets.items():
             if count >= 1 and target_off not in push_exc_offs:
                 t_ins = next((ins for ins in instrs if ins.offset == target_off), None)
-                if t_ins and t_ins.is_jump_target and t_ins.opname not in _LOOP_HEADS:
+                if t_ins and t_ins.is_jump_target and t_ins.opname not in _TRY_LOOP_HEADS:
                     self._finally_merge_offsets.add(target_off)
 
         # ── 4. Classify JUMP_BACKWARD as exc-handler exits ───────────────
@@ -1756,7 +1753,7 @@ class DecompilerGeneric(DecompilerBase):
                 check_idx = jb_idx - back
                 if check_idx < 0:
                     break
-                if instrs[check_idx].opname in _HANDLER_EXIT_OPS:
+                if instrs[check_idx].opname in _TRY_HANDLER_EXIT_OPS:
                     preceded_by_handler_exit = True
                     break
                 if instrs[check_idx].opname in ("CALL", "BINARY_OP", "COMPARE_OP"):
@@ -1781,7 +1778,7 @@ class DecompilerGeneric(DecompilerBase):
         self._pending_finally_merge: Optional[int] = None
 
         try:
-            _exc_entries = _dis.Bytecode(self.code_obj).exception_entries  # type: ignore[name-defined]
+            _exc_entries = dis.Bytecode(self.code_obj).exception_entries  # type: ignore[name-defined]
         except Exception:
             _exc_entries = []
 
@@ -1868,7 +1865,7 @@ class DecompilerGeneric(DecompilerBase):
         #       PUSH_EXC_INFO that handles its try body, using the exception table.
         self._nop_to_push_exc: dict = {}  # nop_offset → push_exc_info_offset
         try:
-            _exc_entries_for_nop = _dis.Bytecode(self.code_obj).exception_entries  # type: ignore[name-defined]
+            _exc_entries_for_nop = dis.Bytecode(self.code_obj).exception_entries  # type: ignore[name-defined]
         except (AttributeError, IndexError, TypeError, ValueError):
             _exc_entries_for_nop = []
         for nop_off in list(self._try_nop_offsets) + ([2] if any(ins.offset == 2 and ins.opname == "NOP" for ins in instrs) else []):
@@ -1932,18 +1929,18 @@ class DecompilerGeneric(DecompilerBase):
         for i, ins in enumerate(instrs):
             if ins.opname != "BEFORE_WITH":
                 continue
-            for j in range(i + 1, min(i + 200, n)):
+            for j in range(i + 1, min(i + _MAX_WITH_EXIT_SEARCH_WINDOW, n)):
                 if instrs[j].opname == "LOAD_CONST" and instrs[j].argval is None:
                     k = j + 1
-                    while k < n and instrs[k].opname in _SKIP_NOP:
+                    while k < n and instrs[k].opname in _TRY_SKIP_NOP:
                         k += 1
                     if k < n and instrs[k].opname == "LOAD_CONST" and instrs[k].argval is None:
                         m = k + 1
-                        while m < n and instrs[m].opname in _SKIP_NOP:
+                        while m < n and instrs[m].opname in _TRY_SKIP_NOP:
                             m += 1
                         if m < n and instrs[m].opname == "LOAD_CONST" and instrs[m].argval is None:
                             c = m + 1
-                            while c < n and instrs[c].opname in _SKIP_NOP:
+                            while c < n and instrs[c].opname in _TRY_SKIP_NOP:
                                 c += 1
                             if c < n and instrs[c].opname == "CALL":
                                 for off in (instrs[j].offset, instrs[k].offset,
@@ -1972,7 +1969,7 @@ class DecompilerGeneric(DecompilerBase):
 
         for ins in sub_instrs:
             op = ins.opname
-            if op in _SKIP:
+            if op in _IS_COMP_GEN_SKIP:
                 continue
 
             if op == "POP_TOP":
@@ -2094,7 +2091,7 @@ class DecompilerGeneric(DecompilerBase):
         # Determine the header indent: prefer the explicitly passed value;
         # fall back to _except_header_indent if set; last resort: current level.
         if header_indent < 0:
-            header_indent = self._except_header_indent if self._except_header_indent >= 0 \
+            header_indent = self._except_header_indent if self._except_header_indent is not None \
                             else self.indent_level
 
         # Emit pre-decompiled except handler lines first
@@ -2536,7 +2533,7 @@ class DecompilerGeneric(DecompilerBase):
         # Reset indent to the except-header level (handles multi-except chains
         # where the first handler incremented indent but the second check fires
         # without a new PUSH_EXC_INFO reset).
-        if self._except_header_indent >= 0:
+        if self._except_header_indent is not None:
             self.indent_level = self._except_header_indent
         # Peek ahead from the current position to find the optional
         # STORE_NAME / STORE_FAST that binds the 'as varname' in except.
@@ -2573,15 +2570,8 @@ class DecompilerGeneric(DecompilerBase):
         #  4. Stop (no binding) at: any LOAD_*, RERAISE, RETURN_*, JUMP_*,
         #     or a jump-target boundary (entered a new block)
         #  5. Cap at 8 steps
-        _SKIP = frozenset({
-            "POP_TOP", "CACHE", "NOP", "RESUME", "COPY", "NOT_TAKEN",
-        })
-        _STOP = frozenset({
-            "LOAD_CONST", "LOAD_NAME", "LOAD_FAST", "LOAD_GLOBAL",
-            "LOAD_DEREF", "LOAD_SMALL_INT", "LOAD_ATTR", "PUSH_NULL",
-            "RERAISE", "RAISE_VARARGS", "RETURN_CONST", "RETURN_VALUE",
-            "JUMP_FORWARD",
-        })
+
+
         as_name = None
         look = self.pc
         # Step 1: skip conditional jumps
@@ -2600,13 +2590,13 @@ class DecompilerGeneric(DecompilerBase):
                 self._exc_as_store_offset = ins_l.offset
                 break
             # Step 4: definitively in handler body — no binding
-            if op in _STOP or self._is_backward_jump(op):
+            if op in _IS_COMP_GEN_STOP or self._is_backward_jump(op):
                 break
             # Step 4: new block boundary — no binding
             if ins_l.is_jump_target:
                 break
             # Step 2: neutral opcode — skip past it
-            if op in _SKIP:
+            if op in _IS_COMP_GEN_SKIP:
                 look += 1
                 continue
             # Unknown opcode — stop safely
@@ -2648,9 +2638,8 @@ class DecompilerGeneric(DecompilerBase):
         # In 3.9 the instruction immediately after SETUP_WITH is always
         # STORE_FAST / STORE_NAME binding the __enter__() return value.
         as_var = None
-        _SKIP_SW = frozenset({"RESUME", "CACHE", "NOP", "NOT_TAKEN"})
         look = self.pc
-        while look < len(self.instructions) and self.instructions[look].opname in _SKIP_SW:
+        while look < len(self.instructions) and self.instructions[look].opname in _GENERIC_SKIP_OPS:
             look += 1
         if look < len(self.instructions) and self.instructions[look].opname in (
             "STORE_FAST", "STORE_NAME", "STORE_GLOBAL"
@@ -2705,9 +2694,8 @@ class DecompilerGeneric(DecompilerBase):
         ctx = self.stack.pop() if self.stack else "ctx"
         # Peek ahead for the STORE that binds the 'as' variable name.
         as_var = None
-        _SKIP_BW = frozenset({"RESUME", "CACHE", "NOP", "NOT_TAKEN"})
         look = self.pc
-        while look < len(self.instructions) and self.instructions[look].opname in _SKIP_BW:
+        while look < len(self.instructions) and self.instructions[look].opname in _GENERIC_SKIP_OPS:
             look += 1
         if look < len(self.instructions) and self.instructions[look].opname in (
             "STORE_FAST", "STORE_NAME", "STORE_GLOBAL"
@@ -3457,12 +3445,11 @@ class DecompilerGeneric(DecompilerBase):
             # Peek ahead for STORE_* or UNPACK_SEQUENCE to get var name(s).
             # Skip no-op / hint instructions that may appear between FOR_ITER
             # and the STORE in some Python versions (e.g. NOT_TAKEN on 3.14).
-            _SKIP_OPS = frozenset({"RESUME", "CACHE", "NOP", "NOT_TAKEN",
-                                   "COPY_FREE_VARS"})
+
             if self.pc < len(self.instructions):
                 peek_pc = self.pc
                 while (peek_pc < len(self.instructions)
-                       and self.instructions[peek_pc].opname in _SKIP_OPS):
+                           and self.instructions[peek_pc].opname in _GENERIC_SKIP_OPS):
                     peek_pc += 1
                 if peek_pc < len(self.instructions):
                     next_instr = self.instructions[peek_pc]
@@ -3943,7 +3930,7 @@ class Decompiler39(DecompilerGeneric):
                 # any non-trivial instruction in between, treat as cleanup-only.
                 has_delete = False
                 has_reraise = False
-                for k in range(t_idx, min(t_idx + 8, len(self.instructions))):
+                for k in range(t_idx, min(t_idx + _MAX_TERNARY_MINI_SEARCH_WINDOW, len(self.instructions))):
                     op = self.instructions[k].opname
                     if op in ("DELETE_FAST", "DELETE_NAME", "DELETE_GLOBAL"):
                         has_delete = True
@@ -3995,7 +3982,7 @@ class Decompiler39(DecompilerGeneric):
 
         # Scoped suppression: clear except-zone state when we exit the handler scope.
         if self._except_end_offset >= 0 and instr.offset >= self._except_end_offset:
-            self._except_header_indent = -1
+            self._except_header_indent = None
             self._except_end_offset = -1
 
         # Binary ops (3.9 uses named opcodes, not BINARY_OP)
@@ -4251,7 +4238,7 @@ class Decompiler39(DecompilerGeneric):
 
             # Record the indent level where except/finally headers should appear.
             # Only set when not already inside an except handler.
-            if self._except_header_indent < 0:
+            if self._except_header_indent is None:
                 self._except_header_indent = self.indent_level
                 # Peek ahead for JUMP_FORWARD at end of try block to establish scope.
                 look = self.pc
@@ -4269,12 +4256,12 @@ class Decompiler39(DecompilerGeneric):
                 saved_indent = getattr(self, "_finally_wrapper_indent", {}).get(finally_target, -1)
                 if saved_indent >= 0:
                     self.indent_level = saved_indent
-                elif self._except_header_indent >= 0:
+                elif self._except_header_indent is not None:
                     self.indent_level = self._except_header_indent
                 self._append_reconstructed("finally:")
                 self.indent_level += 1
                 self.blocks.append((finally_target, "finally_body"))
-                self._except_header_indent = -1
+                self._except_header_indent = None
 
         # JUMP_ABSOLUTE: in 3.9 this is used both as:
         #   (a) a loop back-edge (target <= current offset) — treat as JUMP_BACKWARD
@@ -4288,7 +4275,7 @@ class Decompiler39(DecompilerGeneric):
             else:
                 # Forward JUMP_ABSOLUTE: in try/except context, suppress else-detection
                 # (same as JUMP_FORWARD suppression below).
-                if self._except_header_indent >= 0:
+                if self._except_header_indent is not None:
                     pass  # skip else-detection inside try/except context
                 else:
                     fwd_instr = BytecodeInstruction(
@@ -4302,7 +4289,7 @@ class Decompiler39(DecompilerGeneric):
         # if/else detection logic in the parent handler — it would create spurious
         # else blocks around the exception handler body.
         elif opname == "JUMP_FORWARD":
-            if self._except_header_indent >= 0:
+            if self._except_header_indent is not None:
                 pass  # suppress else-detection inside try/except context
             else:
                 super()._handle_instruction(instr)
@@ -4387,7 +4374,7 @@ class Decompiler39(DecompilerGeneric):
                         self.indent_level -= 1
 
                     # Reset indent to except-header level
-                    if self._except_header_indent >= 0:
+                    if self._except_header_indent is not None:
                         self.indent_level = self._except_header_indent
                     else:
                         self._except_header_indent = self.indent_level
@@ -4402,13 +4389,13 @@ class Decompiler39(DecompilerGeneric):
                     return
             # --- Bare except: DUP_TOP not followed by a LOAD (no type check) ---
             # In this case DUP_TOP is just the handler entry for a bare 'except:'.
-            if self._except_header_indent >= 0 or (
+            if self._except_header_indent is not None or (
                 self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup") and self.blocks[-1][0] == instr.offset
             ):
                 if self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup") and self.blocks[-1][0] == instr.offset:
                     self.blocks.pop()
                     self.indent_level -= 1
-                if self._except_header_indent >= 0:
+                if self._except_header_indent is not None:
                     self.indent_level = self._except_header_indent
                 else:
                     self._except_header_indent = self.indent_level
@@ -4432,7 +4419,7 @@ class Decompiler39(DecompilerGeneric):
             if self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup") and self.blocks[-1][0] == instr.offset:
                 self.blocks.pop()
                 self.indent_level -= 1
-            if self._except_header_indent >= 0:
+            if self._except_header_indent is not None:
                 self.indent_level = self._except_header_indent
             self._append_reconstructed(f"except {exc_type}:")
             self.indent_level += 1
@@ -4447,7 +4434,7 @@ class Decompiler39(DecompilerGeneric):
         # wrapper.  For plain try/finally (no except), skip this path and use super().
         elif opname in ("SETUP_FINALLY", "SETUP_EXCEPT"):
             jump_target = self._get_jump_target(instr)
-            if self._except_header_indent >= 0:
+            if self._except_header_indent is not None:
                 # Inside an except handler — suppress 'try:' and just track boundary
                 self.blocks.append((jump_target, "exc_cleanup"))
                 self.indent_level += 1
@@ -4456,8 +4443,8 @@ class Decompiler39(DecompilerGeneric):
                 # If so: this is the outer wrapper, inner will emit try:
                 # If not: this is a plain try/finally — let super() emit try: normally.
                 look = self.pc
-                _SKIP_SF = frozenset({"RESUME", "CACHE", "NOP", "NOT_TAKEN", "EXTENDED_ARG"})
-                while look < len(self.instructions) and self.instructions[look].opname in _SKIP_SF:
+
+                while look < len(self.instructions) and self.instructions[look].opname in _GENERIC_SKIP_OPS:
                     look += 1
                 next_is_setup = (
                     look < len(self.instructions)
@@ -4483,7 +4470,7 @@ class Decompiler39(DecompilerGeneric):
         # POP_TOP at a handler jump-target: Python 3.9 bare except starts with
         # three consecutive POP_TOPs (exc_type, exc_value, traceback) instead of
         # DUP_TOP.  Detect when POP_TOP fires at the handler entry point.
-        elif opname == "POP_TOP" and instr.is_jump_target and self._except_header_indent >= 0:
+        elif opname == "POP_TOP" and instr.is_jump_target and self._except_header_indent is not None:
             # Skip the other two POP_TOPs that follow (they discard exc_value
             # and traceback from the implicit exception tuple).
             skip = self.pc
@@ -4495,7 +4482,7 @@ class Decompiler39(DecompilerGeneric):
                 pops_skipped += 1
             self.pc = skip
             # Emit bare except header at the correct indent level
-            if self._except_header_indent >= 0:
+            if self._except_header_indent is not None:
                 self.indent_level = self._except_header_indent
             self._append_reconstructed("except:")
             self.indent_level += 1
@@ -4678,7 +4665,6 @@ class Decompiler314(Decompiler311Plus):
                     try_end = None
                     exit_body_start = None
                     try:
-                        import dis
                         curr_offset = self.instructions[self.pc].offset if self.pc < len(self.instructions) else getattr(instr, "offset", 0)
                         # We use the host Python's dis.Bytecode if it supports exception_entries (3.11+)
                         if hasattr(dis, "Bytecode"):
@@ -4970,7 +4956,6 @@ def get_decompiler(filepath: str) -> DecompilerBase:
     version_id = magic & 0xFFFF
 
     if not (3000 <= version_id <= 5000):
-        import importlib.util
         host_magic = int.from_bytes(importlib.util.MAGIC_NUMBER, "little")
         if magic != host_magic:
             raise ValueError(
@@ -4979,14 +4964,12 @@ def get_decompiler(filepath: str) -> DecompilerBase:
                 "unsupported Python version."
             )
 
-    import importlib.util
     host_magic = int.from_bytes(importlib.util.MAGIC_NUMBER, "little")
 
     code_obj = None
     if magic == host_magic:
         for offset in (16, 12, 8, 4):
             try:
-                import io
                 obj = marshal.load(io.BytesIO(all_data[offset:]))
                 if isinstance(obj, types.CodeType):
                     code_obj = obj
@@ -5055,7 +5038,6 @@ def main():
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     except Exception:
-        import traceback
         traceback.print_exc()
         sys.exit(1)
 
