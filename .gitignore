@@ -5,3 +5,4 @@ __pycache__
 *.json
 pycrefine.egg-info 
 run_tests.bat 
+KNOWN_ISSUES.md 
