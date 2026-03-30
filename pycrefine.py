@@ -1,115 +1,5 @@
 #!python3
-# pycrefine.py — patched
-#
-# Fix log (all changes from original):
-#
-# FIX-01  POP_JUMP_IF_NONE / POP_JUMP_IF_NOT_NONE — condition strings were
-#         swapped.  POP_JUMP_IF_NOT_NONE jumps when value is not-None, so the
-#         guarding if-expression must read "if x is None:" (jump away from
-#         body when None), not "if x is not None:".
-#
-# FIX-02  MarshalParser._load_code — CodeType constructor is now selected at
-#         runtime based on sys.version_info so the script works when run under
-#         Python 3.9/3.10 (16-arg form), 3.11 (17-arg form, adds qualname),
-#         and 3.12+ (18-arg form, adds exception_table).  The original always
-#         used the 3.11 18-arg form, crashing on every other version.
-#
-# FIX-03  get_decompiler version dispatch — added explicit bands for 3.10 and
-#         3.11 (magic ranges 3430–3494) so they use Decompiler311Plus.
-#         Decompiler311Plus threshold lowered from 3495 to 3430 accordingly.
-#         3.14 (magic >= 3560) dispatches to Decompiler314.
-#
-# FIX-04  Decompiler39._get_opname_39 — corrected opcode table:
-#         • opcode 55  = INPLACE_ADD (was missing)
-#         • opcode 56  = INPLACE_SUBTRACT (was missing)
-#         • opcode 57  = INPLACE_MULTIPLY (was missing)
-#         • opcode 59  = INPLACE_MODULO (was missing)
-#         • opcode 60  = STORE_SUBSCR (was wrongly STORE_NAME)
-#         • opcode 61  = DELETE_SUBSCR (was missing)
-#         • opcode 62  = BINARY_LSHIFT (was missing)
-#         • opcode 63  = BINARY_RSHIFT (was missing)
-#         • opcode 64  = BINARY_AND (was missing)
-#         • opcode 65  = BINARY_XOR (was missing)
-#         • opcode 66  = BINARY_OR (was BINARY_MODULO — duplicate error)
-#         • opcode 67  = INPLACE_POWER (was missing)
-#         • opcode 75  = INPLACE_LSHIFT (was missing)
-#         • opcode 76  = INPLACE_RSHIFT (was missing)
-#         • opcode 77  = INPLACE_AND (was missing)
-#         • opcode 78  = INPLACE_XOR (was missing)
-#         • opcode 79  = INPLACE_OR (was missing)
-#         • opcode 80  = WITH_EXCEPT_START (was missing)
-#         • opcode 81  = GET_AITER (was missing)
-#         • opcode 82  = GET_ANEXT (was missing)
-#         • opcode 84  = IMPORT_STAR (was missing)
-#         • opcode 85  = SETUP_ANNOTATIONS (was missing)
-#         • opcode 86  = YIELD_VALUE (was missing)
-#         • opcode 87  = DELETE_DEREF (was missing)
-#         • opcode 88  = RAISE_VARARGS (was missing)
-#         • opcode 89  = GET_AWAITABLE (was missing)
-#         • opcode 94  = BUILD_MAP_UNPACK (was missing)
-#         • opcode 96  = STORE_DEREF (was missing)
-#         • opcode 98  = DELETE_ATTR (was missing)
-#         • opcode 99  = STORE_SUBSCR was missing (added under correct opcode)
-#         • opcode 117 = SETUP_WITH (was missing)
-#         • opcode 118 = LOAD_CLOSURE (was missing)
-#         • opcode 119 = LOAD_DEREF (was missing)
-#         • opcode 120 = STORE_DEREF dup removed, correct slot used
-#         • opcode 121 = RAISE_VARARGS dup removed, correct slot used
-#         • opcode 122 = BUILD_SLICE (was missing)
-#         • opcode 123 = LOAD_CLASSDEREF (was missing)
-#         • opcode 126 = DELETE_FAST (was missing)
-#         • opcode 130 = RAISE_VARARGS (kept at 130 — actual 3.9 position)
-#         • opcode 133 = BUILD_SLICE alt entry removed (not 3.9)
-#         • opcode 134 = MAKE_CLOSURE (was missing)
-#         • opcode 135 = LOAD_CLOSURE alt
-#         • opcode 136 = LOAD_DEREF alt
-#         • opcode 137 = STORE_DEREF alt
-#         • opcode 141 = CALL_FUNCTION_KW (was missing)
-#         • opcode 142 = CALL_FUNCTION_EX (was missing)
-#         • opcode 143 = SETUP_WITH alt (was missing)
-#         • opcode 145 = LIST_APPEND (was missing)
-#         • opcode 146 = SET_ADD (was missing)
-#         • opcode 147 = MAP_ADD (was missing)
-#         • opcode 162 = LIST_EXTEND (was missing)
-#         • opcode 163 = SET_UPDATE (was missing)
-#         • opcode 164 = DICT_MERGE (was missing)
-#         • opcode 165 = DICT_UPDATE (was missing)
-#
-# FIX-05  Decompiler39._disassemble — added EXTENDED_ARG accumulation so that
-#         jump targets and table indices > 255 are computed correctly.
-#
-# FIX-06  Decompiler39._handle_instruction — CALL_METHOD branch was
-#         unreachable because it was nested inside a wrong elif chain.
-#         Restructured as a clean if/elif/elif/else so CALL_FUNCTION,
-#         LOAD_METHOD, and CALL_METHOD are each matched at the top level.
-#         Also added CALL_FUNCTION_KW and CALL_FUNCTION_EX handlers.
-#
-# FIX-07  DecompilerGeneric CALL handler — kw_args split was always empty
-#         because vals was popped exactly num_args times before the split.
-#         Reworked: for CALL_KW pop kw-names tuple first, then pop
-#         (num_args - num_kw) positional values + num_kw keyword values,
-#         then zip names to their values correctly.
-#
-# FIX-08  BUILD_MAP handler added to DecompilerGeneric.
-#
-# FIX-09  INPLACE_* opcodes handled in DecompilerGeneric (augmented
-#         assignment: x op= y).  Previously fell through silently.
-#
-# FIX-10  SETUP_FINALLY / SETUP_WITH / BEGIN_FINALLY / PUSH_EXC_INFO /
-#         SETUP_EXCEPT detection added for structural try/except/finally.
-#         Emits best-effort try:/except:/finally: blocks with proper indent.
-#
-# FIX-11  while-loop detection: JUMP_BACKWARD targeting a POP_JUMP_IF_*
-#         at or before the current position now retroactively rewrites the
-#         last emitted "if" header to "while" and marks the block as a loop.
-#
-# FIX-12  UNPACK_SEQUENCE now emits a tuple-target store for the next
-#         N STORE_* instructions instead of silently passing.
-#
-# FIX-13  Decompiler314 stub added (subclass of Decompiler311Plus) for
-#         Python 3.14 magic numbers, with LOAD_SMALL_INT already handled
-#         by parent; extend here as 3.14 opcodes become known.
-
+# pycrefine.py
 import argparse
 import dis
 import importlib.util
@@ -862,10 +752,8 @@ class DecompilerGeneric(DecompilerBase):
             if jf_in_then:
                 # Pattern B: then-branch contains a forward jump.
                 # Two sub-variants:
-                #
                 # B1 (3.12 standard):  then-EXPR  JUMP_FORWARD(store)  >> else-EXPR  >> STORE
                 # B2 (3.14 possible):  then-EXPR  STORE  JUMP_FORWARD(after)  >> else-EXPR  >> STORE
-                #
                 # Detect B2 first (then-STORE exists before the jump).
                 jf = jf_in_then[-1]
                 jf_pos = next(
@@ -1448,15 +1336,12 @@ class DecompilerGeneric(DecompilerBase):
             # We want the CLOSEST (highest offset) qualifying guard to correctly
             # associate nested inner loops with their own guard.
             # The while-loop guard: the conditional jump that exits the loop.
-            #
             # Python 3.12-: guard is BEFORE body_start (condition checked at top).
             # Python 3.14+: guard may be AFTER body_start (do-while style, condition
             #               checked at bottom, just before JUMP_BACKWARD).
-            #
             # Strategy: find the conditional jump that is CLOSEST to body_start
             # (either just before or anywhere before jb.offset) whose target
             # is BEYOND jb.offset (i.e. exits the loop).
-            #
             # Also: dis may leave argval unresolved on 3.14, so compute the
             # absolute target two ways and take the larger.
             # Trivial opcodes that can appear between a guard's fall-through
@@ -2417,7 +2302,7 @@ class DecompilerGeneric(DecompilerBase):
             val = self.stack.pop()
             self._append_reconstructed(f"{obj}.{instr.argval} = {val}")
 
-        # FIX-12: STORE_SUBSCR (x[key] = val)
+        # STORE_SUBSCR (x[key] = val)
 
     def _op_store_subscr(self, instr: BytecodeInstruction):
         opname = instr.opname
@@ -2477,7 +2362,7 @@ class DecompilerGeneric(DecompilerBase):
         else:
             self._append_reconstructed("raise")
 
-        # FIX-10 / FIX-14: try/except/finally structural blocks.
+        # try/except/finally structural blocks.
         # Modern CPython (3.11+) exception handling structure:
         #   offset 2:  NOP                         ← try body start marker
         #   ...        <try body instructions>
@@ -2537,32 +2422,26 @@ class DecompilerGeneric(DecompilerBase):
             self.indent_level = self._except_header_indent
         # Peek ahead from the current position to find the optional
         # STORE_NAME / STORE_FAST that binds the 'as varname' in except.
-        #
         # The bytecode varies by version:
         #   3.12: POP_JUMP_IF_FALSE -> STORE_NAME e
         #   3.14: POP_JUMP_IF_FALSE -> POP_TOP -> STORE_NAME e
         #         (may include additional CACHE or other slots)
-        #
         # Strategy: skip forward through "harmless" single-cycle opcodes
         # (POP_JUMP_IF_*, POP_TOP, CACHE, NOP, COPY, RESUME) until we
         # either find a STORE or hit something that clearly belongs to
         # the handler body (a LOAD, BINARY, COMPARE, RETURN, RERAISE...).
-        #
         # The window is capped at 10 instructions to prevent runaway.
         # Scan forward from the current PC to find the optional
         # STORE_NAME / STORE_FAST that binds 'as varname' in except.
-        #
         # The binding zone varies by Python version:
         #   3.12 no-as:  POP_JUMP_IF_FALSE -> POP_TOP    -> LOAD_CONST  -> body
         #   3.12 as-e:   POP_JUMP_IF_FALSE -> STORE_NAME e -> body
         #   3.14 no-as:  POP_JUMP_IF_FALSE -> POP_TOP    -> LOAD_CONST  -> body
         #   3.14 as-e:   POP_JUMP_IF_FALSE -> POP_TOP    -> STORE_NAME e -> body
-        #
         # The correct discriminator is NOT "POP_TOP = no binding".
         # On 3.14, POP_TOP appears in BOTH cases (it pops the exc_type from
         # the CHECK_EXC_MATCH result). The real signal is whether STORE_NAME
         # appears before any LOAD_* or other body-start instruction.
-        #
         # Rules:
         #  1. Skip POP_JUMP_IF_* opcodes (the type-match conditional gate)
         #  2. Skip POP_TOP, CACHE, NOP, RESUME, COPY (neutral in all versions)
@@ -2685,7 +2564,7 @@ class DecompilerGeneric(DecompilerBase):
 
     def _op_before_with(self, instr: BytecodeInstruction):
         opname = instr.opname
-        # FIX-15: BEFORE_WITH — Python 3.11+ context-manager entry opcode.
+        # BEFORE_WITH — Python 3.11+ context-manager entry opcode.
         # At this point TOS is the context manager object (result of CALL).
         # BEFORE_WITH calls __enter__(), pushes the __exit__ callable, and
         # leaves the __enter__ return value on top of the stack.
@@ -2925,7 +2804,7 @@ class DecompilerGeneric(DecompilerBase):
                 r_str = f"({r_str})"
             self.stack.append(f"{l_str} {op} {r_str}")
 
-        # FIX-09: INPLACE_* → augmented assignment
+        # INPLACE_* → augmented assignment
 
     def _op_inplace(self, instr: BytecodeInstruction):
         opname = instr.opname
@@ -2951,7 +2830,7 @@ class DecompilerGeneric(DecompilerBase):
         opname = instr.opname
         num_args = int(instr.arg) if instr.arg is not None else 0
 
-        # FIX-07: keyword argument handling
+        # keyword argument handling
         # CALL_KW: TOS is a tuple of kw-names; then num_args values (kw last)
         kw_names: List[str] = []
         if opname == "CALL_KW" or ("kwnames" in str(instr.argval)):
@@ -2994,7 +2873,6 @@ class DecompilerGeneric(DecompilerBase):
         # (a) a decorator application: @decorator def name(...): body
         #     Stack: [..., decorator_expr, ('func', 'def name(...):\n body')]
         # (b) a genexpr/lambda called immediately (already handled below)
-        #
         # Distinguish: decorator bodies have a plain function name (no angle
         # brackets like <genexpr>, <lambda>, <listcomp> etc.).
         if isinstance(func_val, tuple) and func_val[0] == "func":
@@ -3138,7 +3016,7 @@ class DecompilerGeneric(DecompilerBase):
                     return
                 if b_type == "while":
                     break  # only check innermost loop
-        # FIX-11: detect while loop.
+        # detect while loop.
         # 3.11+ CPython compiles `while cond: body` as:
         #   A:  <condition>; POP_JUMP_IF_FALSE(end)  ← condition check #1
         #   B:  <body>
@@ -3146,7 +3024,6 @@ class DecompilerGeneric(DecompilerBase):
         #   D:  JUMP_BACKWARD(B)
         #   end-2: RETURN_CONST None  (loop-exhausted path — suppress)
         #   end:   RETURN_CONST None  (skipped path — suppress)
-        #
         # When we see JUMP_BACKWARD(B) we:
         #   1. Find the start of the duplicated condition block (first
         #      instruction at or after B whose offset is ≥ the last body
@@ -3157,7 +3034,7 @@ class DecompilerGeneric(DecompilerBase):
         if self._is_backward_instruction(instr):
             body_start = jump_target
 
-            # FIX-17: JUMP_BACKWARD instructions that exit except/finally
+            # JUMP_BACKWARD instructions that exit except/finally
             # handlers (they jump to a finally-merge label) must NOT be
             # treated as loop back-edges.  Skip them silently.
             if instr.offset in getattr(self, "_exc_handler_jump_offsets", ()):
@@ -3174,7 +3051,6 @@ class DecompilerGeneric(DecompilerBase):
             # the guard (e.g. guard offset >= body_start in a do-while layout,
             # or argval unresolved in a way the broadened search still misses).
             # Retroactively rewrite the most recent "if" header → "while".
-            #
             # Also suppress dup-condition instructions that already executed:
             # find where the dup region starts (first instruction after the
             # last STORE in the body) and drain extra stack items.
@@ -3492,7 +3368,7 @@ class DecompilerGeneric(DecompilerBase):
         elif opname == "BUILD_SET":
             self.stack.append("{" + ", ".join(items) + "}")
 
-        # FIX-08: BUILD_MAP
+        # BUILD_MAP
 
     def _op_build_map(self, instr: BytecodeInstruction):
         opname = instr.opname
@@ -3746,7 +3622,7 @@ _OPCODES_39: Dict[int, str] = {
 class Decompiler39(DecompilerGeneric):
     """Decompiler for .pyc files produced by CPython 3.9."""
 
-    # FIX-05 + FIX-04: manual disassembler with EXTENDED_ARG support
+    # manual disassembler with EXTENDED_ARG support
     def _disassemble(self):
         """
         Disassembles the contained code object's bytecode (Python 3.9 format) into self.instructions.
@@ -3761,7 +3637,7 @@ class Decompiler39(DecompilerGeneric):
             raw_arg = bytecode[i + 1] if i + 1 < len(bytecode) else 0
             i += 2
 
-            # FIX-05: accumulate EXTENDED_ARG
+            # accumulate EXTENDED_ARG
             if opcode == 144:  # EXTENDED_ARG
                 extended_arg = (extended_arg | raw_arg) << 8
                 continue
@@ -3936,7 +3812,7 @@ class Decompiler39(DecompilerGeneric):
                         if self.instructions[j].offset == end_reraise:
                             break
 
-    # FIX-06: clean instruction dispatch for 3.9-specific opcodes
+    # clean instruction dispatch for 3.9-specific opcodes
     def _handle_instruction(self, instr: BytecodeInstruction):
         # Suppress exception-path finally bodies
         """
@@ -4267,7 +4143,6 @@ class Decompiler39(DecompilerGeneric):
                 super()._handle_instruction(instr)
 
         # DUP_TOP — Python 3.9 typed/bare except handler entry.
-        #
         # Real 3.9.13 bytecode layout for typed except (from dis_out_39.txt):
         #   DUP_TOP
         #   LOAD_NAME ExcType
@@ -4277,7 +4152,6 @@ class Decompiler39(DecompilerGeneric):
         #   POP_TOP   }
         #   [STORE_NAME e]  ← only present for 'except X as e:'
         #   <handler body>
-        #
         # For bare except, DUP_TOP is followed immediately by the handler body
         # (no LOAD_NAME/type-check sequence).
         elif opname == "DUP_TOP":
@@ -4400,7 +4274,6 @@ class Decompiler39(DecompilerGeneric):
         # SETUP_FINALLY inside an except handler: Python 3.9 wraps the 'as e'
         # cleanup in a nested SETUP_FINALLY to guarantee 'e = None; del e' runs
         # on both normal and reraise paths.  We must NOT emit a second 'try:' here.
-        #
         # ALSO: when the target is a finally-block offset AND there's an immediately
         # following inner SETUP_FINALLY (the real try: body), this is a silent outer
         # wrapper.  For plain try/finally (no except), skip this path and use super().
@@ -4548,7 +4421,7 @@ class Decompiler311Plus(DecompilerGeneric):
 
 
 # ---------------------------------------------------------------------------
-# Python 3.14 stub  (FIX-13)
+# Python 3.14 stub
 # ---------------------------------------------------------------------------
 
 class Decompiler314(Decompiler311Plus):
@@ -4798,7 +4671,7 @@ class MarshalParser:
             f"Unsupported marshal type: {type_char!r} (hex: {hex(ord(type_char))})"
         )
 
-    # FIX-02: version-aware CodeType constructor
+    # version-aware CodeType constructor
     def _load_code(self) -> types.CodeType:
         argcount        = self._read_long()
         posonlyargcount = self._read_long()
@@ -4844,7 +4717,7 @@ class MarshalParser:
 
         vi = sys.version_info
 
-        # FIX-02: branch on the *host* Python's CodeType signature
+        # branch on the *host* Python's CodeType signature
         if vi >= (3, 11):
             # 3.11+: argcount, posonlyargcount, kwonlyargcount, nlocals,
             #        stacksize, flags, codestring, constants, names,
@@ -4885,8 +4758,7 @@ class MarshalParser:
 # Entry point: load .pyc and pick decompiler
 # ---------------------------------------------------------------------------
 
-# FIX-03: updated magic-number version ranges
-#
+# updated magic-number version ranges
 # Python version   magic (& 0xFFFF) range  (approximate — patch releases vary
 #                                           by a few units but stay in band)
 # 3.9              3410 – 3429
@@ -4942,7 +4814,7 @@ def get_decompiler(filepath: str) -> DecompilerBase:
     if not isinstance(code_obj, types.CodeType):
         raise ValueError("Could not find valid marshal code object in .pyc file")
 
-    # FIX-03: corrected dispatch table
+    # corrected dispatch table
     if 3410 <= version_id <= 3429:      # 3.9
         return Decompiler39(code_obj)
     elif version_id >= 3560:            # 3.14+
