@@ -546,7 +546,7 @@ class DecompilerGeneric(DecompilerBase):
             _exc_as_store_offset (int): Bytecode offset of a STORE_* that implements `except ... as name`
                 and should be skipped during normal emission (-1 when none).
             _exc_cleanup_name (Optional[str]): Exception cleanup temporary name to suppress from output.
-            _except_header_indent (int): Indentation level to use when emitting except headers (-1 when none).
+            _except_header_indent (Optional[int]): Indentation level to use when emitting except headers (None when none).
             _except_end_offset (int): End offset for an exception region used to suppress intervening jumps.
             _exc_bound_names (set): Names that have been bound via `except ... as name`.
             _try_nop_offsets (set): Offsets of NOP markers that indicate try-entry points (filled by prescan).
@@ -3484,26 +3484,6 @@ class DecompilerGeneric(DecompilerBase):
         for _ in range(num):
             if self.stack:
                 items.insert(0, str(self.stack.pop()))
-        self.stack.append(f"({', '.join(items)})")
-
-
-    def _op_build_collection(self, instr: BytecodeInstruction):
-        opname = instr.opname
-        items = []
-        num = int(instr.arg) if instr.arg is not None else 0
-        for _ in range(num):
-            if self.stack:
-                items.insert(0, str(self.stack.pop()))
-        self.stack.append("[" + ", ".join(items) + "]")
-
-
-    def _op_build_collection(self, instr: BytecodeInstruction):
-        opname = instr.opname
-        items = []
-        num = int(instr.arg) if instr.arg is not None else 0
-        for _ in range(num):
-            if self.stack:
-                items.insert(0, str(self.stack.pop()))
         
         if opname == "BUILD_TUPLE":
             self.stack.append(f"({', '.join(items)})")
@@ -3547,14 +3527,6 @@ class DecompilerGeneric(DecompilerBase):
                 self.stack.append(f"[*{it}]" if it.startswith("(") else f"list({it})")
             else:
                 self.stack.append(f"[*{lst}, *{it}]")
-
-
-    def _op_dict_merge(self, instr: BytecodeInstruction):
-        opname = instr.opname
-        if len(self.stack) >= 2:
-            src = str(self.stack.pop())
-            base = str(self.stack.pop())
-            self.stack.append(f"{{**{base}, **{src}}}")
 
 
     def _op_dict_merge(self, instr: BytecodeInstruction):
@@ -4518,26 +4490,6 @@ class Decompiler311Plus(DecompilerGeneric):
                 # CPython NB_* enum -> operator symbol.
                 op_idx = int(instr.arg) if instr.arg is not None else -1
 
-                # Python 3.14: BINARY_SUBSCR is encoded as BINARY_OP arg 26
-                if op_idx == 26:
-                    self.stack.append(f"{left}[{right}]")
-                    return
-
-                # Binary (non-mutating):
-                op_map = {
-                    0: "+",  1: "&",  2: "//", 3: "<<", 4: "@",
-                    5: "*",  6: "%",  7: "|",  8: "**", 9: ">>",
-                    10: "-", 11: "/", 12: "^",
-                }
-                # In-place / augmented-assignment:
-                inplace_map = {
-                    13: "+=",  14: "&=",  15: "//=", 16: "<<=", 17: "@=",
-                    18: "*=",  19: "%=",  20: "|=",  21: "**=", 22: ">>=",
-                    23: "-=",  24: "/=",  25: "^=",
-                }
-                inplace_op = inplace_map.get(op_idx)
-                bin_op = op_map.get(op_idx)
-
                 # 3.14+: subscript via BINARY_OP arg 26
                 if op_idx == 26:
                     self.stack.append(f"{left}[{right}]")
@@ -4555,7 +4507,6 @@ class Decompiler311Plus(DecompilerGeneric):
                     18: "*=",  19: "%=",  20: "|=",  21: "**=", 22: ">>=",
                     23: "-=",  24: "/=",  25: "^=",
                 }
-                op_idx = int(instr.arg) if instr.arg is not None else -1
                 inplace_op = inplace_map.get(op_idx)
                 bin_op = op_map.get(op_idx)
 
