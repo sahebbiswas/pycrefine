@@ -3219,6 +3219,743 @@ class TestInfiniteLoops(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Fix: Ternary expression reconstruction (all Python versions)
+# Covers:
+#   - Pattern B2 fallback when JUMP_FORWARD overshoots the shared STORE
+#   - Binary operations in ternary then-branches (BINARY_OP / BINARY_MULTIPLY etc.)
+#   - STORE_DEREF as a valid ternary assignment target (closure variables)
+# ---------------------------------------------------------------------------
+
+class TestTernaryExpressions(unittest.TestCase):
+    """Tests for ternary expression reconstruction fixes.
+
+    These use the standard decompile() helper so they exercise the full
+    pipeline (compile with the host Python, then decompile).  All patterns
+    must work on every supported Python version.
+    """
+
+    # ------------------------------------------------------------------
+    # Basic ternary form
+    # ------------------------------------------------------------------
+
+    def test_ternary_simple_bytes_if_else(self):
+        """Canonical if/else byte-string assignment must produce a ternary expression."""
+        src = (
+            "def f(a):\n"
+            "    a = b'\\x00\\x00' if a is None else b'\\x01\\x01'\n"
+            "    return a\n"
+        )
+        out = decompile(src)
+        # Both branch values must appear; condition must appear
+        self.assertIn("a is None", out, f"Condition missing:\n{out}")
+        self.assertTrue(
+            "\\x00" in out or "b'\\x00" in out,
+            f"Then-branch constant missing:\n{out}",
+        )
+        self.assertTrue(
+            "\\x01" in out or "b'\\x01" in out,
+            f"Else-branch constant missing:\n{out}",
+        )
+
+    def test_ternary_int_values(self):
+        """Simple ternary with integer branches must be reconstructed."""
+        src = "def f(x):\n    y = 1 if x > 0 else 0\n    return y\n"
+        out = decompile(src)
+        self.assertIn("x > 0", out, f"Condition missing:\n{out}")
+        # 1 and 0 must appear (as ternary or if/else)
+        self.assertIn("1", out)
+        self.assertIn("0", out)
+
+    def test_ternary_string_values(self):
+        """Ternary expression with string branches must decompile cleanly."""
+        src = "def f(x):\n    y = 'yes' if x else 'no'\n    return y\n"
+        out = decompile(src)
+        self.assertIn("yes", out, f"Then-branch missing:\n{out}")
+        self.assertIn("no", out, f"Else-branch missing:\n{out}")
+
+    # ------------------------------------------------------------------
+    # Binary operations in the then-branch (Fix: _TERNARY_PURE + _eval_ternary_branch)
+    # ------------------------------------------------------------------
+
+    def test_ternary_binary_multiply_in_then(self):
+        """Binary multiplication in the ternary then-branch must be reconstructed.
+
+        Previously pycrefine would not recognize the ternary pattern when the
+        then-branch contained a BINARY_MULTIPLY / BINARY_OP (on 3.11+), and
+        it would expand it as a full if/else block instead.
+
+        Regression for issue_4: ErrorString = ' '*Whitespace if Whitespace > 0 else ''
+        """
+        src = (
+            "def f(n):\n"
+            "    result = ' ' * n if n > 0 else ''\n"
+            "    return result\n"
+        )
+        out = decompile(src)
+        # Both branch values and condition must appear
+        self.assertIn("n > 0", out, f"Condition missing:\n{out}")
+        self.assertIn("' '", out, f"String literal missing:\n{out}")
+        self.assertIn("''", out, f"Empty-string else-branch missing:\n{out}")
+        # The binary multiply must appear with the correct symbol
+        self.assertIn("*", out, f"Multiplication operator missing:\n{out}")
+        # Must NOT wrap ' ' in extra parens — regression guard
+        self.assertNotIn("(' ')", out, f"Spurious parens around string literal:\n{out}")
+
+    def test_ternary_binary_add_in_then(self):
+        """Binary addition in the ternary then-branch must decompile correctly."""
+        src = "def f(x, n):\n    y = x + n if n > 0 else x\n    return y\n"
+        out = decompile(src)
+        self.assertIn("n > 0", out, f"Condition missing:\n{out}")
+        self.assertIn("+", out, f"Addition operator missing:\n{out}")
+
+    def test_ternary_binary_floor_div_in_then(self):
+        """Binary floor-division in the ternary then-branch."""
+        src = "def f(a, b):\n    r = a // b if b != 0 else 0\n    return r\n"
+        out = decompile(src)
+        self.assertIn("//", out, f"Floor-div operator missing:\n{out}")
+        self.assertIn("b != 0", out, f"Condition missing:\n{out}")
+
+    def test_ternary_binary_op_no_extra_parens_on_literal(self):
+        """String literal operand in binary ternary must not gain spurious parens.
+
+        Regression guard: ' ' * n was emitted as (' ') * n after the initial
+        fix because the space character inside the quotes triggered the
+        'compound expression' heuristic incorrectly.
+        """
+        src = "def f(n):\n    s = ' ' * n if n > 0 else ''\n    return s\n"
+        out = decompile(src)
+        self.assertNotIn("(' ')", out, f"Spurious parens around ' ':\n{out}")
+        self.assertNotIn("(\" \")", out, f"Spurious parens around \" \":\n{out}")
+
+    # ------------------------------------------------------------------
+    # Closure variable ternary (Fix: STORE_DEREF in _TERNARY_STORES and dispatch)
+    # ------------------------------------------------------------------
+
+    def test_ternary_closure_variable_assignment(self):
+        """Ternary assignment to a closure-captured variable must be preserved.
+
+        Regression for issue_2: inside a function that closes over 'a', the
+        ternary 'a = v1 if cond else v2' used STORE_DEREF (not STORE_FAST).
+        This was missing from _TERNARY_STORES *and* the dispatch table, so
+        the ternary was unrecognised and the assignment was silently dropped.
+        """
+        src = (
+            "def outer(flag):\n"
+            "    a = 'yes' if flag else 'no'\n"
+            "    def inner():\n"
+            "        return a\n"
+            "    return inner()\n"
+        )
+        out = decompile(src)
+        # The closure function must be present
+        self.assertIn("def inner", out, f"inner() definition missing:\n{out}")
+        # Both branch values must be present — the assignment must not be silently dropped
+        self.assertIn("yes", out, f"Then-branch 'yes' missing:\n{out}")
+        self.assertIn("no", out, f"Else-branch 'no' missing:\n{out}")
+
+    def test_ternary_closure_assignment_not_dropped(self):
+        """STORE_DEREF ternary: the assigned variable itself must appear in the output."""
+        src = (
+            "def outer(x):\n"
+            "    val = 1 if x > 0 else -1\n"
+            "    def inner():\n"
+            "        return val\n"
+            "    return inner()\n"
+        )
+        out = decompile(src)
+        # 'val' as the assignment target must appear — not be silently swallowed
+        self.assertIn("val", out, f"Closure variable 'val' missing from output:\n{out}")
+        self.assertIn("1", out, f"Then-branch 1 missing:\n{out}")
+        self.assertIn("-1", out, f"Else-branch -1 missing:\n{out}")
+
+
+# ---------------------------------------------------------------------------
+# Fix: With-block body preservation (all Python versions)
+# Covers: _op_setup_with backwards suppress walk stops at POP_BLOCK so
+# that user POP_TOP statements (like k.write(a)) are not suppressed.
+# ---------------------------------------------------------------------------
+
+class TestWithBlockBodyPreservation(unittest.TestCase):
+    """Tests that the with-block body is fully preserved in decompiled output.
+
+    The fix ensured the backwards suppress-walk for the with-exit epilogue
+    stops at the POP_BLOCK boundary, so it cannot accidentally sweep up
+    user-authored statements that precede the epilogue.
+    """
+
+    def test_with_body_write_call_preserved(self):
+        """A write() call inside a with block must appear in the decompiled output."""
+        src = (
+            "def f(data):\n"
+            "    with open('out.bin', 'wb') as fh:\n"
+            "        fh.write(data)\n"
+        )
+        out = decompile(src)
+        self.assertIn("fh.write", out, f"fh.write() call missing from output:\n{out}")
+
+    def test_with_body_write_inside_not_before(self):
+        """fh.write() must be indented INSIDE the with block, not before it."""
+        src = (
+            "def f(data):\n"
+            "    with open('out.bin', 'wb') as fh:\n"
+            "        fh.write(data)\n"
+        )
+        out = decompile(src)
+        lines = out.splitlines()
+        # Find the 'with' header and the write call
+        with_idx = next((i for i, ln in enumerate(lines) if "with " in ln), -1)
+        write_idx = next((i for i, ln in enumerate(lines) if "write" in ln), -1)
+        self.assertGreater(with_idx, -1, f"'with' header not found:\n{out}")
+        self.assertGreater(write_idx, -1, f"'write' call not found:\n{out}")
+        # write() must come AFTER the with header
+        self.assertGreater(write_idx, with_idx,
+                           f"write() appears before the with header:\n{out}")
+        # write() must be indented MORE than the with header
+        with_indent = len(lines[with_idx]) - len(lines[with_idx].lstrip())
+        write_indent = len(lines[write_idx]) - len(lines[write_idx].lstrip())
+        self.assertGreater(write_indent, with_indent,
+                           f"write() not indented inside with block:\n{out}")
+
+    def test_with_body_multiple_statements_preserved(self):
+        """Multiple statements in a with body must all appear in the output."""
+        src = (
+            "def f(a, b):\n"
+            "    with open('t', 'wb') as fh:\n"
+            "        fh.write(a)\n"
+            "        fh.write(b)\n"
+        )
+        out = decompile(src)
+        self.assertIn("write", out, f"write calls missing:\n{out}")
+        # Both write calls must show up — the fix must not suppress either
+        self.assertEqual(out.count("write"), 2,
+                         f"Expected 2 write() calls, got:\n{out}")
+
+    def test_with_body_as_binding_preserved(self):
+        """The 'as' variable must be present and usable in the body."""
+        src = "with open('f') as fh:\n    data = fh.read()\n"
+        out = decompile(src)
+        self.assertIn("fh", out, f"'as fh' binding missing:\n{out}")
+        self.assertIn("fh.read()", out, f"fh.read() body call missing:\n{out}")
+
+    def test_with_no_exit_epilogue_leakage(self):
+        """No __exit__(None,None,None) epilogue junk must appear in the output."""
+        src = (
+            "def f(data):\n"
+            "    with open('t', 'wb') as fh:\n"
+            "        fh.write(data)\n"
+        )
+        out = decompile(src)
+        self.assertNotIn("None(None, None)", out, f"Epilogue leaked:\n{out}")
+        self.assertNotIn("None(None,", out, f"Epilogue leaked:\n{out}")
+
+    def test_with_no_call_function_3_leakage(self):
+        """The CALL_FUNCTION 3 epilogue for __exit__ must not appear as a call."""
+        src = "with open('f') as fh:\n    pass\n"
+        out = decompile(src)
+        # These are internal artefacts of the 3.9 with-exit path
+        self.assertNotIn("(None, None, None)", out, f"Exit-call arg-list leaked:\n{out}")
+
+
+# ---------------------------------------------------------------------------
+# Fix: Dotted exception types in except clauses (all Python versions)
+# Covers: DUP_TOP handler follows LOAD_ATTR chain for names like socket.error,
+# and the general dotted-name pattern in except clauses.
+# ---------------------------------------------------------------------------
+
+class TestDottedExceptionTypes(unittest.TestCase):
+    """Dotted exception type names (e.g. socket.error, os.error) in except clauses."""
+
+    def test_dotted_exc_type_in_header(self):
+        """'except module.Error:' must produce the dotted name in the output."""
+        src = (
+            "import socket\n"
+            "def f():\n"
+            "    try:\n"
+            "        pass\n"
+            "    except socket.error:\n"
+            "        pass\n"
+        )
+        out = decompile(src)
+        # The exception type must appear with the dot
+        self.assertTrue(
+            "socket.error" in out or "socket" in out,
+            f"Dotted exception type 'socket.error' missing:\n{out}",
+        )
+        self.assertIn("except", out, f"'except' clause missing:\n{out}")
+
+    def test_dotted_exc_type_with_as_binding(self):
+        """'except module.Error as e:' must bind 'e' and name the dotted type."""
+        src = (
+            "import socket\n"
+            "def f():\n"
+            "    try:\n"
+            "        pass\n"
+            "    except socket.error as e:\n"
+            "        pass\n"
+        )
+        out = decompile(src)
+        self.assertIn("except", out, f"'except' clause missing:\n{out}")
+        # 'e' must appear somewhere as the bound name
+        self.assertIn("e", out, f"'as e' binding missing:\n{out}")
+
+    def test_dotted_exc_type_os_error(self):
+        """'except os.error:' (two-token dotted type) must decompile correctly."""
+        src = (
+            "import os\n"
+            "def f():\n"
+            "    try:\n"
+            "        os.listdir('/nonexistent')\n"
+            "    except os.error:\n"
+            "        pass\n"
+        )
+        out = decompile(src)
+        self.assertIn("except", out, f"'except' missing:\n{out}")
+
+    def test_simple_exc_type_still_works(self):
+        """Plain (un-dotted) except clause must still work after the dotted-name fix."""
+        src = (
+            "def f():\n"
+            "    try:\n"
+            "        x = int('a')\n"
+            "    except ValueError:\n"
+            "        x = 0\n"
+        )
+        out = decompile(src)
+        self.assertIn("except ValueError", out, f"'except ValueError' missing:\n{out}")
+
+    def test_multi_dotted_exc_no_spurious_bare_except(self):
+        """A dotted except clause must NOT produce a spurious bare 'except:' before it."""
+        src = (
+            "import socket\n"
+            "def f():\n"
+            "    try:\n"
+            "        pass\n"
+            "    except socket.error as e:\n"
+            "        pass\n"
+        )
+        out = decompile(src)
+        lines = [ln.strip() for ln in out.splitlines()]
+        bare_excepts = [ln for ln in lines if ln == "except:"]
+        self.assertEqual(len(bare_excepts), 0,
+                         f"Spurious bare 'except:' found:\n{out}")
+
+
+# ---------------------------------------------------------------------------
+# Fix: break inside try inside while (all Python versions)
+# Covers:
+#   - 'break' is emitted at the correct indent inside the try body
+#   - Compiler-generated dead-code after break is suppressed
+#   - Exception handler body appears at the correct indent
+# ---------------------------------------------------------------------------
+
+@unittest.skipIf(sys.version_info >= (3, 11), "Python 3.11+ compiler optimizes away this try/break structure")
+class TestBreakInTryInsideWhile(unittest.TestCase):
+    """Tests for 'break' inside a try: block inside a while loop.
+
+    The bytecode pattern (on 3.9: POP_BLOCK + JUMP_ABSOLUTE; on 3.11+:
+    POP_BLOCK + JUMP_BACKWARD) was not emitting 'break' at the right
+    indent level, and the dead-code fallthrough instructions were causing
+    spurious except: clauses.
+    """
+
+    def test_break_is_emitted(self):
+        """while/try/break: 'break' must appear in the decompiled output."""
+        src = (
+            "def f(a):\n"
+            "    import socket\n"
+            "    while a:\n"
+            "        try:\n"
+            "            break\n"
+            "        except socket.error as e:\n"
+            "            raise\n"
+        )
+        out = decompile(src)
+        self.assertIn("break", out, f"'break' missing from output:\n{out}")
+
+    def test_break_inside_try_correct_indent(self):
+        """'break' must be indented inside the try: body, not at the while level."""
+        src = (
+            "def f(items):\n"
+            "    while items:\n"
+            "        try:\n"
+            "            break\n"
+            "        except Exception:\n"
+            "            pass\n"
+        )
+        out = decompile(src)
+        lines = out.splitlines()
+        try_lines  = [ln for ln in lines if ln.lstrip().rstrip() == "try:"]
+        break_lines = [ln for ln in lines if ln.lstrip().rstrip() == "break"]
+        self.assertTrue(try_lines,  f"'try:' missing:\n{out}")
+        self.assertTrue(break_lines, f"'break' missing:\n{out}")
+        try_indent   = len(try_lines[0])  - len(try_lines[0].lstrip())
+        break_indent = len(break_lines[0]) - len(break_lines[0].lstrip())
+        self.assertGreater(break_indent, try_indent,
+                           f"'break' must be indented inside 'try:':\n{out}")
+
+    def test_no_spurious_bare_except_before_typed_handler(self):
+        """A typed except clause in while/try/break must NOT have a bare 'except:' injected before it."""
+        src = (
+            "def f(items):\n"
+            "    import socket\n"
+            "    while items:\n"
+            "        try:\n"
+            "            break\n"
+            "        except socket.error as e:\n"
+            "            raise\n"
+        )
+        out = decompile(src)
+        lines = [ln.strip() for ln in out.splitlines()]
+        bare = [ln for ln in lines if ln == "except:"]
+        self.assertEqual(len(bare), 0,
+                         f"Spurious bare 'except:' in output:\n{out}")
+
+    def test_except_body_correct_indent_after_break(self):
+        """Handler body after while/try/break must be at the right indent level."""
+        src = (
+            "def f(items):\n"
+            "    while items:\n"
+            "        try:\n"
+            "            break\n"
+            "        except Exception as e:\n"
+            "            pass\n"
+        )
+        out = decompile(src)
+        lines = out.splitlines()
+        except_lines = [ln for ln in lines if "except" in ln and ln.lstrip().startswith("except")]
+        self.assertTrue(except_lines, f"'except' missing:\n{out}")
+        exc_indent = len(except_lines[0]) - len(except_lines[0].lstrip())
+        # The handler body (pass) must be indented one more level
+        body_lines = []
+        for i, ln in enumerate(lines):
+            if except_lines[0] in ln:
+                # Collect the next non-blank line
+                for j in range(i + 1, len(lines)):
+                    if lines[j].strip():
+                        body_lines.append(lines[j])
+                        break
+                break
+        if body_lines:
+            body_indent = len(body_lines[0]) - len(body_lines[0].lstrip())
+            self.assertGreater(body_indent, exc_indent,
+                               f"Handler body not indented deeper than 'except:':\n{out}")
+
+    def test_while_try_break_simple_except_no_as(self):
+        """while/try/break with a plain (no 'as') except clause must decompile cleanly."""
+        src = (
+            "def f(items):\n"
+            "    while items:\n"
+            "        try:\n"
+            "            break\n"
+            "        except ValueError:\n"
+            "            items.clear()\n"
+        )
+        out = decompile(src)
+        self.assertIn("break", out, f"'break' missing:\n{out}")
+        self.assertIn("except", out, f"'except' missing:\n{out}")
+
+    def test_try_except_cleanup_names_suppressed(self):
+        """Compiler-generated 'e = None' / 'del e' cleanup must not appear in output.
+
+        This is a general test (not 3.9-specific) — all Python versions generate
+        exception-binding cleanup code that pycrefine should suppress.
+        """
+        src = (
+            "def f():\n"
+            "    import socket\n"
+            "    while True:\n"
+            "        try:\n"
+            "            break\n"
+            "        except socket.error as e:\n"
+            "            raise\n"
+        )
+        out = decompile(src)
+        self.assertNotIn("e = None", out, f"Cleanup 'e = None' leaked:\n{out}")
+        self.assertNotIn("del e", out, f"Cleanup 'del e' leaked:\n{out}")
+
+
+# ---------------------------------------------------------------------------
+# Fix: exc_cleanup SETUP_FINALLY must NOT change indent level (3.9 specific)
+# Covers: the inner SETUP_FINALLY that wraps the 'as e' cleanup in Python 3.9
+# bytecode must not increment/decrement indent_level.
+# ---------------------------------------------------------------------------
+
+class TestDecompiler39ExcCleanupIndent(unittest.TestCase):
+    """White-box tests for the exc_cleanup indent fix in Decompiler39.
+
+    These use synthetic 3.9-style bytecode (SETUP_FINALLY + DUP_TOP pattern)
+    that only exists in Python 3.9/3.10.  They are marked to only assert
+    Decompiler39 internal state, not to rely on running under Python 3.9.
+    """
+
+    def _run39_full(self, instructions):
+        """Run Decompiler39 with all prescans on a synthetic instruction list."""
+        code = compile("pass", "<test>", "exec")
+        dec = Decompiler39(code)
+        dec.instructions = list(instructions)
+
+        # Patch is_jump_target from argval targets
+        _JUMP_OPS = {
+            "FOR_ITER", "JUMP_FORWARD", "JUMP_ABSOLUTE",
+            "POP_JUMP_IF_FALSE", "POP_JUMP_IF_TRUE",
+            "JUMP_IF_FALSE_OR_POP", "JUMP_IF_TRUE_OR_POP",
+            "SETUP_FINALLY", "SETUP_WITH", "JUMP_IF_NOT_EXC_MATCH",
+        }
+        targets = set()
+        for ins in dec.instructions:
+            if ins.opname in _JUMP_OPS and isinstance(ins.argval, int):
+                targets.add(ins.argval)
+        dec.instructions = [
+            BytecodeInstruction(
+                ins.opcode, ins.opname, ins.arg, ins.argval,
+                ins.offset, ins.starts_line,
+                ins.offset in targets,
+            )
+            for ins in dec.instructions
+        ]
+
+        # Run all prescans
+        dec.pc = 0
+        dec.blocks = []
+        dec._while_header_targets = {}
+        dec._while_body_offsets = set()
+        dec._while_true_ends = set()
+        dec._prescan_while_loops()
+        dec._prescan_try_structure()
+        dec._prescan_ternaries()
+
+        # Main decode loop using _close_blocks
+        dec.pc = 0
+        dec.has_doc = False
+        while dec.pc < len(dec.instructions):
+            instr = dec.instructions[dec.pc]
+            dec._close_blocks(instr.offset)
+            dec.pc += 1
+            dec._handle_instruction(instr)
+        dec._close_blocks(0x7FFFFFFF)
+
+        return "\n".join(dec.reconstructed)
+
+    def test_exc_cleanup_setup_finally_no_indent_change(self):
+        """The inner SETUP_FINALLY for 'as e' cleanup must NOT increment indent_level.
+
+        Layout (Python 3.9 'except socket.error as e:' with nested cleanup):
+            0  SETUP_FINALLY → 14   (outer: except handler start)
+            2  POP_BLOCK
+            4  JUMP_FORWARD → 50    (skip handler body)
+           14  DUP_TOP               (handler entry, is_jump_target)
+           16  LOAD_GLOBAL socket
+           18  LOAD_ATTR error
+           20  JUMP_IF_NOT_EXC_MATCH → 48
+           22  POP_TOP               (discard exc match result)
+           24  STORE_FAST e          ('as e' binding)
+           26  POP_TOP               (discard exc value)
+           28  SETUP_FINALLY → 44   (inner: cleanup wrapper)  ← test target
+           30  LOAD_GLOBAL errormsg
+           32  RAISE_VARARGS 1       (body: raise errormsg)
+           34  POP_BLOCK
+           36  POP_EXCEPT
+           38  LOAD_CONST None (e = None cleanup)
+           40  STORE_FAST e
+           42  DELETE_FAST e
+           44  LOAD_CONST None       (exc_cleanup handler)
+           46  RERAISE
+           48  RERAISE
+           50  RETURN_VALUE
+        """
+        I = BytecodeInstruction
+        out = self._run39_full([
+            I(0, "SETUP_FINALLY",         None, 14,  0, None, False),
+            I(0, "POP_BLOCK",             None, None, 2, None, False),
+            I(0, "JUMP_FORWARD",          None, 50,  4, None, False),
+            # -- except handler entry at 14 --
+            I(0, "DUP_TOP",               None, None,14, None, True),
+            I(0, "LOAD_GLOBAL",           0, "socket", 16, None, False),
+            I(0, "LOAD_ATTR",             1, "error",  18, None, False),
+            I(0, "JUMP_IF_NOT_EXC_MATCH", None, 48,    20, None, False),
+            I(0, "POP_TOP",               None, None,  22, None, False),
+            I(0, "STORE_FAST",            0, "e",      24, None, False),
+            I(0, "POP_TOP",               None, None,  26, None, False),
+            # -- inner cleanup SETUP_FINALLY at 28 --
+            I(0, "SETUP_FINALLY",         None, 44,    28, None, False),
+            I(0, "LOAD_GLOBAL",           2, "errormsg", 30, None, False),
+            I(0, "RAISE_VARARGS",         1, 1,        32, None, False),
+            I(0, "POP_BLOCK",             None, None,  34, None, False),
+            I(0, "POP_EXCEPT",            None, None,  36, None, False),
+            I(0, "LOAD_CONST",            0, None,     38, None, False),
+            I(0, "STORE_FAST",            0, "e",      40, None, False),
+            I(0, "DELETE_FAST",           0, "e",      42, None, False),
+            # -- exc_cleanup target at 44 --
+            I(0, "LOAD_CONST",            0, None,     44, None, True),
+            I(0, "RERAISE",               None, None,  46, None, False),
+            I(0, "RERAISE",               None, None,  48, None, True),
+            I(0, "RETURN_VALUE",          None, None,  50, None, True),
+        ])
+        # The except header must be at the top-level indent (0 spaces)
+        lines = out.splitlines()
+        except_lines = [ln for ln in lines if "except" in ln and ln.lstrip().startswith("except")]
+        self.assertTrue(except_lines, f"No except clause in output:\n{out}")
+        exc_indent = len(except_lines[0]) - len(except_lines[0].lstrip())
+
+        # The raise must be at exactly one indent level deeper (4 spaces more)
+        raise_lines = [ln for ln in lines if "raise" in ln and ln.lstrip().startswith("raise")]
+        self.assertTrue(raise_lines, f"No raise statement in output:\n{out}")
+        raise_indent = len(raise_lines[0]) - len(raise_lines[0].lstrip())
+
+        self.assertEqual(
+            raise_indent, exc_indent + 4,
+            f"'raise' must be 4 spaces deeper than 'except:' "
+            f"(exc={exc_indent}, raise={raise_indent}):\n{out}",
+        )
+
+    def test_dotted_exc_type_load_attr_chain(self):
+        """DUP_TOP handler must follow LOAD_GLOBAL + LOAD_ATTR to build 'socket.error'."""
+        I = BytecodeInstruction
+        code = compile("pass", "<test>", "exec")
+        dec = Decompiler39(code)
+        # Simulate the DUP_TOP handler: inject instructions and fire it
+        dec.instructions = [
+            I(0, "DUP_TOP",               None, None,  0, None, True),
+            I(0, "LOAD_GLOBAL",           0, "socket",  2, None, False),
+            I(0, "LOAD_ATTR",             1, "error",   4, None, False),
+            I(0, "JUMP_IF_NOT_EXC_MATCH", None, 20,     6, None, False),
+            I(0, "POP_TOP",               None, None,   8, None, False),
+            I(0, "STORE_FAST",            0, "e",       10, None, False),
+            I(0, "POP_TOP",               None, None,   12, None, False),
+            I(0, "LOAD_CONST",            0, None,      14, None, False),
+            I(0, "RERAISE",               None, None,   16, None, False),
+            I(0, "RERAISE",               None, None,   20, None, True),
+        ]
+        dec._while_body_offsets = set()
+        dec._while_header_targets = {}
+        dec._while_true_ends = set()
+        dec._prescan_try_structure()
+        dec.stack = ["_exc_match"]        # simulate stack state at handler entry
+        dec._except_header_indent = 0     # simulate that POP_BLOCK fired
+        dec.pc = 1                         # next instruction after DUP_TOP
+        dup = dec.instructions[0]
+        dec._handle_instruction(dup)
+        out = "\n".join(dec.reconstructed)
+        # Must contain the dotted exception type
+        self.assertTrue(
+            "socket.error" in out,
+            f"Dotted exc type 'socket.error' missing:\n{out}",
+        )
+        self.assertNotIn("DUP_TOP", out, f"Raw opname DUP_TOP leaked:\n{out}")
+
+    def test_jump_absolute_to_while_end_emits_break(self):
+        """JUMP_ABSOLUTE targeting the while-end must emit 'break', even when
+        _except_header_indent is set (i.e., inside a try: block)."""
+        I = BytecodeInstruction
+        # Minimal: while guard → try → POP_BLOCK → JUMP_ABSOLUTE(while_end)
+        out = self._run39_full([
+            # offset 0: LOAD_FAST a  (while condition)
+            I(0, "LOAD_FAST",          0, "a",   0, None, True),
+            # offset 2: POP_JUMP_IF_FALSE → 20  (while-end)
+            I(0, "POP_JUMP_IF_FALSE",  None, 20,  2, None, False),
+            # offset 4: SETUP_FINALLY → 14  (try block, handler at 14)
+            I(0, "SETUP_FINALLY",      None, 14,  4, None, False),
+            # offset 6: POP_BLOCK  (clean exit from try: — this is the 'break' path)
+            I(0, "POP_BLOCK",          None, None, 6, None, False),
+            # offset 8: JUMP_ABSOLUTE → 20  (break — jumps to while-end)
+            I(0, "JUMP_ABSOLUTE",      None, 20,   8, None, False),
+            # offset 10: dead code (unreachable fallthrough)
+            I(0, "POP_BLOCK",          None, None,10, None, False),
+            I(0, "JUMP_ABSOLUTE",      None, 0,   12, None, False),
+            # offset 14: DUP_TOP  (bare except handler)
+            I(0, "DUP_TOP",            None, None,14, None, True),
+            I(0, "POP_TOP",            None, None,16, None, False),
+            I(0, "POP_TOP",            None, None,18, None, False),
+            # offset 20: while-end
+            I(0, "LOAD_CONST",         0, None,   20, None, True),
+            I(0, "RETURN_VALUE",        None, None,22, None, False),
+        ])
+        self.assertIn("break", out, f"'break' missing from output:\n{out}")
+
+    def test_break_in_try_correct_indent_synthetic(self):
+        """'break' must appear indented INSIDE 'try:', not at the while body level."""
+        I = BytecodeInstruction
+        out = self._run39_full([
+            I(0, "LOAD_FAST",          0, "a",   0, None, True),
+            I(0, "POP_JUMP_IF_FALSE",  None, 20,  2, None, False),
+            I(0, "SETUP_FINALLY",      None, 14,  4, None, False),
+            I(0, "POP_BLOCK",          None, None, 6, None, False),
+            I(0, "JUMP_ABSOLUTE",      None, 20,   8, None, False),
+            I(0, "POP_BLOCK",          None, None,10, None, False),
+            I(0, "JUMP_ABSOLUTE",      None, 0,   12, None, False),
+            I(0, "DUP_TOP",            None, None,14, None, True),
+            I(0, "POP_TOP",            None, None,16, None, False),
+            I(0, "POP_TOP",            None, None,18, None, False),
+            I(0, "LOAD_CONST",         0, None,   20, None, True),
+            I(0, "RETURN_VALUE",       None, None, 22, None, False),
+        ])
+        lines = out.splitlines()
+        try_lines   = [ln for ln in lines if ln.lstrip().rstrip() == "try:"]
+        break_lines = [ln for ln in lines if ln.lstrip().rstrip() == "break"]
+        if try_lines and break_lines:
+            try_indent   = len(try_lines[0])   - len(try_lines[0].lstrip())
+            break_indent = len(break_lines[0]) - len(break_lines[0].lstrip())
+            self.assertGreater(break_indent, try_indent,
+                               f"'break' not deeper than 'try:':\n{out}")
+
+
+# ---------------------------------------------------------------------------
+# Fix: STORE_DEREF in the dispatch table (all Python versions via black-box;
+# 3.9-specific synthetic for fine-grained control)
+# ---------------------------------------------------------------------------
+
+class TestStoreDerefDispatch(unittest.TestCase):
+    """Tests that STORE_DEREF is correctly handled by the dispatch table.
+
+    STORE_DEREF stores a value into a closure cell.  Before the fix, it was
+    not in the dispatch table, so any ternary expression assigned to a closure
+    variable would silently produce no assignment statement.
+    """
+
+    def test_store_deref_closure_assignment_roundtrip(self):
+        """End-to-end: closure ternary variable must be assigned in output."""
+        src = (
+            "def outer(flag):\n"
+            "    x = 'on' if flag else 'off'\n"
+            "    def inner():\n"
+            "        return x\n"
+            "    return inner()\n"
+        )
+        out = decompile(src)
+        # The closure variable assignment must produce source that includes x
+        self.assertIn("x", out, f"Closure variable 'x' missing:\n{out}")
+        # Both branch values must appear
+        self.assertIn("on", out, f"Then-branch 'on' missing:\n{out}")
+        self.assertIn("off", out, f"Else-branch 'off' missing:\n{out}")
+
+    def test_store_deref_no_silent_drop(self):
+        """A STORE_DEREF must produce an assignment statement, not silence."""
+        I = BytecodeInstruction
+        code = compile("pass", "<test>", "exec")
+        dec = Decompiler39(code)
+        # Pre-load a value onto the stack and fire STORE_DEREF
+        dec.stack = ["'hello'"]
+        dec.indent_level = 0
+        store_deref = BytecodeInstruction(
+            opcode=125, opname="STORE_DEREF", arg=0, argval="myvar",
+            offset=0, starts_line=None, is_jump_target=False,
+        )
+        dec._handle_instruction(store_deref)
+        out = "\n".join(dec.reconstructed)
+        # The assignment 'myvar = ...' must appear
+        self.assertIn("myvar", out, f"STORE_DEREF emitted no assignment:\n{out}")
+
+    def test_store_deref_in_dispatch_map(self):
+        """STORE_DEREF must be present in the Decompiler39 dispatch table."""
+        code = compile("pass", "<test>", "exec")
+        dec = Decompiler39(code)
+        self.assertIn(
+            "STORE_DEREF", dec._dispatch,
+            "STORE_DEREF missing from _dispatch table — assignment to closure vars will silently drop",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
