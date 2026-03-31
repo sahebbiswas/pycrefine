@@ -23,7 +23,7 @@ _MAX_TERNARY_MINI_SEARCH_WINDOW = 8
 _NO_PASS_TYPES = frozenset({"exc_cleanup", "finally_wrapper"})
 _NO_INDENT_TYPES = frozenset({"finally_wrapper"})
 
-_TERNARY_STORES = frozenset(("STORE_FAST", "STORE_NAME", "STORE_GLOBAL"))
+_TERNARY_STORES = frozenset(("STORE_FAST", "STORE_NAME", "STORE_GLOBAL", "STORE_DEREF"))
 _TERNARY_SKIP = frozenset(("CACHE", "RESUME", "NOT_TAKEN", "COPY_FREE_VARS"))
 _TERNARY_TERM = frozenset(("RETURN_CONST", "RETURN_VALUE"))
 _TERNARY_PURE = frozenset((
@@ -35,7 +35,12 @@ _TERNARY_PURE = frozenset((
     "UNARY_NOT", "UNARY_NEGATIVE", "UNARY_POSITIVE", "UNARY_INVERT",
     "BUILD_TUPLE", "BUILD_LIST", "BUILD_SET", "BUILD_MAP",
     "PRECALL", "PUSH_NULL", "FORMAT_VALUE", "FORMAT_SIMPLE", "BUILD_STRING",
-    "BINARY_SUBSCR", "TO_BOOL"
+    "BINARY_SUBSCR", "TO_BOOL",
+    # Python 3.9 named binary opcodes (3.11+ uses BINARY_OP instead):
+    "BINARY_ADD", "BINARY_SUBTRACT", "BINARY_MULTIPLY", "BINARY_TRUE_DIVIDE",
+    "BINARY_FLOOR_DIVIDE", "BINARY_MODULO", "BINARY_POWER", "BINARY_LSHIFT",
+    "BINARY_RSHIFT", "BINARY_AND", "BINARY_OR", "BINARY_XOR",
+    "BINARY_MATRIX_MULTIPLY",
 )) | _TERNARY_SKIP | _TERNARY_TERM
 
 _COMPOUND_SKIP = frozenset(("CACHE", "RESUME", "NOT_TAKEN", "COPY_FREE_VARS", "PRECALL", "PUSH_NULL"))
@@ -771,6 +776,14 @@ class DecompilerGeneric(DecompilerBase):
                     then_s = then_stores_before_jf[-1]
                     store_target = self._get_jump_target(jf)
                     st_idx = offset_to_idx.get(store_target)
+                    # The JUMP_FORWARD may target the post-merge point AFTER the
+                    # shared else-STORE rather than the STORE itself (e.g. the
+                    # simple if/else assignment pattern: then-EXPR then-STORE
+                    # JUMP_FORWARD(merge)  >> else-EXPR  STORE  >> merge).
+                    # When the resolved offset is not a STORE, fall back to
+                    # scanning forward from t_idx to find the real STORE.
+                    if st_idx is not None and self.instructions[st_idx].opname not in _TERNARY_STORES:
+                        st_idx = None
                     if st_idx is None:
                         for fi in range(t_idx, min(t_idx + _MAX_TERNARY_SEARCH_WINDOW, len(self.instructions))):
                             if self.instructions[fi].opname in _TERNARY_STORES:
@@ -1278,6 +1291,36 @@ class DecompilerGeneric(DecompilerBase):
                 if len(mini_stack) >= 2:
                     key, obj = mini_stack.pop(), mini_stack.pop()
                     mini_stack.append(f"{obj}[{key}]")
+            elif op in (
+                "BINARY_ADD", "BINARY_SUBTRACT", "BINARY_MULTIPLY",
+                "BINARY_TRUE_DIVIDE", "BINARY_FLOOR_DIVIDE", "BINARY_MODULO",
+                "BINARY_POWER", "BINARY_LSHIFT", "BINARY_RSHIFT",
+                "BINARY_AND", "BINARY_OR", "BINARY_XOR", "BINARY_MATRIX_MULTIPLY",
+            ):
+                # Python 3.9 named binary opcodes
+                _bin_map = {
+                    "BINARY_ADD": "+", "BINARY_SUBTRACT": "-",
+                    "BINARY_MULTIPLY": "*", "BINARY_TRUE_DIVIDE": "/",
+                    "BINARY_FLOOR_DIVIDE": "//", "BINARY_MODULO": "%",
+                    "BINARY_POWER": "**", "BINARY_LSHIFT": "<<",
+                    "BINARY_RSHIFT": ">>", "BINARY_AND": "&",
+                    "BINARY_OR": "|", "BINARY_XOR": "^",
+                    "BINARY_MATRIX_MULTIPLY": "@",
+                }
+                if len(mini_stack) >= 2:
+                    right, left = mini_stack.pop(), mini_stack.pop()
+                    sym = _bin_map.get(op, "?")
+                    l_s = str(left)
+                    r_s = str(right)
+                    # Add parens only when the left operand is a compound expression
+                    # (has spaces and is not already a parenthesised atom or string literal)
+                    def _needs_parens(s: str) -> bool:
+                        if not s or s[0] in ("'", '"', "(", "[", "{"):
+                            return False  # string literal or already wrapped
+                        return " " in s and not (s.startswith("(") and s.endswith(")"))
+                    if _needs_parens(l_s):
+                        l_s = f"({l_s})"
+                    mini_stack.append(f"{l_s} {sym} {r_s}")
         return str(mini_stack[-1]) if mini_stack else "?"
 
     def _has_conditional_jump(self) -> bool:
@@ -2079,6 +2122,7 @@ class DecompilerGeneric(DecompilerBase):
             
             # Stores
             "STORE_NAME": self._op_store, "STORE_FAST": self._op_store, "STORE_GLOBAL": self._op_store,
+            "STORE_DEREF": self._op_store,  # closure variable assignment (issue_2, Python 3.9 closures)
             "STORE_ATTR": self._op_store_attr, "STORE_SUBSCR": self._op_store_subscr,
             
             # Imports
@@ -2541,19 +2585,28 @@ class DecompilerGeneric(DecompilerBase):
         )
         if t_idx > 0:
             j = t_idx - 1
-            # Walk backwards to collect the exit-call block
+            # Walk backwards to collect the with-exit epilogue block.
+            # In Python 3.9, the epilogue always starts at POP_BLOCK:
+            #   POP_BLOCK; LOAD_CONST None; DUP_TOP; DUP_TOP;
+            #   CALL_FUNCTION 3; POP_TOP; JUMP_FORWARD
+            # We must NOT walk past POP_BLOCK because any POP_TOP
+            # before it belongs to the user's with-body (e.g. k.write(a)).
             suppress_start = None
             while j >= 0:
                 op = self.instructions[j].opname
                 if op in ("LOAD_CONST", "DUP_TOP", "CALL_FUNCTION",
-                          "POP_TOP", "JUMP_FORWARD", "JUMP_ABSOLUTE", "POP_BLOCK"):
+                          "POP_TOP", "JUMP_FORWARD", "JUMP_ABSOLUTE"):
                     suppress_start = self.instructions[j].offset
                     j -= 1
+                elif op == "POP_BLOCK":
+                    # POP_BLOCK is the epilogue boundary; include it then stop.
+                    suppress_start = self.instructions[j].offset
+                    break
                 else:
                     break
             if suppress_start is not None:
                 _fb = getattr(self, "_finally_body_suppress", set())
-                for k in range(j + 1, t_idx):
+                for k in range(j, t_idx):  # j is POP_BLOCK index now
                     op = self.instructions[k].opname
                     if op not in ("LOAD_CONST", "DUP_TOP", "CALL_FUNCTION",
                                   "POP_TOP", "JUMP_FORWARD", "JUMP_ABSOLUTE", "POP_BLOCK"):
@@ -4093,11 +4146,58 @@ class Decompiler39(DecompilerGeneric):
             is_finally_pop = False
             finally_target = None
             if self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup"):
+                # Peek ahead: if the next meaningful instruction is JUMP_ABSOLUTE
+                # targeting the enclosing while-end, this POP_BLOCK is the exit from
+                # a try: block that contains a bare `break` statement.  Emit `break`
+                # now (at the current try-body indent) BEFORE closing the block, then
+                # suppress the redundant dead-code instructions that follow (compiler
+                # generates an extra POP_BLOCK + JUMP_ABSOLUTE backward that is
+                # unreachable).
+                look = self.pc
+                while (look < len(self.instructions)
+                       and self.instructions[look].opname in ("RESUME", "NOP", "CACHE")):
+                    look += 1
+                if look < len(self.instructions):
+                    nxt = self.instructions[look]
+                    if nxt.opname == "JUMP_ABSOLUTE":
+                        nxt_target = self._get_jump_target(nxt)
+                        # Is this JUMP_ABSOLUTE a break to the while-end?
+                        _while_end = next(
+                            (b[0] for b in reversed(self.blocks) if b[1] == "while"), -1
+                        )
+                        if nxt_target > instr.offset and nxt_target == _while_end:
+                            # Emit break while still inside the try body
+                            self._append_reconstructed("break")
+                            # Advance past the JUMP_ABSOLUTE
+                            self.pc = look + 1
+                            # Suppress the dead-code POP_BLOCK + JUMP_ABSOLUTE backward
+                            # that follows (unreachable fallthrough path)
+                            sup = self.pc
+                            while (sup < len(self.instructions)
+                                   and self.instructions[sup].opname in ("RESUME", "NOP", "CACHE")):
+                                sup += 1
+                            if (sup < len(self.instructions)
+                                    and self.instructions[sup].opname == "POP_BLOCK"):
+                                _fb = getattr(self, "_finally_body_suppress", set())
+                                _fb.add(self.instructions[sup].offset)
+                                sup += 1
+                                while (sup < len(self.instructions)
+                                       and self.instructions[sup].opname in ("RESUME", "NOP", "CACHE")):
+                                    sup += 1
+                                if (sup < len(self.instructions)
+                                        and self.instructions[sup].opname == "JUMP_ABSOLUTE"):
+                                    _fb.add(self.instructions[sup].offset)
+                                self._finally_body_suppress = _fb
+
                 finally_target = self.blocks[-1][0]
                 if getattr(self, "_finally_targets", set()) and finally_target in self._finally_targets:
                     is_finally_pop = True
+                _closing_exc_cleanup = (self.blocks[-1][1] == "exc_cleanup")
                 self.blocks.pop()
-                self.indent_level -= 1
+                # exc_cleanup blocks do not change indent (SETUP_FINALLY for exc_cleanup
+                # tracks the boundary but does not increment indent_level).
+                if not _closing_exc_cleanup:
+                    self.indent_level -= 1
 
             # Second case: POP_BLOCK at the end of all except-handlers may find a
             # finally_wrapper block on top.  This POP_BLOCK signals the merge point
@@ -4138,6 +4238,7 @@ class Decompiler39(DecompilerGeneric):
         # JUMP_ABSOLUTE: in 3.9 this is used both as:
         #   (a) a loop back-edge (target <= current offset) — treat as JUMP_BACKWARD
         #   (b) a forward jump at end of except/if body — treat as JUMP_FORWARD
+        #   (c) break: forward jump to while-end from inside a try: block
         elif opname == "JUMP_ABSOLUTE":
             jump_target = self._get_jump_target(instr)
             if jump_target <= instr.offset:
@@ -4145,6 +4246,21 @@ class Decompiler39(DecompilerGeneric):
                 # in super(). _is_backward_instruction returns True for this case.
                 super()._handle_instruction(instr)
             else:
+                # Check for break: forward jump whose target matches the enclosing
+                # while-loop end.  This must be tested BEFORE the _except_header_indent
+                # suppression, because break inside try: still sets _except_header_indent
+                # via POP_BLOCK, but the jump is semantically a break not an else:
+                _is_break = False
+                for _b_off, _b_type in reversed(self.blocks):
+                    if _b_type == "while" and jump_target == _b_off:
+                        _is_break = True
+                        break
+                    if _b_type == "while":
+                        break  # innermost while has a different end
+                if _is_break:
+                    self._append_reconstructed("break")
+                    return
+
                 # Forward JUMP_ABSOLUTE: in try/except context, suppress else-detection
                 # (same as JUMP_FORWARD suppression below).
                 if self._except_header_indent is not None:
@@ -4184,7 +4300,7 @@ class Decompiler39(DecompilerGeneric):
                 "RESUME", "NOP", "CACHE"
             ):
                 look += 1
-            # --- Typed except: LOAD_NAME ExcType follows ---
+            # --- Typed except: LOAD_NAME ExcType (or dotted LOAD_ATTR chain) follows ---
             if (look < len(self.instructions)
                     and self.instructions[look].opname in (
                         "LOAD_NAME", "LOAD_GLOBAL", "LOAD_FAST",
@@ -4192,6 +4308,11 @@ class Decompiler39(DecompilerGeneric):
                     )):
                 exc_type = str(self.instructions[look].argval)
                 look += 1
+                # Follow any LOAD_ATTR chain for dotted exception names like socket.error
+                while (look < len(self.instructions)
+                       and self.instructions[look].opname == "LOAD_ATTR"):
+                    exc_type = f"{exc_type}.{self.instructions[look].argval}"
+                    look += 1
                 # 3.9 type-match gate: JUMP_IF_NOT_EXC_MATCH or COMPARE_OP
                 is_exc_match = (
                     look < len(self.instructions)
@@ -4304,9 +4425,10 @@ class Decompiler39(DecompilerGeneric):
         elif opname in ("SETUP_FINALLY", "SETUP_EXCEPT"):
             jump_target = self._get_jump_target(instr)
             if self._except_header_indent is not None:
-                # Inside an except handler — suppress 'try:' and just track boundary
+                # Inside an except handler — track the cleanup boundary WITHOUT
+                # changing indent (exc_cleanup is not a user-visible try: block).
+                # The matching POP_BLOCK for exc_cleanup also skips decrement.
                 self.blocks.append((jump_target, "exc_cleanup"))
-                self.indent_level += 1
             elif jump_target in getattr(self, "_finally_targets", set()):
                 # Check if the very next real instruction is another SETUP_FINALLY.
                 # If so: this is the outer wrapper, inner will emit try:
