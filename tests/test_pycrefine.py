@@ -4081,7 +4081,7 @@ class TestTernarySuppressionAllSubclasses(unittest.TestCase):
             Instr(124, "LOAD_FAST",          0,  "x",   0, True,  False),
             Instr(114, "POP_JUMP_IF_FALSE",  8,  8,     2, None,  False),
             Instr(100, "LOAD_CONST",         1,  1,     4, None,  False),
-            Instr(110, "JUMP_FORWARD",       2,  8,     6, None,  False),  # wrong target
+            Instr(110, "JUMP_FORWARD",       4, 10,     6, None,  False),
             Instr(100, "LOAD_CONST",         2,  2,     8, None,  True ),
             Instr(125, "STORE_FAST",         0,  "x",  10, None,  False),
             Instr( 83, "RETURN_VALUE",      None, None, 12, None,  False),
@@ -4186,8 +4186,8 @@ class TestNestedTryInsideExcept(unittest.TestCase):
 
         # Must have exactly two 'try:' occurrences
         try_count = out.count("try:")
-        self.assertGreaterEqual(try_count, 2,
-            f"Expected at least 2 'try:' blocks, got {try_count}:\n{out}")
+        self.assertEqual(try_count, 2,
+            f"Expected exactly 2 'try:' blocks, got {try_count}:\n{out}")
 
         # Must NOT collapse the nested try into a second except at wrong indent
         lines = [line for line in out.splitlines() if line.strip()]

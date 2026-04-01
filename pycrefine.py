@@ -156,7 +156,7 @@ def post_process_source(source: str) -> str:
                 # Cleanup doubled-up assignments from INPLACE binary ops
                 # e.g., 'var = (var += expr)' -> 'var += expr'
                 m_double = re.match(
-                    r'^(\s*)([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*\(\2\s*(\+|-|\*|/|//|%|&|\||\^|<<|>>|\*\*)=\s*(.*)\)$', 
+                    r'^(\s*)([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*\(\2\s*(\+|-|\*|/|//|%|&|\||\^|<<|>>|\*\*|@)=\s*(.*)\)$',
                     line
                 )
                 if m_double:
@@ -2782,13 +2782,13 @@ class DecompilerGeneric(DecompilerBase):
 
             # Combine positional, keyword-only, *args, and **kwargs
             params = positional.copy()
+            if varargs_name:
+                params.append(varargs_name)
             if kwonly_params:
                 # If there's no *args but we have kw-only, insert bare '*' separator
                 if not varargs_name:
                     params.append("*")
                 params.extend(kwonly_params)
-            if varargs_name:
-                params.append(varargs_name)
             if varkw_name:
                 params.append(varkw_name)
 
