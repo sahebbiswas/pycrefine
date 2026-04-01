@@ -112,7 +112,7 @@ def assert_not_contains(output: str, *fragments: str) -> None:
 
 def _run39_full_impl(instructions):
     """Shared helper to run Decompiler39 with all prescans on a synthetic instruction list."""
-    from pycrefine import Decompiler39, BytecodeInstruction
+    from pycrefine import Decompiler39, BytecodeInstruction, post_process_source
     code = compile("pass", "<test>", "exec")
     dec = Decompiler39(code)
     dec.instructions = list(instructions)
@@ -144,21 +144,43 @@ def _run39_full_impl(instructions):
     dec._prescan_while_loops()
     dec._prescan_try_structure()
     dec._prescan_ternaries()
+    dec._prescan_compound_conds()
+
+    # Docstring pre-pass (same as Decompiler39.decompile())
+    dec.has_doc = False
+    if dec.code_obj.co_consts and isinstance(dec.code_obj.co_consts[0], str):
+        first_meaningful = None
+        for ins in dec.instructions:
+            if ins.opname not in ("RESUME", "NOP", "CACHE", "NOT_TAKEN"):
+                first_meaningful = ins
+                break
+        is_docstring = False
+        if first_meaningful and first_meaningful.opname == "LOAD_CONST" and first_meaningful.arg == 0:
+            idx = dec.instructions.index(first_meaningful)
+            if idx + 1 < len(dec.instructions):
+                next_op = dec.instructions[idx + 1].opname
+                if next_op in ("POP_TOP", "STORE_NAME"):
+                    is_docstring = True
+        if is_docstring:
+            doc = dec.code_obj.co_consts[0]
+            if doc:
+                dec._append_reconstructed('"""', indent_multiline=True)
+                dec._append_reconstructed(doc.strip(), indent_multiline=True)
+                dec._append_reconstructed('"""', indent_multiline=True)
+                dec.has_doc = True
+                dec.reconstructed.append("")
 
     dec.pc = 0
-    dec.has_doc = False
     while dec.pc < len(dec.instructions):
         instr = dec.instructions[dec.pc]
         dec._close_blocks(instr.offset)
         dec.pc += 1
         dec._handle_instruction(instr)
     dec._close_blocks(0x7FFFFFFF)
-    return "\n".join(dec.reconstructed)
-    """Assert that none of the fragments appear in *output*."""
-    for frag in fragments:
-        assert frag not in output, (
-            f"Unexpected fragment {frag!r} found in decompiled output:\n{output}"
-        )
+
+    # Post-process like Decompiler39.decompile() does
+    raw_source = "\n".join(str(s) for s in dec.reconstructed).rstrip()
+    return post_process_source(raw_source)
 
 
 # ---------------------------------------------------------------------------

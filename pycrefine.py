@@ -847,10 +847,18 @@ class DecompilerGeneric(DecompilerBase):
                 store_target = self._get_jump_target(jf)
                 st_idx = offset_to_idx.get(store_target)
                 is_inplace = False
-                
-                if st_idx is not None and "INPLACE_" in self.instructions[st_idx].opname:
-                    is_inplace = True
-                    st_idx += 1  # The STORE typically follows INPLACE
+
+                if st_idx is not None:
+                    opname = self.instructions[st_idx].opname
+                    if "INPLACE_" in opname:
+                        is_inplace = True
+                        st_idx += 1  # The STORE typically follows INPLACE
+                    elif opname == "BINARY_OP":
+                        # BINARY_OP with arg in augmented-assignment range (13-25)
+                        arg_val = self.instructions[st_idx].arg
+                        if arg_val is not None and 13 <= int(arg_val) <= 25:
+                            is_inplace = True
+                            st_idx += 1  # The STORE typically follows BINARY_OP
 
                 if st_idx is None or self.instructions[st_idx].opname not in _TERNARY_STORES:
                     st_idx = None
@@ -2764,8 +2772,21 @@ class DecompilerGeneric(DecompilerBase):
                     if 0 <= idx < n_pos:
                         positional[idx] = f"{positional[idx]}={d}"
 
-            # Combine positional, *args, and **kwargs
+            # Extract keyword-only parameters
+            kwonly_params = []
+            if inner_code.co_kwonlyargcount > 0:
+                kwonly_start = inner_code.co_argcount
+                kwonly_end = inner_code.co_argcount + inner_code.co_kwonlyargcount
+                kwonly_names = list(inner_code.co_varnames[kwonly_start:kwonly_end])
+                kwonly_params = kwonly_names  # TODO: attach defaults if kw_defs is available
+
+            # Combine positional, keyword-only, *args, and **kwargs
             params = positional.copy()
+            if kwonly_params:
+                # If there's no *args but we have kw-only, insert bare '*' separator
+                if not varargs_name:
+                    params.append("*")
+                params.extend(kwonly_params)
             if varargs_name:
                 params.append(varargs_name)
             if varkw_name:
