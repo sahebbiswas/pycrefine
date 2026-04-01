@@ -157,6 +157,17 @@ def post_process_source(source: str) -> str:
                 line = return_parens_re.sub(r'\1\2', line)
                 line = if_parens_re.sub(r'\1\2:', line)
                 line = while_parens_re.sub(r'\1\2:', line)
+                
+                # Cleanup doubled-up assignments from INPLACE binary ops
+                # e.g., 'var = (var += expr)' -> 'var += expr'
+                m_double = re.match(
+                    r'^(\s*)([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*\(\2\s*(\+|-|\*|/|//|%|&|\||\^|<<|>>|\*\*)=\s*(.*)\)$', 
+                    line
+                )
+                if m_double:
+                    indent, var_name, op_sym, rhs = m_double.groups()
+                    line = f"{indent}{var_name} {op_sym}= {rhs}"
+                
                 out_lines.append(line)
                 
     flush_imports()
@@ -835,7 +846,14 @@ class DecompilerGeneric(DecompilerBase):
 
                 store_target = self._get_jump_target(jf)
                 st_idx = offset_to_idx.get(store_target)
-                if st_idx is None:
+                is_inplace = False
+                
+                if st_idx is not None and "INPLACE_" in self.instructions[st_idx].opname:
+                    is_inplace = True
+                    st_idx += 1  # The STORE typically follows INPLACE
+
+                if st_idx is None or self.instructions[st_idx].opname not in _TERNARY_STORES:
+                    st_idx = None
                     for fi in range(t_idx, min(t_idx + _MAX_TERNARY_SEARCH_WINDOW, len(self.instructions))):
                         if self.instructions[fi].opname in _TERNARY_STORES:
                             st_idx = fi
@@ -843,7 +861,8 @@ class DecompilerGeneric(DecompilerBase):
                 if st_idx is None:
                     continue
 
-                else_raw    = self.instructions[t_idx : st_idx]
+                else_end = st_idx - 1 if is_inplace else st_idx
+                else_raw    = self.instructions[t_idx : else_end]
                 else_instrs = [x for x in else_raw if x.opname not in _TERNARY_SKIP]
                 if any(x.opname == "POP_TOP" or "POP_JUMP_IF" in x.opname
                        for x in else_instrs):
@@ -1444,7 +1463,11 @@ class DecompilerGeneric(DecompilerBase):
                 body_instr = next(
                     (ins for ins in self.instructions if ins.offset == body_start), None
                 )
-                if body_instr and body_instr.is_jump_target:
+                # Do NOT classify FOR_ITER / GET_ITER / GET_ANEXT as while-True:
+                # those are for-loop heads whose back-edge is the loop iterator
+                # stepping, not an unconditional while-True loop body.
+                if (body_instr and body_instr.is_jump_target
+                        and body_instr.opname not in _TRY_LOOP_HEADS):
                     self._while_header_targets[body_start] = -1
 
     def _find_jump_backward_end(self) -> int:
@@ -2700,6 +2723,26 @@ class DecompilerGeneric(DecompilerBase):
             inner_code = code_obj_val[1]
             positional = list(inner_code.co_varnames[: inner_code.co_argcount])
 
+            # CO_VARARGS (0x04): function accepts *args — stored in
+            # co_varnames[co_argcount] (after all positional params).
+            _CO_VARARGS = 0x04
+            _CO_VARKEYWORDS = 0x08
+            has_varargs = bool(inner_code.co_flags & _CO_VARARGS)
+            has_varkw   = bool(inner_code.co_flags & _CO_VARKEYWORDS)
+            # Index of *args and **kwargs names in co_varnames:
+            varargs_idx  = inner_code.co_argcount
+            varkw_idx    = inner_code.co_argcount + int(has_varargs)
+            varargs_name = (
+                "*" + inner_code.co_varnames[varargs_idx]
+                if has_varargs and varargs_idx < len(inner_code.co_varnames)
+                else None
+            )
+            varkw_name = (
+                "**" + inner_code.co_varnames[varkw_idx]
+                if has_varkw and varkw_idx < len(inner_code.co_varnames)
+                else None
+            )
+
             # Attach default values to trailing positional args
             if defaults is not None:
                 raw = str(defaults)
@@ -2721,10 +2764,17 @@ class DecompilerGeneric(DecompilerBase):
                     if 0 <= idx < n_pos:
                         positional[idx] = f"{positional[idx]}={d}"
 
+            # Combine positional, *args, and **kwargs
+            params = positional.copy()
+            if varargs_name:
+                params.append(varargs_name)
+            if varkw_name:
+                params.append(varkw_name)
+
             dec_class = _pick_decompiler_class(self)
             dec = dec_class(inner_code, indent_level=1)
             body = dec.decompile()
-            sig = f"def {inner_code.co_name}({', '.join(positional)}):"
+            sig = f"def {inner_code.co_name}({', '.join(params)}):"
             self.stack.append(("func", f"{sig}\n{body}"))
         else:
             self.stack.append("make_function(?)")
@@ -3900,6 +3950,14 @@ class Decompiler39(DecompilerGeneric):
         Parameters:
             instr (BytecodeInstruction): The disassembled instruction to process (uses fields such as opname, arg, argval, offset, and is_jump_target).
         """
+        # Suppress then-branch instructions of detected ternary expressions
+        if instr.offset in getattr(self, "_ternary_suppress", ()):
+            return
+        # Suppress intermediate instructions belonging to a compound boolean
+        if instr.offset in getattr(self, "_compound_suppress", ()):
+            if self.stack:
+                self.stack.pop()
+            return
         if getattr(self, "_finally_body_suppress", set()) and instr.offset in self._finally_body_suppress:
             return
         
@@ -4425,10 +4483,24 @@ class Decompiler39(DecompilerGeneric):
         elif opname in ("SETUP_FINALLY", "SETUP_EXCEPT"):
             jump_target = self._get_jump_target(instr)
             if self._except_header_indent is not None:
-                # Inside an except handler — track the cleanup boundary WITHOUT
-                # changing indent (exc_cleanup is not a user-visible try: block).
-                # The matching POP_BLOCK for exc_cleanup also skips decrement.
-                self.blocks.append((jump_target, "exc_cleanup"))
+                # Inside an except handler: check whether the jump target is a real
+                # handler entry (DUP_TOP) = genuine nested try:, or cleanup machinery.
+                target_idx = next(
+                    (i for i, x in enumerate(self.instructions) if x.offset == jump_target), -1
+                )
+                target_is_handler_entry = (
+                    target_idx >= 0
+                    and self.instructions[target_idx].opname in ("DUP_TOP",)
+                )
+                if target_is_handler_entry:
+                    # Real nested try: inside an except — emit try: normally.
+                    # Clear _except_header_indent so the inner DUP_TOP handler
+                    # sets it fresh at the right (inner) indent level.
+                    self._except_header_indent = None
+                    super()._handle_instruction(instr)
+                else:
+                    # 'as e' cleanup guard — silent, track boundary without try:.
+                    self.blocks.append((jump_target, "exc_cleanup"))
             elif jump_target in getattr(self, "_finally_targets", set()):
                 # Check if the very next real instruction is another SETUP_FINALLY.
                 # If so: this is the outer wrapper, inner will emit try:
@@ -4498,6 +4570,15 @@ class Decompiler39(DecompilerGeneric):
 class Decompiler311Plus(DecompilerGeneric):
 
     def _handle_instruction(self, instr: BytecodeInstruction):
+        # Suppress then-branch instructions of detected ternary expressions
+        if instr.offset in getattr(self, "_ternary_suppress", ()):
+            return
+        # Suppress intermediate instructions belonging to a compound boolean
+        if instr.offset in getattr(self, "_compound_suppress", ()):
+            if self.stack:
+                self.stack.pop()
+            return
+
         if instr.opname == "RESUME":
             pass
         elif instr.opname == "BINARY_OP":
@@ -4593,6 +4674,15 @@ class Decompiler314(Decompiler311Plus):
         Side effects:
             May mutate self.pc, self.stack, self.blocks, self.indent_level, self.reconstructed, and may create or update self._with_exit_suppress. Delegates to super()._handle_instruction for further emission when appropriate.
         """
+        # Suppress then-branch instructions of detected ternary expressions
+        if instr.offset in getattr(self, "_ternary_suppress", ()):
+            return
+        # Suppress intermediate instructions belonging to a compound boolean
+        if instr.offset in getattr(self, "_compound_suppress", ()):
+            if self.stack:
+                self.stack.pop()
+            return
+
         opname = instr.opname
         
         # Suppress normal-path __exit__ body calls (identified by range scan)

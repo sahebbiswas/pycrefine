@@ -3956,8 +3956,504 @@ class TestStoreDerefDispatch(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# Regression: ternary suppression propagated to all subclasses (Fix — api_3)
 # ---------------------------------------------------------------------------
+
+class TestTernarySuppressionAllSubclasses(unittest.TestCase):
+    """
+    Regression tests for the ternary-hallucination bug where Decompiler39
+    (and other subclasses) did NOT run _ternary_suppress checks because they
+    override _handle_instruction without calling super().
+
+    The fix adds explicit _ternary_suppress / _compound_suppress guards at the
+    top of each subclass's _handle_instruction.  These tests confirm that
+    ternary expressions are NOT wrapped in a phantom function call.
+    """
+
+    def _run39_full(self, instructions):
+        """Run Decompiler39 with all prescans on a synthetic instruction list."""
+        code = compile("pass", "<test>", "exec")
+        dec = Decompiler39(code)
+        dec.instructions = list(instructions)
+
+        _JUMP_OPS = {
+            "FOR_ITER", "JUMP_FORWARD", "JUMP_ABSOLUTE",
+            "POP_JUMP_IF_FALSE", "POP_JUMP_IF_TRUE",
+            "JUMP_IF_FALSE_OR_POP", "JUMP_IF_TRUE_OR_POP",
+            "SETUP_FINALLY", "SETUP_WITH", "JUMP_IF_NOT_EXC_MATCH",
+        }
+        targets = {
+            ins.argval for ins in dec.instructions
+            if ins.opname in _JUMP_OPS and isinstance(ins.argval, int)
+        }
+        dec.instructions = [
+            BytecodeInstruction(
+                ins.opcode, ins.opname, ins.arg, ins.argval,
+                ins.offset, ins.starts_line,
+                ins.offset in targets,
+            )
+            for ins in dec.instructions
+        ]
+
+        dec.pc = 0
+        dec.blocks = []
+        dec._while_header_targets = {}
+        dec._while_body_offsets = set()
+        dec._while_true_ends = set()
+        dec._prescan_while_loops()
+        dec._prescan_try_structure()
+        dec._prescan_ternaries()
+
+        dec.pc = 0
+        dec.has_doc = False
+        while dec.pc < len(dec.instructions):
+            instr = dec.instructions[dec.pc]
+            dec._close_blocks(instr.offset)
+            dec.pc += 1
+            dec._handle_instruction(instr)
+        dec._close_blocks(0x7FFFFFFF)
+        return "\n".join(dec.reconstructed)
+
+    # ------------------------------------------------------------------
+    # api_3 regression: ternary with function call in else branch
+    # ------------------------------------------------------------------
+
+    def test_ternary_with_call_else_branch_no_func_wrapper(self):
+        """
+        Regression: ternary whose else-branch is a function call must NOT
+        produce func(...) wrapping.
+
+        Mirrors api_3(iv) from verify_scenes.py:
+            iv = '\x00'*16 if iv is None else api_1(iv)
+
+        3.9 bytecode layout:
+            0  LOAD_FAST iv
+            2  LOAD_CONST None
+            4  IS_OP (is)                   # iv is None → TOS
+            6  POP_JUMP_IF_FALSE → 14       # ternary condition jump
+            8  LOAD_CONST '\x00...'         # then-branch (in suppress)
+           10  JUMP_FORWARD → 20            # → end (in suppress)
+           14  LOAD_GLOBAL api_1            # else-branch start (in suppress)
+           16  LOAD_FAST iv                 # else-branch arg (in suppress)
+           18  CALL_FUNCTION 1              # else-branch call  (in suppress)
+           20  STORE_FAST iv               # store ternary result
+           22  LOAD_FAST iv
+           24  RETURN_VALUE
+        """
+        I = BytecodeInstruction
+        instructions = [
+            I(124, "LOAD_FAST",          0,    "iv",          0,  True,  False),
+            I(100, "LOAD_CONST",         0,    None,          2,  None,  False),
+            I( 93, "IS_OP",              0,    None,          4,  None,  False),
+            I(114, "POP_JUMP_IF_FALSE",  14,   14,            6,  None,  False),
+            I(100, "LOAD_CONST",         1,    "\x00" * 16,   8,  None,  False),
+            I(110, "JUMP_FORWARD",       8,    20,           10,  None,  False),
+            I(116, "LOAD_GLOBAL",        0,    "api_1",      14,  None,  True ),
+            I(124, "LOAD_FAST",          0,    "iv",         16,  None,  False),
+            I(131, "CALL_FUNCTION",      1,    1,            18,  None,  False),
+            I(125, "STORE_FAST",         0,    "iv",         20,  None,  True ),
+            I(124, "LOAD_FAST",          0,    "iv",         22,  None,  False),
+            I( 83, "RETURN_VALUE",       None, None,         24,  None,  False),
+        ]
+        out = self._run39_full(instructions)
+        # Must contain the ternary expression itself
+        self.assertIn("api_1(iv)", out, f"ternary else branch missing:\n{out}")
+        # Must NOT contain any phantom func() wrapper
+        self.assertNotIn("func(", out,
+            f"Phantom func() wrapper emitted for ternary expression:\n{out}")
+
+    def test_ternary_suppression_set_populated_for_call_else(self):
+        """
+        The offsets of the CALL_FUNCTION in the else-branch of a ternary
+        must be added to _ternary_suppress by _prescan_ternaries.
+        """
+        I = BytecodeInstruction
+        code = compile("pass", "<test>", "exec")
+        dec = Decompiler39(code)
+        dec.instructions = [
+            I(124, "LOAD_FAST",          0,  "iv",    0, True,  False),
+            I(100, "LOAD_CONST",         0,  None,    2, None,  False),
+            I( 93, "IS_OP",              0,  None,    4, None,  False),
+            I(114, "POP_JUMP_IF_FALSE", 14,  14,      6, None,  False),
+            I(100, "LOAD_CONST",         1,  "\x00",  8, None,  False),
+            I(110, "JUMP_FORWARD",       8,  20,     10, None,  False),
+            I(116, "LOAD_GLOBAL",        0,  "f",    14, None,  True ),
+            I(124, "LOAD_FAST",          0,  "iv",   16, None,  False),
+            I(131, "CALL_FUNCTION",      1,  1,      18, None,  False),
+            I(125, "STORE_FAST",         0,  "iv",   20, None,  True ),
+            I( 83, "RETURN_VALUE",      None, None,  22, None,  False),
+        ]
+        dec._prescan_ternaries()
+        suppress = getattr(dec, "_ternary_suppress", set())
+        # The CALL_FUNCTION at offset 18 must be suppressed
+        self.assertIn(18, suppress,
+            f"CALL_FUNCTION offset 18 not in _ternary_suppress: {suppress}")
+
+    def test_ternary_suppression_does_not_leak_into_next_statement(self):
+        """
+        Instructions AFTER the ternary's store must NOT be suppressed.
+        """
+        I = BytecodeInstruction
+        code = compile("pass", "<test>", "exec")
+        dec = Decompiler39(code)
+        dec.instructions = [
+            I(124, "LOAD_FAST",          0,  "x",   0, True,  False),
+            I(114, "POP_JUMP_IF_FALSE",  8,  8,     2, None,  False),
+            I(100, "LOAD_CONST",         1,  1,     4, None,  False),
+            I(110, "JUMP_FORWARD",       2,  8,     6, None,  False),  # wrong target
+            I(100, "LOAD_CONST",         2,  2,     8, None,  True ),
+            I(125, "STORE_FAST",         0,  "x",  10, None,  False),
+            I( 83, "RETURN_VALUE",      None, None, 12, None,  False),
+        ]
+        dec._prescan_ternaries()
+        suppress = getattr(dec, "_ternary_suppress", set())
+        # RETURN_VALUE is NOT part of the ternary
+        self.assertNotIn(12, suppress,
+            "RETURN_VALUE at offset 12 incorrectly in _ternary_suppress")
+
+
+# ---------------------------------------------------------------------------
+# Regression: nested try/except inside except handler (Fix — api_4)
+# ---------------------------------------------------------------------------
+
+class TestNestedTryInsideExcept(unittest.TestCase):
+    """
+    Regression tests for the bug where SETUP_FINALLY inside an except handler
+    was always treated as a silent exc_cleanup guard, suppressing the nested
+    try: keyword.
+
+    The fix distinguishes genuine nested try: (target is DUP_TOP handler entry)
+    from the 'as e' cleanup guard (target is RERAISE/cleanup).
+    """
+
+    def _run39_full(self, instructions):
+        """Run Decompiler39 with all prescans on a synthetic instruction list."""
+        code = compile("pass", "<test>", "exec")
+        dec = Decompiler39(code)
+        dec.instructions = list(instructions)
+
+        _JUMP_OPS = {
+            "FOR_ITER", "JUMP_FORWARD", "JUMP_ABSOLUTE",
+            "POP_JUMP_IF_FALSE", "POP_JUMP_IF_TRUE",
+            "JUMP_IF_FALSE_OR_POP", "JUMP_IF_TRUE_OR_POP",
+            "SETUP_FINALLY", "SETUP_WITH", "JUMP_IF_NOT_EXC_MATCH",
+        }
+        targets = {
+            ins.argval for ins in dec.instructions
+            if ins.opname in _JUMP_OPS and isinstance(ins.argval, int)
+        }
+        dec.instructions = [
+            BytecodeInstruction(
+                ins.opcode, ins.opname, ins.arg, ins.argval,
+                ins.offset, ins.starts_line,
+                ins.offset in targets,
+            )
+            for ins in dec.instructions
+        ]
+
+        dec.pc = 0
+        dec.blocks = []
+        dec._while_header_targets = {}
+        dec._while_body_offsets = set()
+        dec._while_true_ends = set()
+        dec._prescan_while_loops()
+        dec._prescan_try_structure()
+        dec._prescan_ternaries()
+
+        dec.pc = 0
+        dec.has_doc = False
+        while dec.pc < len(dec.instructions):
+            instr = dec.instructions[dec.pc]
+            dec._close_blocks(instr.offset)
+            dec.pc += 1
+            dec._handle_instruction(instr)
+        dec._close_blocks(0x7FFFFFFF)
+        return "\n".join(dec.reconstructed)
+
+    def test_nested_try_inside_except_emits_try(self):
+        """
+        A SETUP_FINALLY whose target is DUP_TOP (a real handler entry) while
+        inside an except handler must emit a nested 'try:' statement.
+
+        Mirrors api_4(var1, var2) from verify_scenes.py:
+            try:
+                var3 = var1
+            except Exception:
+                try:          ← must appear
+                    var3 = var2
+                except Exception:
+                    pass
+        """
+        I = BytecodeInstruction
+        # Simplified layout matching 3.9 nested try/except pattern:
+        #  0  LOAD_CONST 0       → push 0
+        #  2  STORE_FAST var3    → var3 = 0
+        #  4  SETUP_FINALLY → 14 (outer try body)
+        #  6  LOAD_FAST var1
+        #  8  STORE_FAST var3
+        # 10  POP_BLOCK
+        # 12  JUMP_FORWARD → 56  (skip handlers)
+        # 14  DUP_TOP             ← outer except Exception: entry
+        # 16  LOAD_GLOBAL Exception
+        # 18  JUMP_IF_NOT_EXC_MATCH → 54
+        # 20  POP_TOP / POP_TOP / POP_TOP   (discard exc triple)
+        # 26  SETUP_FINALLY → 36  ← INNER try: (target=DUP_TOP at 36)
+        # 28  LOAD_FAST var2
+        # 30  STORE_FAST var3
+        # 32  POP_BLOCK
+        # 34  JUMP_FORWARD → 52
+        # 36  DUP_TOP             ← inner except Exception: entry
+        # 38  LOAD_GLOBAL Exception
+        # 40  JUMP_IF_NOT_EXC_MATCH → 50
+        # 42  POP_TOP / POP_TOP / POP_TOP
+        # 48  POP_EXCEPT
+        # 50  RERAISE
+        # 52  POP_EXCEPT
+        # 54  RERAISE
+        # 56  LOAD_CONST None / RETURN_VALUE
+        instructions = [
+            I(100, "LOAD_CONST",          0,  0,          0, True,  False),
+            I(125, "STORE_FAST",          2,  "var3",     2, None,  False),
+            I(122, "SETUP_FINALLY",       14, 14,         4, None,  False),
+            I(124, "LOAD_FAST",           0,  "var1",     6, None,  False),
+            I(125, "STORE_FAST",          2,  "var3",     8, None,  False),
+            I( 87, "POP_BLOCK",          None, None,     10, None,  False),
+            I(110, "JUMP_FORWARD",        56, 56,        12, None,  False),
+            I(  4, "DUP_TOP",            None, None,     14, None,  True ),
+            I(116, "LOAD_GLOBAL",         0,  "Exception",16,None,  False),
+            I( 18, "JUMP_IF_NOT_EXC_MATCH",54,54,        18, None,  False),
+            I(  1, "POP_TOP",            None, None,     20, None,  False),
+            I(  1, "POP_TOP",            None, None,     22, None,  False),
+            I(  1, "POP_TOP",            None, None,     24, None,  False),
+            I(122, "SETUP_FINALLY",       36, 36,        26, None,  False),  # ← inner try
+            I(124, "LOAD_FAST",           1,  "var2",    28, None,  False),
+            I(125, "STORE_FAST",          2,  "var3",    30, None,  False),
+            I( 87, "POP_BLOCK",          None, None,     32, None,  False),
+            I(110, "JUMP_FORWARD",        52, 52,        34, None,  False),
+            I(  4, "DUP_TOP",            None, None,     36, None,  True ),  # ← DUP_TOP target
+            I(116, "LOAD_GLOBAL",         0,  "Exception",38,None,  False),
+            I( 18, "JUMP_IF_NOT_EXC_MATCH",50,50,        40, None,  False),
+            I(  1, "POP_TOP",            None, None,     42, None,  False),
+            I(  1, "POP_TOP",            None, None,     44, None,  False),
+            I(  1, "POP_TOP",            None, None,     46, None,  False),
+            I( 89, "POP_EXCEPT",         None, None,     48, None,  False),
+            I( 48, "RERAISE",            None, None,     50, None,  True ),
+            I( 89, "POP_EXCEPT",         None, None,     52, None,  True ),
+            I( 48, "RERAISE",            None, None,     54, None,  True ),
+            I(100, "LOAD_CONST",          0,  None,      56, None,  True ),
+            I( 83, "RETURN_VALUE",       None, None,     58, None,  False),
+        ]
+        out = self._run39_full(instructions)
+
+        # Must have exactly two 'try:' occurrences
+        try_count = out.count("try:")
+        self.assertGreaterEqual(try_count, 2,
+            f"Expected at least 2 'try:' blocks, got {try_count}:\n{out}")
+
+        # Must NOT collapse the nested try into a second except at wrong indent
+        lines = [l for l in out.splitlines() if l.strip()]
+        try_lines   = [l for l in lines if l.strip() == "try:"]
+        except_lines = [l for l in lines if l.strip().startswith("except Exception")]
+        self.assertEqual(len(except_lines), 2,
+            f"Expected 2 except-Exception lines, got {len(except_lines)}:\n{out}")
+
+        # Indentation: outer try must be less indented than inner try
+        if len(try_lines) >= 2:
+            outer_indent = len(try_lines[0]) - len(try_lines[0].lstrip())
+            inner_indent = len(try_lines[1]) - len(try_lines[1].lstrip())
+            self.assertGreater(inner_indent, outer_indent,
+                f"Inner try: must be more indented than outer try::\n{out}")
+
+    def test_nested_try_no_duplicate_except_at_same_level(self):
+        """
+        After the fix, both except-Exception headers must NOT appear at the
+        same indentation level.  (They were both at level 0 before the fix.)
+        """
+        I = BytecodeInstruction
+        instructions = [
+            I(100, "LOAD_CONST",           0,  0,          0, True,  False),
+            I(125, "STORE_FAST",           2,  "var3",     2, None,  False),
+            I(122, "SETUP_FINALLY",        14, 14,         4, None,  False),
+            I(124, "LOAD_FAST",            0,  "var1",     6, None,  False),
+            I(125, "STORE_FAST",           2,  "var3",     8, None,  False),
+            I( 87, "POP_BLOCK",           None, None,     10, None,  False),
+            I(110, "JUMP_FORWARD",         56, 56,        12, None,  False),
+            I(  4, "DUP_TOP",             None, None,     14, None,  True ),
+            I(116, "LOAD_GLOBAL",          0,  "Exception",16,None,  False),
+            I( 18, "JUMP_IF_NOT_EXC_MATCH",54, 54,        18, None, False),
+            I(  1, "POP_TOP",             None, None,     20, None,  False),
+            I(  1, "POP_TOP",             None, None,     22, None,  False),
+            I(  1, "POP_TOP",             None, None,     24, None,  False),
+            I(122, "SETUP_FINALLY",        36, 36,        26, None,  False),
+            I(124, "LOAD_FAST",            1,  "var2",    28, None,  False),
+            I(125, "STORE_FAST",           2,  "var3",    30, None,  False),
+            I( 87, "POP_BLOCK",           None, None,     32, None,  False),
+            I(110, "JUMP_FORWARD",         52, 52,        34, None,  False),
+            I(  4, "DUP_TOP",             None, None,     36, None,  True ),
+            I(116, "LOAD_GLOBAL",          0,  "Exception",38,None,  False),
+            I( 18, "JUMP_IF_NOT_EXC_MATCH",50, 50,        40, None, False),
+            I(  1, "POP_TOP",             None, None,     42, None,  False),
+            I(  1, "POP_TOP",             None, None,     44, None,  False),
+            I(  1, "POP_TOP",             None, None,     46, None,  False),
+            I( 89, "POP_EXCEPT",          None, None,     48, None,  False),
+            I( 48, "RERAISE",             None, None,     50, None,  True ),
+            I( 89, "POP_EXCEPT",          None, None,     52, None,  True ),
+            I( 48, "RERAISE",             None, None,     54, None,  True ),
+            I(100, "LOAD_CONST",           0,  None,      56, None,  True ),
+            I( 83, "RETURN_VALUE",        None, None,     58, None,  False),
+        ]
+        out = self._run39_full(instructions)
+        except_lines = [l for l in out.splitlines() if "except Exception" in l]
+        self.assertEqual(len(except_lines), 2,
+            f"Expected exactly 2 except-Exception lines:\n{out}")
+        ind0 = len(except_lines[0]) - len(except_lines[0].lstrip())
+        ind1 = len(except_lines[1]) - len(except_lines[1].lstrip())
+        self.assertNotEqual(ind0, ind1,
+            f"Both except-Exception at same indent — nested try not working:\n{out}")
+
+    def test_as_e_cleanup_guard_still_silent(self):
+        """
+        A SETUP_FINALLY whose target is NOT a DUP_TOP (e.g. RERAISE — 'as e'
+        cleanup) while inside an except handler must remain silent (no try:).
+
+        Layout: inside an except body, encounter SETUP_FINALLY whose target
+        is a RERAISE (cleanup machinery, not a real handler).
+        """
+        I = BytecodeInstruction
+        # Minimal: outer SETUP_FINALLY → DUP_TOP, then inside handler
+        # an inner SETUP_FINALLY → RERAISE (cleanup guard, NOT DUP_TOP).
+        instructions = [
+            I(122, "SETUP_FINALLY",        8, 8,          0, True,  False),
+            I(100, "LOAD_CONST",           1,  42,         2, None,  False),
+            I( 87, "POP_BLOCK",           None, None,      4, None,  False),
+            I(110, "JUMP_FORWARD",         26, 26,         6, None,  False),
+            I(  4, "DUP_TOP",             None, None,      8, None,  True ),
+            I(116, "LOAD_GLOBAL",          0,  "Exception",10,None,  False),
+            I( 18, "JUMP_IF_NOT_EXC_MATCH",24, 24,        12, None, False),
+            I(  1, "POP_TOP",             None, None,     14, None,  False),
+            I(  1, "POP_TOP",             None, None,     16, None,  False),
+            I(  1, "POP_TOP",             None, None,     18, None,  False),
+            # Inner SETUP_FINALLY → RERAISE (the 'as e' cleanup pattern)
+            I(122, "SETUP_FINALLY",        22, 22,        20, None,  False),
+            I( 89, "POP_EXCEPT",          None, None,     22, None,  True ),  # ← target=RERAISE path
+            I( 48, "RERAISE",             None, None,     24, None,  True ),
+            I(100, "LOAD_CONST",           0,  None,      26, None,  True ),
+            I( 83, "RETURN_VALUE",        None, None,     28, None,  False),
+        ]
+        out = self._run39_full(instructions)
+        # The outer try: is real and must appear
+        self.assertIn("try:", out, f"Outer try: missing:\n{out}")
+        # The inner SETUP_FINALLY is an 'as e' guard and must NOT add a second try:
+        try_count = out.count("try:")
+        self.assertEqual(try_count, 1,
+            f"Expected exactly 1 try:, got {try_count} (inner guard leaked):\n{out}")
+
+
+# ---------------------------------------------------------------------------
+# Regression: augmented-assignment ternary (Fix — api_7)
+# ---------------------------------------------------------------------------
+
+class TestAugAssignTernary(unittest.TestCase):
+    """
+    Regression tests for augmented-assignment ternary expressions
+    (e.g. ``var += expr if cond else ''``).
+
+    The prescan must recognise INPLACE_* opcodes as valid ternary assignment
+    targets so _ternary_suppress is populated for all branch instructions.
+    """
+
+    def test_augmented_assign_ternary_no_phantom_func(self):
+        """
+        An augmented-assignment ternary like ``var += a if cond else b``
+        must be decompiled without a phantom func() wrapper.
+        """
+        src = (
+            "def api_7(in_a):\n"
+            "    var_1 = ''\n"
+            "    var_1 += ' ' * in_a if in_a > 0 else ''\n"
+            "    return var_1\n"
+        )
+        out = decompile(src)
+        self.assertNotIn("func(", out,
+            f"Phantom func() in augmented-assignment ternary:\n{out}")
+        self.assertIn("var_1", out,
+            f"var_1 missing from output:\n{out}")
+
+    def test_augmented_assign_ternary_content_preserved(self):
+        """
+        Both branches of an augmented-assignment ternary must appear in output.
+        """
+        src = (
+            "def f(x):\n"
+            "    s = ''\n"
+            "    s += 'yes' if x else 'no'\n"
+            "    return s\n"
+        )
+        out = decompile(src)
+        self.assertIn("yes", out, f"Then-branch 'yes' missing:\n{out}")
+        self.assertIn("no",  out, f"Else-branch 'no' missing:\n{out}")
+        self.assertNotIn("func(", out, f"Phantom func() wrapper:\n{out}")
+
+    def test_augmented_add_ternary_keeps_augmented_form(self):
+        """
+        The decompiled output for ``s += a if c else b`` must contain
+        both the augmented operator token and the condition.
+        """
+        src = (
+            "def g(c, a, b):\n"
+            "    s = ''\n"
+            "    s += a if c else b\n"
+            "    return s\n"
+        )
+        out = decompile(src)
+        # The output must include the variable and both branch values
+        self.assertIn("s", out)
+        self.assertIn("a", out)
+        self.assertIn("b", out)
+        self.assertNotIn("func(", out, f"Phantom func() wrapper:\n{out}")
+
+    def test_inplace_ops_in_prescan_ternaries(self):
+        """
+        _prescan_ternaries must recognise INPLACE_ADD (and other INPLACE_*)
+        as valid assignment instructions for ternary detection, so that the
+        suppress set is populated when the target of POP_JUMP_IF_* is followed
+        by an INPLACE_* before STORE_FAST.
+        """
+        I = BytecodeInstruction
+        code = compile("pass", "<test>", "exec")
+        dec = Decompiler39(code)
+        # Minimal: x += 'yes' if c else 'no'
+        # Bytecode (simplified):
+        #   0 LOAD_FAST x
+        #   2 LOAD_FAST c
+        #   4 POP_JUMP_IF_FALSE → 10
+        #   6 LOAD_CONST 'yes'    ← then-branch
+        #   8 JUMP_FORWARD → 12
+        #  10 LOAD_CONST 'no'     ← else-branch (is_jump_target)
+        #  12 INPLACE_ADD          ← assignment op (is_jump_target)
+        #  14 STORE_FAST x
+        #  16 RETURN_VALUE
+        dec.instructions = [
+            I(124, "LOAD_FAST",      0,  "x",    0, True,  False),
+            I(124, "LOAD_FAST",      1,  "c",    2, None,  False),
+            I(114, "POP_JUMP_IF_FALSE", 10, 10,  4, None,  False),
+            I(100, "LOAD_CONST",     1,  "yes",  6, None,  False),
+            I(110, "JUMP_FORWARD",   4,  12,     8, None,  False),
+            I(100, "LOAD_CONST",     2,  "no",  10, None,  True ),  # else-branch
+            I( 23, "INPLACE_ADD",   None, None, 12, None,  True ),  # INPLACE target
+            I(125, "STORE_FAST",     0,  "x",   14, None,  False),
+            I( 83, "RETURN_VALUE",  None, None,  16,None,  False),
+        ]
+        dec._prescan_ternaries()
+        suppress = getattr(dec, "_ternary_suppress", set())
+        # The then-branch and else-branch instructions must be suppressed
+        self.assertIn(6, suppress,
+            f"Then-branch LOAD_CONST (offset 6) not in _ternary_suppress: {suppress}")
+        self.assertIn(10, suppress,
+            f"Else-branch LOAD_CONST (offset 10) not in _ternary_suppress: {suppress}")
+
+
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
