@@ -4,6 +4,7 @@
 # Ignore all code issues in this file
 # the code is intentionally written this way to test the code refiner
 # pylint: disable=all
+# ruff: noqa: ALL
 
 def issue_1(a):
     a = '\x00'*4 if a == None else '\x01'*4

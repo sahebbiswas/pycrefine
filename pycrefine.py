@@ -153,11 +153,6 @@ def post_process_source(source: str) -> str:
                 current_indent = indent
                 current_froms.setdefault(mod, []).extend([s.strip() for s in syms.split(',')])
             else:
-                line = assignment_parens_re.sub(r'\1\2', line)
-                line = return_parens_re.sub(r'\1\2', line)
-                line = if_parens_re.sub(r'\1\2:', line)
-                line = while_parens_re.sub(r'\1\2:', line)
-                
                 # Cleanup doubled-up assignments from INPLACE binary ops
                 # e.g., 'var = (var += expr)' -> 'var += expr'
                 m_double = re.match(
@@ -167,6 +162,11 @@ def post_process_source(source: str) -> str:
                 if m_double:
                     indent, var_name, op_sym, rhs = m_double.groups()
                     line = f"{indent}{var_name} {op_sym}= {rhs}"
+                else:
+                    line = assignment_parens_re.sub(r'\1\2', line)
+                    line = return_parens_re.sub(r'\1\2', line)
+                    line = if_parens_re.sub(r'\1\2:', line)
+                    line = while_parens_re.sub(r'\1\2:', line)
                 
                 out_lines.append(line)
                 
@@ -2730,8 +2730,8 @@ class DecompilerGeneric(DecompilerBase):
             has_varargs = bool(inner_code.co_flags & _CO_VARARGS)
             has_varkw   = bool(inner_code.co_flags & _CO_VARKEYWORDS)
             # Index of *args and **kwargs names in co_varnames:
-            varargs_idx  = inner_code.co_argcount
-            varkw_idx    = inner_code.co_argcount + int(has_varargs)
+            varargs_idx  = inner_code.co_argcount + inner_code.co_kwonlyargcount
+            varkw_idx    = inner_code.co_argcount + inner_code.co_kwonlyargcount + int(has_varargs)
             varargs_name = (
                 "*" + inner_code.co_varnames[varargs_idx]
                 if has_varargs and varargs_idx < len(inner_code.co_varnames)
@@ -3896,26 +3896,26 @@ class Decompiler39(DecompilerGeneric):
             # Target is the with-block exit handler:
             elif target_ins.opname == "WITH_EXCEPT_START":
                 is_except = True
+            # Target is an exception-handler cleanup entry (3.9 'as e' cleanup):
+            elif target_ins.opname == "POP_EXCEPT":
+                is_except = True
             # Target is a tiny 'as e' cleanup block (LOAD_CONST None; STORE; DELETE; RERAISE):
             # These are nested SETUP_FINALLY blocks for the 'except X as e:' binding.
             # Recognise them by: the target is a LOAD_CONST None followed within 3 steps
-            # by a DELETE_* and a RERAISE (with no user body in between).
+            # by a DELETE_* or RERAISE (with no user body in between).
             elif target_ins.opname == "LOAD_CONST" and target_ins.argval is None:
-                # Scan forward: if we hit DELETE_FAST/DELETE_NAME then RERAISE without
+                # Scan forward: if we hit DELETE_FAST/DELETE_NAME or RERAISE without
                 # any non-trivial instruction in between, treat as cleanup-only.
-                has_delete = False
-                has_reraise = False
+                is_cleanup = False
                 for k in range(t_idx, min(t_idx + _MAX_TERNARY_MINI_SEARCH_WINDOW, len(self.instructions))):
                     op = self.instructions[k].opname
-                    if op in ("DELETE_FAST", "DELETE_NAME", "DELETE_GLOBAL"):
-                        has_delete = True
-                    elif op == "RERAISE":
-                        has_reraise = True
+                    if op in ("DELETE_FAST", "DELETE_NAME", "DELETE_GLOBAL", "RERAISE"):
+                        is_cleanup = True
                         break
                     elif op not in ("LOAD_CONST", "STORE_FAST", "STORE_NAME",
-                                    "STORE_GLOBAL", "POP_BLOCK"):
+                                    "STORE_GLOBAL", "POP_BLOCK", "NOP"):
                         break
-                if has_delete and has_reraise:
+                if is_cleanup:
                     is_except = True   # treat as cleanup, not a user finally
 
             if not is_except:
@@ -4484,17 +4484,27 @@ class Decompiler39(DecompilerGeneric):
             jump_target = self._get_jump_target(instr)
             if self._except_header_indent is not None:
                 # Inside an except handler: check whether the jump target is a real
-                # handler entry (DUP_TOP) = genuine nested try:, or cleanup machinery.
+                # handler entry (DUP_TOP for typed, POP-POP-POP for bare except,
+                # or a finally: target) = genuine nested try:, or cleanup machinery.
                 target_idx = next(
                     (i for i, x in enumerate(self.instructions) if x.offset == jump_target), -1
                 )
-                target_is_handler_entry = (
-                    target_idx >= 0
-                    and self.instructions[target_idx].opname in ("DUP_TOP",)
-                )
-                if target_is_handler_entry:
+                is_nested_handler = False
+                if target_idx >= 0:
+                    target_ins = self.instructions[target_idx]
+                    if target_ins.opname == "DUP_TOP":
+                        is_nested_handler = True
+                    elif (target_ins.opname == "POP_TOP"
+                          and target_idx + 2 < len(self.instructions)
+                          and self.instructions[target_idx + 1].opname == "POP_TOP"
+                          and self.instructions[target_idx + 2].opname == "POP_TOP"):
+                        is_nested_handler = True
+                    elif jump_target in getattr(self, "_finally_targets", set()):
+                        is_nested_handler = True
+
+                if is_nested_handler:
                     # Real nested try: inside an except — emit try: normally.
-                    # Clear _except_header_indent so the inner DUP_TOP handler
+                    # Clear _except_header_indent so the inner handler
                     # sets it fresh at the right (inner) indent level.
                     self._except_header_indent = None
                     super()._handle_instruction(instr)
