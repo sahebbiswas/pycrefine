@@ -51,7 +51,12 @@ _COMPOUND_EXPR_OPS = frozenset((
     "CALL", "CALL_FUNCTION", "CALL_METHOD", "COMPARE_OP", "BINARY_OP", "IS_OP", "CONTAINS_OP",
     "UNARY_NOT", "UNARY_NEGATIVE", "UNARY_POSITIVE", "UNARY_INVERT",
     "BUILD_TUPLE", "BUILD_LIST", "BUILD_SET", "BUILD_MAP",
-    "TO_BOOL", "FORMAT_VALUE", "FORMAT_SIMPLE", "BUILD_STRING", "BINARY_SUBSCR"
+    "TO_BOOL", "FORMAT_VALUE", "FORMAT_SIMPLE", "BUILD_STRING", "BINARY_SUBSCR",
+    # Python 3.9 binary opcodes:
+    "BINARY_ADD", "BINARY_SUBTRACT", "BINARY_MULTIPLY", "BINARY_TRUE_DIVIDE",
+    "BINARY_FLOOR_DIVIDE", "BINARY_MODULO", "BINARY_POWER", "BINARY_LSHIFT",
+    "BINARY_RSHIFT", "BINARY_AND", "BINARY_OR", "BINARY_XOR",
+    "BINARY_MATRIX_MULTIPLY"
 )) | _COMPOUND_SKIP
 
 _WHILE_TRIVIAL_OPS = frozenset({"NOP", "RESUME", "NOT_TAKEN", "CACHE", "COPY_FREE_VARS"})
@@ -1118,44 +1123,35 @@ class DecompilerGeneric(DecompilerBase):
                     continue
                 break  # something else → end of group
 
-            if len(group) < 2:
-                i += 1
-                continue
 
-            # -----------------------------------------------------------
-            # Validate that the group forms a compound condition.
-            # -----------------------------------------------------------
-            # Body target: where the 'if' body begins. Usually the fall-through
-            # of the last jump in the chain.
-            last_jump_idx = group[-1][0]
-            body_target = -1
-            for k in range(last_jump_idx + 1, n):
-                if instrs[k].opname not in _COMPOUND_SKIP:
-                    body_target = instrs[k].offset
+            valid = False
+            while len(group) >= 2:
+                last_jump_idx = group[-1][0]
+                body_target = -1
+                for k in range(last_jump_idx + 1, n):
+                    if instrs[k].opname not in _COMPOUND_SKIP:
+                        body_target = instrs[k].offset
+                        break
+                end_target = self._get_jump_target(group[-1][1])
+                jump_starts = {g[3] for g in group}
+                
+                valid = True
+                for (_, jinstr, _, _) in group:
+                    t = self._get_jump_target(jinstr)
+                    if t == body_target:
+                        pass
+                    elif t == end_target or t in jump_starts:
+                        pass
+                    else:
+                        valid = False
+                        break
+                if valid:
                     break
-            
-            # End target: where the 'if' body ends. Usually the target of
-            # the last jump in the chain.
-            end_target = self._get_jump_target(group[-1][1])
-            
-            # Record current jump start offsets for internal jump lookups
-            jump_starts = {g[3] for g in group}
-
-            valid = True
-            for _, jinstr, _, _ in group:
-                t = self._get_jump_target(jinstr)
-                if t == body_target:
-                    pass
-                elif t == end_target or t in jump_starts:
-                    pass
                 else:
-                    # Jumps to somewhere else entirely -> complex structure
-                    valid = False
-                    break
+                    group.pop()
 
-            if not valid:
-                # Keep the scan moving if we can't merge it here.
-                i = group[0][0] + 1
+            if not valid or len(group) < 2:
+                i += 1
                 continue
 
             # -----------------------------------------------------------
@@ -2260,8 +2256,17 @@ class DecompilerGeneric(DecompilerBase):
             "FORMAT_VALUE": self._op_fstring, "FORMAT_SIMPLE": self._op_fstring,
             "BUILD_STRING": self._op_build_string,
             
-            # Forward jump
-            "JUMP_FORWARD": self._op_jump,
+            # Jumps
+            # Jumps
+            "JUMP_FORWARD": self._op_jump, "JUMP_BACKWARD": self._op_jump,
+            "JUMP_ABSOLUTE": self._op_jump,
+            "POP_JUMP_IF_FALSE": self._op_conditional_jump,
+            "POP_JUMP_IF_TRUE": self._op_conditional_jump,
+            "JUMP_IF_FALSE_OR_POP": self._op_conditional_jump,
+            "JUMP_IF_TRUE_OR_POP": self._op_conditional_jump,
+            "POP_JUMP_IF_NONE": self._op_conditional_jump,
+            "POP_JUMP_IF_NOT_NONE": self._op_conditional_jump,
+            "JUMP_IF_NOT_EXC_MATCH": self._op_jump_if_not_exc_match,
             
             # Iteration
             "FOR_ITER": self._op_for_iter,
@@ -2269,6 +2274,7 @@ class DecompilerGeneric(DecompilerBase):
             # Collections
             "BUILD_TUPLE": self._op_build_collection, "BUILD_LIST": self._op_build_collection,
             "BUILD_SET": self._op_build_collection, "BUILD_MAP": self._op_build_map,
+            "BUILD_SLICE": self._op_build_slice,
             "BUILD_CONST_KEY_MAP": self._op_build_const_key_map,
             "GET_ITER": self._op_no_op, "UNPACK_SEQUENCE": self._op_no_op,
             "LIST_EXTEND": self._op_list_extend, "DICT_MERGE": self._op_dict_merge,
@@ -3244,12 +3250,20 @@ class DecompilerGeneric(DecompilerBase):
                     if b_type == "if":
                         prior_if_target = b_off
                         break
-                # Only emit else: when the if-block targets the same offset
-                # this JUMP_FORWARD is jumping to (i.e. the if/else split).
-                if prior_if_target is not None and prior_if_target == jump_target:
+                
+                next_offset = -1
+                if self.pc < len(self.instructions):
+                    next_offset = self.instructions[self.pc].offset
+                    
+                # Emit else: when the next instruction is the target of the if block
+                if prior_if_target is not None and prior_if_target == next_offset:
                     self.indent_level -= 1
                     self._append_reconstructed("else:")
                     self.indent_level += 1
+                    for bi in range(len(self.blocks)-1, -1, -1):
+                        if self.blocks[bi][1] == "if":
+                            self.blocks.pop(bi)
+                            break
                     self.blocks.append((jump_target, "else"))
             return
         # detect while loop.
@@ -3510,18 +3524,19 @@ class DecompilerGeneric(DecompilerBase):
 
             # and/or chain: same target as current if-block
             if self.blocks and self.blocks[-1][1] == "if" and self.blocks[-1][0] == jump_target:
-                prev_line = self.reconstructed.pop()
-                p_line = prev_line.strip()
-                prev_cond = p_line[3:].rstrip(":") if p_line.startswith("if ") else p_line.rstrip(":")
-                self.indent_level -= 1
-                if compound_precomputed:
-                    self._append_reconstructed(f"if {prev_cond} and {cond}:")
-                elif is_true:
-                    self._append_reconstructed(f"if {prev_cond} or not {cond}:")
-                else:
-                    self._append_reconstructed(f"if {prev_cond} and {cond}:")
-                self.indent_level += 1
-                return
+                p_line = self.reconstructed[-1].strip() if self.reconstructed else ""
+                if p_line.startswith("if "):
+                    prev_line = self.reconstructed.pop()
+                    prev_cond = p_line[3:].rstrip(":")
+                    self.indent_level -= 1
+                    if compound_precomputed:
+                        self._append_reconstructed(f"if {prev_cond} and {cond}:")
+                    elif is_true:
+                        self._append_reconstructed(f"if {prev_cond} or not {cond}:")
+                    else:
+                        self._append_reconstructed(f"if {prev_cond} and {cond}:")
+                    self.indent_level += 1
+                    return
 
             if compound_precomputed:
                 self._append_reconstructed(f"if {cond}:")
@@ -3547,10 +3562,18 @@ class DecompilerGeneric(DecompilerBase):
                     return
 
             self.blocks.append((jump_target, "if"))
+    def _op_jump_if_not_exc_match(self, instr: BytecodeInstruction):
+        # 3.9 / 3.10: JUMP_IF_NOT_EXC_MATCH(target)
+        # Pops the exception type to match against and the exception instance.
+        if len(self.stack) >= 2:
+            self.stack.pop() # exc_type
+            self.stack.pop() # exc_instance
+        # Usually handled by specialized DUP_TOP handlers,
+        # but we provide this for completeness/fallback.
+        pass
 
 
-
-        # ── for loop ───────────────────────────────────────────────────
+    # ── for loop ───────────────────────────────────────────────────
 
     def _op_for_iter(self, instr: BytecodeInstruction):
         opname = instr.opname
@@ -3620,17 +3643,50 @@ class DecompilerGeneric(DecompilerBase):
         self.stack.append("{" + ", ".join(pairs) + "}")
 
 
+    def _op_build_slice(self, instr: BytecodeInstruction):
+        argc = instr.arg if instr.arg is not None else 2
+        step = str(self.stack.pop()) if argc == 3 else ""
+        stop = str(self.stack.pop())
+        start = str(self.stack.pop())
+        if start == "None":
+            start = ""
+        if stop == "None":
+            stop = ""
+        if step == "None":
+            step = ""
+        
+        slice_str = f"{start}:{stop}"
+        if argc == 3:
+            slice_str += f":{step}"
+        self.stack.append(slice_str)
+
+
     def _op_build_const_key_map(self, instr: BytecodeInstruction):
-        opname = instr.opname
-        # TOS is tuple of keys; below are values
-        keys_raw = str(self.stack.pop()) if self.stack else "()"
-        keys = [k.strip("'\" ") for k in keys_raw.strip("()").split(",") if k.strip()]
-        num = int(instr.arg) if instr.arg is not None else len(keys)
-        vals_list = []
-        for _ in range(num):
-            vals_list.insert(0, str(self.stack.pop()) if self.stack else "?")
-        pairs = [f"'{k}': {v}" for k, v in zip(keys, vals_list)]
-        self.stack.append("{" + ", ".join(pairs) + "}")
+        # Python 3.6+: BUILD_CONST_KEY_MAP(count)
+        # Top of stack is a tuple of keys. Below that are 'count' values.
+        count = instr.arg
+        keys = self.stack.pop()
+        
+        values = []
+        for _ in range(count):
+            values.append(self.stack.pop())
+        values.reverse()
+        
+        # keys can be a tuple object (if loaded via LOAD_CONST) 
+        # or a string representation (if reconstructed).
+        if isinstance(keys, str) and keys.startswith("(") and keys.endswith(")"):
+            # Very basic string-tuple parsing for reconstructed keys
+            k_list = [k.strip().strip("'\"") for k in keys[1:-1].split(",") if k.strip()]
+        elif isinstance(keys, tuple):
+            k_list = list(keys)
+        else:
+            k_list = [f"key{i}" for i in range(count)]
+            
+        items = []
+        for k, v in zip(k_list, values):
+            k_repr = repr(k) if not isinstance(k, str) else f"'{k}'"
+            items.append(f"{k_repr}: {v}")
+        self.stack.append("{" + ", ".join(items) + "}")
 
 
     def _op_list_extend(self, instr: BytecodeInstruction):
@@ -4130,10 +4186,32 @@ class Decompiler39(DecompilerGeneric):
         # forward.  Emit 'if <cond>:' (the break body is the following JUMP_ABSOLUTE).
         if ("POP_JUMP_IF_FALSE" in opname or "POP_JUMP_IF_TRUE" in opname):
             jump_target = self._get_jump_target(instr)
+            
+            # --- Assertion detection (Python 3.9) ---
+            # Pattern: POP_JUMP_IF_TRUE/FALSE skipping over a RAISE_VARARGS(AssertionError)
+            # Find the instruction just BEFORE the jump target
+            target_idx = next((i for i, x in enumerate(self.instructions) if x.offset == jump_target), -1)
+            if target_idx > 0:
+                raise_instr = self.instructions[target_idx - 1]
+                if raise_instr.opname == "RAISE_VARARGS" and raise_instr.arg == 1:
+                    # Check if stack has AssertionError (usually 2rd or 3th item before raise)
+                    # For simplicity, we just check if it's a likely candidate path
+                    # 3.9 assert pattern: if (not) cond: raise AssertionError(msg)
+                    if self.stack:
+                        cond = self.stack.pop()
+                        # We'll emit as a generic if for now if we can't be sure, 
+                        # but here we can try to be bold.
+                        prefix = "assert " if "FALSE" in opname else "assert not "
+                        # Peek for the message
+                        msg = None
+                        # This is a bit complex for a single handler, so we'll let 
+                        # DecompilerGeneric handle it as a block if we return.
+                        # Actually, let's keep it simple and just fix the basic emission.
+                        self.stack.append(cond) # Put it back and let super() or generic handle it
+            
             if (jump_target <= instr.offset  # backward target → inside while-True
                     and any(b[1] == "while" for b in self.blocks)):
                 # This is the break-guard inside a while-True.
-                # Pop the condition and emit 'if <cond>:' (body = break stmt).
                 if self.stack:
                     cond = self.stack.pop()
                     if str(cond) not in ("_exc_match", "_exc_info"):
@@ -4143,14 +4221,18 @@ class Decompiler39(DecompilerGeneric):
                         else:
                             self._append_reconstructed(f"if {cond}:")
                         self.indent_level += 1
-                        # The loop_end we tracked is where the while block closes.
-                        # The if-block closes at the same point.
                         while_end = next(
                             (b[0] for b in reversed(self.blocks) if b[1] == "while"), -1
                         )
                         if while_end > instr.offset:
                             self.blocks.append((while_end, "if"))
                 return
+            
+            # Pattern for 3.9 asserts: if not cond: raise AssertionError
+            # We skip explicit emit here and let DecompilerGeneric._op_pop_jump_if_false handle it 
+            # if it's not a while-break. This prevents double-emission or mis-indentation.
+            super()._handle_instruction(instr)
+            return
 
         if opname in _bin39:
             if len(self.stack) >= 2:
@@ -4677,6 +4759,18 @@ class Decompiler39(DecompilerGeneric):
         # In handlers this appears after a failed JUMP_IF_NOT_EXC_MATCH as the
         # fall-through re-raise.  Nothing to emit — the decompiler has already
         # reached this via the jump target path, so just skip silently.
+        elif opname == "POP_EXCEPT":
+            if self._except_header_indent is not None:
+                last_idx = len(self.reconstructed) - 1
+                while last_idx >= 0 and not self.reconstructed[last_idx].strip():
+                    last_idx -= 1
+                if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
+                    self._append_reconstructed("pass")
+
+                self.indent_level = self._except_header_indent
+                self._except_header_indent = None
+            if self.stack and self.stack[-1] == "_exc_match":
+                self.stack.pop()
         elif opname == "RERAISE":
             pass  # already handled by the JUMP target structure; no source emission
 
@@ -5013,7 +5107,13 @@ class MarshalParser:
             if type_char == "I":
                 return struct.unpack("<q", self._read(8))[0]
             size = self._read_long()
-            return int.from_bytes(self._read(abs(size) * 2), "little", signed=(size < 0))
+            # 3.4+ uses 15-bit digits stored in 2 bytes
+            n_digits = abs(size)
+            res = 0
+            for i in range(n_digits):
+                digit = struct.unpack("<H", self._read(2))[0]
+                res += digit * (2**(15 * i))
+            return -res if size < 0 else res
         if type_char == "S":
             return StopIteration
         if type_char == "g":
@@ -5063,13 +5163,13 @@ class MarshalParser:
                 return ()
             return tuple(x)
 
-        code     = bytes(code) if not isinstance(code, bytes) else code
+        code     = bytes(code, 'latin1') if isinstance(code, str) else bytes(code)
         consts   = to_tuple(consts)
         names    = to_tuple_strings(names)
         varnames = to_tuple_strings(varnames)
         freevars = to_tuple_strings(freevars)
         cellvars = to_tuple_strings(cellvars)
-        lnotab   = bytes(lnotab) if not isinstance(lnotab, bytes) else lnotab
+        lnotab   = bytes(lnotab, 'latin1') if isinstance(lnotab, str) else bytes(lnotab)
         filename = filename.decode("utf-8", "replace") if isinstance(filename, bytes) else str(filename)
         name     = name.decode("utf-8", "replace") if isinstance(name, bytes) else str(name)
 
@@ -5081,13 +5181,15 @@ class MarshalParser:
             #        stacksize, flags, codestring, constants, names,
             #        varnames, filename, name, qualname, firstlineno,
             #        linetable, exceptiontable, freevars, cellvars
+            
+            # Map lnotab to linetable (with appropriate padding if needed)
+            # 3.11+ expects an exceptiontable as well.
             return types.CodeType(
                 argcount, posonlyargcount, kwonlyargcount, nlocals,
                 stacksize, flags, code, consts, names, varnames,
-                filename, name, name,       # qualname = name
-                firstlineno,
-                lnotab, b"",               # linetable, exceptiontable
-                freevars, cellvars,
+                filename, name, name,       # qualname
+                firstlineno, lnotab, b"",   # linetable, exceptiontable
+                freevars, cellvars
             )
         elif vi >= (3, 8):
             # 3.8–3.10: argcount, posonlyargcount, kwonlyargcount, nlocals,

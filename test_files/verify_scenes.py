@@ -80,3 +80,54 @@ def api_7(in_a):
     var_1 += (' '*in_a) if in_a > 0 else ''
     var_1 += ('<') if in_a >= 0 else ''
     return var_1    
+
+
+def api_10( in_a, in_b):
+
+    if in_a != '0':
+        str_b = random(in_a)
+        if str_b:
+            print("good")
+
+    if in_a or in_b:
+        if in_a and in_b:
+            delta = min([in_a, in_b])
+        else:
+            delta = in_a if in_a else in_b
+
+        if int(delta) < 100:
+            print("bad")
+
+
+def api_11( in_a, in_b, in_c):
+
+    if in_c in (2, 3):
+
+        if not in_b > 0:
+            raise AssertionError("bad")
+
+        if not in_a < in_c:
+            raise AssertionError("bad")
+
+
+def api_12(to_input):
+    try:
+        value += int(to_input)
+    except Exception:  # pylint: disable=broad-except
+
+        try:
+            value += int(to_input[1:])
+        except Exception:  # pylint: disable=broad-except
+            pass
+
+        try:
+            value += int(to_input[2:])
+        except Exception:  # pylint: disable=broad-except
+            pass
+
+        try:
+            value += int(to_input[3:])
+        except Exception:  # pylint: disable=broad-except
+            pass
+
+    return value if value else None
