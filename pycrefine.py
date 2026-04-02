@@ -35,7 +35,7 @@ _TERNARY_PURE = frozenset((
     "UNARY_NOT", "UNARY_NEGATIVE", "UNARY_POSITIVE", "UNARY_INVERT",
     "BUILD_TUPLE", "BUILD_LIST", "BUILD_SET", "BUILD_MAP",
     "PRECALL", "PUSH_NULL", "FORMAT_VALUE", "FORMAT_SIMPLE", "BUILD_STRING",
-    "BINARY_SUBSCR", "TO_BOOL",
+    "BINARY_SUBSCR", "TO_BOOL", "BINARY_SLICE", "BUILD_SLICE",
     # Python 3.9 named binary opcodes (3.11+ uses BINARY_OP instead):
     "BINARY_ADD", "BINARY_SUBTRACT", "BINARY_MULTIPLY", "BINARY_TRUE_DIVIDE",
     "BINARY_FLOOR_DIVIDE", "BINARY_MODULO", "BINARY_POWER", "BINARY_LSHIFT",
@@ -51,7 +51,7 @@ _COMPOUND_EXPR_OPS = frozenset((
     "CALL", "CALL_FUNCTION", "CALL_METHOD", "COMPARE_OP", "BINARY_OP", "IS_OP", "CONTAINS_OP",
     "UNARY_NOT", "UNARY_NEGATIVE", "UNARY_POSITIVE", "UNARY_INVERT",
     "BUILD_TUPLE", "BUILD_LIST", "BUILD_SET", "BUILD_MAP",
-    "TO_BOOL", "FORMAT_VALUE", "FORMAT_SIMPLE", "BUILD_STRING", "BINARY_SUBSCR",
+    "TO_BOOL", "FORMAT_VALUE", "FORMAT_SIMPLE", "BUILD_STRING", "BINARY_SUBSCR", "BINARY_SLICE", "BUILD_SLICE",
     # Python 3.9 binary opcodes:
     "BINARY_ADD", "BINARY_SUBTRACT", "BINARY_MULTIPLY", "BINARY_TRUE_DIVIDE",
     "BINARY_FLOOR_DIVIDE", "BINARY_MODULO", "BINARY_POWER", "BINARY_LSHIFT",
@@ -2428,11 +2428,13 @@ class DecompilerGeneric(DecompilerBase):
                 return
             if isinstance(val, tuple) and len(val) >= 2 and val[0] == "import":
                 _, imp_name, fromlist, level = val
+                dots = '.' * int(level) if level and int(level) > 0 else ''
                 if str(fromlist) in ("None", "()"):
-                    self._append_reconstructed(f"import {imp_name}")
+                    self._append_reconstructed(f"import {dots}{imp_name}")
                 else:
                     inames = str(fromlist).strip("()").replace("'", "").replace(" ", "")
-                    self._append_reconstructed(f"from {imp_name} import {inames}")
+                    mod_part = f" {imp_name}" if imp_name else ""
+                    self._append_reconstructed(f"from {dots}{mod_part} import {inames}")
             elif isinstance(val, tuple) and len(val) >= 2 and val[0] in ("func", "class"):
                 self._append_reconstructed(str(val[1]), indent_multiline=True)
                 if self.indent_level == 0:
@@ -2484,8 +2486,11 @@ class DecompilerGeneric(DecompilerBase):
         if self.stack and isinstance(self.stack[-1], tuple) and self.stack[-1][0] == "import":
             imp_tuple = self.stack[-1]
             mod_name = str(imp_tuple[1])
+            level = imp_tuple[3]
+            dots = '.' * int(level) if level and int(level) > 0 else ''
+            mod_part = f" {mod_name}" if mod_name else ""
             sym = str(instr.argval)
-            self._append_reconstructed(f"from {mod_name} import {sym}")
+            self._append_reconstructed(f"from {dots}{mod_part} import {sym}")
             # Push a sentinel so STORE_NAME for this symbol is suppressed
             self.stack.append(("_from_import_done", sym))
         else:
@@ -3607,14 +3612,31 @@ class DecompilerGeneric(DecompilerBase):
         if len(self.stack) >= 2:
             exc_type = self.stack.pop()
             exc_instance = self.stack.pop()
+            
+            # Heuristic for `except Exception as e`:
+            # Modern Python (3.11+) often has a DUP_TOP, STORE_* sequence
+            # following the match. We scan ahead for a STORE instruction
+            # targets the same offset as the jump.
+            exc_var = ""
+            peek_pc = self.pc
+            # Skip trivial ops
+            while peek_pc < len(self.instructions) and self.instructions[peek_pc].opname in ("COPY", "PUSH_NULL", "RESUME", "CACHE"):
+                peek_pc += 1
+            
+            if peek_pc < len(self.instructions):
+                next_instr = self.instructions[peek_pc]
+                if "STORE" in next_instr.opname:
+                    exc_var = f" as {next_instr.argval}"
+                    # Skip the store instruction if we consume it here
+                    # self.pc = peek_pc + 1
+
             # Reconstruct "except {exc_type}:" header
-            # Mirror Decompiler39._op_jump_if_not_exc_match behavior
             if self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup") and self.blocks[-1][0] == instr.offset:
                 self.blocks.pop()
                 self.indent_level -= 1
             if self._except_header_indent is not None:
                 self.indent_level = self._except_header_indent
-            self._append_reconstructed(f"except {exc_type}:")
+            self._append_reconstructed(f"except {exc_type}{exc_var}:")
             self.indent_level += 1
             self.stack.append("_exc_match")
 
@@ -3636,24 +3658,12 @@ class DecompilerGeneric(DecompilerBase):
             self._op_conditional_jump(instr)
             return
 
-        # For OR short-circuit: `a or b` compiles to:
-        #   LOAD a
-        #   JUMP_IF_TRUE_OR_POP target  # if a is true, skip loading b
-        #   LOAD b
-        #   target: ...
         # Semantics: if condition is true, KEEP it on stack and jump;
         # if false, POP it and continue (loading the next term).
-        # We can't reconstruct the full 'or' chain here without pre-scan,
-        # so just handle the stack manipulation correctly.
-
-        # For now, treat as a short-circuit boolean that doesn't consume TOS on taken branch
-        # The actual reconstruction of 'or' chains is handled by pre-scan in real code
-        # Here we just ensure correct stack behavior: on branch taken, keep value; else pop
-
-        # Since we can't know at runtime which path is taken, we model the "fall-through" case
-        # (the most common reconstruction path) where the value is popped
-        self.stack.pop()
-        # Note: if the jump is taken in actual execution, the value would remain on stack
+        # We simulate the taken-branch state by default for the stack,
+        # but if this is part of a complex boolean chain, the pre-scan
+        # handles the reconstruction.
+        pass
 
     def _op_jump_if_false_or_pop(self, instr: BytecodeInstruction):
         """
@@ -3672,17 +3682,9 @@ class DecompilerGeneric(DecompilerBase):
             self._op_conditional_jump(instr)
             return
 
-        # For AND short-circuit: `a and b` compiles to:
-        #   LOAD a
-        #   JUMP_IF_FALSE_OR_POP target  # if a is false, skip loading b
-        #   LOAD b
-        #   target: ...
         # Semantics: if condition is false, KEEP it on stack and jump;
-        # if true, POP it and continue (loading the next term).
-
-        # Model the fall-through case where value is popped
-        self.stack.pop()
-        # Note: if the jump is taken in actual execution, the value would remain on stack
+        # if true, POP it and continue.
+        pass
 
 
     # ── for loop ───────────────────────────────────────────────────
@@ -3786,8 +3788,8 @@ class DecompilerGeneric(DecompilerBase):
             else:
                 # Stack underflow: append None as placeholder
                 values.append(None)
-                if self.debug:
-                    print(f"Warning: stack underflow in BUILD_CONST_KEY_MAP at offset {instr.offset}")
+                if getattr(self, 'debug', False):
+                    print(f'Warning: stack underflow in BUILD_CONST_KEY_MAP at offset {instr.offset}')
         values.reverse()
         
         # keys can be a tuple object (if loaded via LOAD_CONST) 
@@ -4205,21 +4207,28 @@ class Decompiler39(DecompilerGeneric):
                     is_except = True   # treat as cleanup, not a user finally
 
             if not is_except:
-                self._finally_targets.add(target)
-                # Suppress the exception-path copy of the finally body.
-                # Find the end of it (up to and including the RERAISE).
+                # Potential finally block. In 3.9, a SETUP_FINALLY for a user finally
+                # typically covers the try body, and the target is the exception-path
+                # copy of the finally body WHICH ENDS IN RERAISE.
+                # If we find a RERAISE reachable from here without an intervening SETUP,
+                # then this is definitely a finally block.
+                is_finally = False
                 end_reraise = None
                 level = 0
                 for j in range(t_idx, len(self.instructions)):
                     jx = self.instructions[j]
-                    if jx.opname in ("SETUP_FINALLY", "SETUP_WITH", "SETUP_ASYNC_WITH"):
+                    if jx.opname in ("SETUP_FINALLY", "SETUP_WITH", "SETUP_EXCEPT"):
                         level += 1
                     elif jx.opname == "POP_BLOCK":
                         level -= 1
                     elif jx.opname == "RERAISE" and level <= 0:
+                        is_finally = True
                         end_reraise = jx.offset
                         break
-                if end_reraise is not None:
+                
+                if is_finally:
+                    self._finally_targets.add(target)
+                    # Mark the exception-path copy for suppression
                     for j in range(t_idx, len(self.instructions)):
                         self._finally_body_suppress.add(self.instructions[j].offset)
                         if self.instructions[j].offset == end_reraise:
@@ -4560,26 +4569,29 @@ class Decompiler39(DecompilerGeneric):
                                 self._finally_body_suppress = _fb
 
                 finally_target = self.blocks[-1][0]
-                if getattr(self, "_finally_targets", set()) and finally_target in self._finally_targets:
+                _finally_ts = getattr(self, "_finally_targets", set())
+                if _finally_ts and finally_target in _finally_ts:
                     is_finally_pop = True
+                
+                # Check for 3.9 implicit finally (SETUP_FINALLY target reachable after POP_BLOCK fallthrough)
+                if not is_finally_pop:
+                    look = self.pc
+                    while look < len(self.instructions) and self.instructions[look].opname in ("NOP", "RESUME", "CACHE"):
+                        look += 1
+                    if look < len(self.instructions) and self.instructions[look].offset == finally_target:
+                         is_finally_pop = True
+                
                 _closing_exc_cleanup = (self.blocks[-1][1] == "exc_cleanup")
                 self.blocks.pop()
-                # exc_cleanup blocks do not change indent (SETUP_FINALLY for exc_cleanup
-                # tracks the boundary but does not increment indent_level).
                 if not _closing_exc_cleanup:
                     self.indent_level -= 1
 
-            # Second case: POP_BLOCK at the end of all except-handlers may find a
-            # finally_wrapper block on top.  This POP_BLOCK signals the merge point
-            # at which the finally body should be emitted.
             elif self.blocks and self.blocks[-1][1] == "finally_wrapper":
                 finally_target = self.blocks[-1][0]
                 is_finally_pop = True
                 self.blocks.pop()
-                # finally_wrapper never incremented indent, nothing to decrement here.
 
             # Record the indent level where except/finally headers should appear.
-            # Only set when not already inside an except handler.
             if self._except_header_indent is None:
                 self._except_header_indent = self.indent_level
                 # Peek ahead for JUMP_FORWARD at end of try block to establish scope.
@@ -4591,15 +4603,10 @@ class Decompiler39(DecompilerGeneric):
                     self._except_end_offset = self._get_jump_target(self.instructions[look])
 
             if is_finally_pop:
-                # Determine the correct indent for finally: header.
-                # For finally_wrapper blocks, we captured the indent at SETUP_FINALLY time
-                # which is the right structural level regardless of what other blocks
-                # have been pushed/popped since then.
-                saved_indent = getattr(self, "_finally_wrapper_indent", {}).get(finally_target, -1)
-                if saved_indent >= 0:
-                    self.indent_level = saved_indent
-                elif self._except_header_indent is not None:
+                # establish the correct indent for finally: header
+                if self._except_header_indent is not None:
                     self.indent_level = self._except_header_indent
+                
                 self._append_reconstructed("finally:")
                 self.indent_level += 1
                 self.blocks.append((finally_target, "finally_body"))
@@ -5271,25 +5278,15 @@ class MarshalParser:
         # We need to peek at the Python version that created the .pyc to know if it's there
         # For now, we'll try to read it and default to b"" if it's not present or parsing fails
         exceptiontable = b""
-        # The marshal format for 3.11+ code objects includes exceptiontable as the next field
-        # We can detect this by checking if there's more data to read
-        # However, since we're building a version-agnostic loader, we'll conditionally read it
-        # based on whether we're running on 3.11+ (vi check below will handle the CodeType construction)
-        try:
-            # Attempt to read exceptiontable if present (3.11+ marshal format)
-            # This is speculative - if the stream doesn't have it, we'll catch the exception
-            if hasattr(types.CodeType, '__code__'):
-                # Check if the host Python version expects exceptiontable
-                test_code = (lambda: None).__code__
-                if hasattr(test_code, 'co_exceptiontable'):
-                    # Running on 3.11+, try to read exceptiontable from stream
-                    exceptiontable = self.load()
-                    if isinstance(exceptiontable, str):
-                        exceptiontable = bytes(exceptiontable, 'latin1')
-                    elif not isinstance(exceptiontable, bytes):
-                        exceptiontable = bytes(exceptiontable) if exceptiontable else b""
-        except:
-            exceptiontable = b""
+        if sys.version_info >= (3, 11):
+            try:
+                exceptiontable = self.load()
+                if isinstance(exceptiontable, str):
+                    exceptiontable = bytes(exceptiontable, 'latin1')
+                elif not isinstance(exceptiontable, bytes):
+                    exceptiontable = bytes(exceptiontable) if exceptiontable else b""
+            except:
+                exceptiontable = b""
 
         def to_tuple_strings(x):
             if x is None or isinstance(x, int):
