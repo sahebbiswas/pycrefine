@@ -3781,7 +3781,13 @@ class DecompilerGeneric(DecompilerBase):
         
         values = []
         for _ in range(count):
-            values.append(self.stack.pop())
+            if self.stack:
+                values.append(self.stack.pop())
+            else:
+                # Stack underflow: append None as placeholder
+                values.append(None)
+                if self.debug:
+                    print(f"Warning: stack underflow in BUILD_CONST_KEY_MAP at offset {instr.offset}")
         values.reverse()
         
         # keys can be a tuple object (if loaded via LOAD_CONST) 
