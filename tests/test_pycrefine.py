@@ -4484,5 +4484,82 @@ class TestAugAssignTernary(unittest.TestCase):
 
 
 
+class TestVerifyScenesBugs(unittest.TestCase):
+    def test_interrupted_if_combination(self):
+        # api_10: Ensure condition isn't combined with "and" if an intervening statement exists
+        src = (
+            "def f(in_a):\n"
+            "    if in_a != '0':\n"
+            "        str_b = random(in_a)\n"
+            "        if str_b:\n"
+            "            print('good')\n"
+            "    return True\n"
+        )
+        out = decompile(src)
+        self.assertIn("str_b = random(in_a)", out)
+        self.assertIn("if str_b:", out)
+        self.assertNotIn("and str_b", out)
+
+    def test_compound_group_shrink_and_else_emission(self):
+        # api_10 complex structure: tests if in_a or in_b correctly groupings and else branch restoration
+        src = (
+            "def f(in_a, in_b):\n"
+            "    if in_a or in_b:\n"
+            "        if in_a and in_b:\n"
+            "            delta = min([in_a, in_b])\n"
+            "        else:\n"
+            "            delta = in_a if in_a else in_b\n"
+            "        if int(delta) < 100:\n"
+            "            print('bad')\n"
+            "    return\n"
+        )
+        out = decompile(src)
+        self.assertIn("if in_a or in_b:", out)
+        self.assertIn("if in_a and in_b:", out)
+        self.assertIn("else:", out)
+        self.assertIn("if int(delta) < 100:", out)
+
+    def test_assert_formatting_api_11(self):
+        # api_11: asserts are not treated as part of conditions
+        src = (
+            "def f(in_a, in_b, in_c):\n"
+            "    if in_c in (2, 3):\n"
+            "        if not in_b > 0:\n"
+            "            raise AssertionError('bad')\n"
+            "        if not in_a < in_c:\n"
+            "            raise AssertionError('bad')\n"
+        )
+        out = decompile(src)
+        self.assertNotIn("if raise", out)
+        self.assertEqual(out.count("raise AssertionError"), 2)
+
+    def test_nested_empty_except_pass_api_12(self):
+        # api_12: Nested try/except passing should be cleanly indented with correctly emitted pass
+        src = (
+            "def f(to_input):\n"
+            "    value = 0\n"
+            "    try:\n"
+            "        value += int(to_input)\n"
+            "    except Exception:\n"
+            "        try:\n"
+            "            value += int(to_input[1:])\n"
+            "        except Exception:\n"
+            "            pass\n"
+        )
+        out = decompile(src)
+        self.assertIn("try:", out)
+        self.assertEqual(out.count("try:"), 2)
+        self.assertEqual(out.count("except Exception:"), 2)
+        self.assertIn("pass", out)
+
+    def test_build_slice_support(self):
+        src = (
+            "def f(lst):\n"
+            "    return lst[1:-1]\n"
+        )
+        out = decompile(src)
+        self.assertIn("lst[1:-1]", out)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
