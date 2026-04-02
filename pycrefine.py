@@ -2226,6 +2226,8 @@ class DecompilerGeneric(DecompilerBase):
             "IMPORT_NAME": self._op_import_name, "IMPORT_FROM": self._op_import_from,
             
             # Subscripts
+            "BINARY_SLICE": self._op_binary_slice,
+            "BINARY_OP": self._op_binary,
             "BINARY_SUBSCR": self._op_binary_subscr,
             
             # Exceptions
@@ -2649,6 +2651,15 @@ class DecompilerGeneric(DecompilerBase):
 
     def _op_cleanup(self, instr: BytecodeInstruction):
         opname = instr.opname
+        # POP_EXCEPT for try/except cleanup
+        if opname == "POP_EXCEPT" and self._except_header_indent is not None:
+            last_idx = len(self.reconstructed) - 1
+            while last_idx >= 0 and not self.reconstructed[last_idx].strip():
+                last_idx -= 1
+            if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
+                self._append_reconstructed("pass")
+            self.indent_level = self._except_header_indent
+            self._except_header_indent = None
         pass  # cleanup suppression (_exc_cleanup_name) stays active until DELETE_NAME fires
 
 
@@ -3004,16 +3015,29 @@ class DecompilerGeneric(DecompilerBase):
         if len(self.stack) >= 2:
             right = self.stack.pop()
             left = self.stack.pop()
-            op_map = {
-                "BINARY_ADD": "+", "BINARY_SUBTRACT": "-",
-                "BINARY_MULTIPLY": "*", "BINARY_TRUE_DIVIDE": "/",
-                "BINARY_FLOOR_DIVIDE": "//", "BINARY_MODULO": "%",
-                "BINARY_POWER": "**", "BINARY_LSHIFT": "<<",
-                "BINARY_RSHIFT": ">>", "BINARY_AND": "&",
-                "BINARY_OR": "|", "BINARY_XOR": "^",
-                "BINARY_MATRIX_MULTIPLY": "@",
-            }
-            op = op_map.get(opname, "?")
+            
+            # Python 3.11+ BINARY_OP handles all binary ops via arg
+            if opname == "BINARY_OP":
+                nb_ops = [
+                    "+", "&", "//", "<<", "@", "*", "%", "|", "**", ">>", "-", "/", "^",
+                    "+=", "&=", "//=", "<<=", "@=", "*=", "%=", "|=", "**=", ">>=", "-=", "/=", "^=", "[]"
+                ]
+                op = nb_ops[instr.arg] if instr.arg is not None and instr.arg < len(nb_ops) else "?"
+                if op == "[]":
+                    self.stack.append(f"{left}[{right}]")
+                    return
+            else:
+                op_map = {
+                    "BINARY_ADD": "+", "BINARY_SUBTRACT": "-",
+                    "BINARY_MULTIPLY": "*", "BINARY_TRUE_DIVIDE": "/",
+                    "BINARY_FLOOR_DIVIDE": "//", "BINARY_MODULO": "%",
+                    "BINARY_POWER": "**", "BINARY_LSHIFT": "<<",
+                    "BINARY_RSHIFT": ">>", "BINARY_AND": "&",
+                    "BINARY_OR": "|", "BINARY_XOR": "^",
+                    "BINARY_MATRIX_MULTIPLY": "@",
+                }
+                op = op_map.get(opname, "?")
+            
             l_str = str(left)
             r_str = str(right)
             if " " in l_str and not (l_str.startswith("(") and l_str.endswith(")")):
@@ -3021,6 +3045,21 @@ class DecompilerGeneric(DecompilerBase):
             if " " in r_str and not (r_str.startswith("(") and r_str.endswith(")")):
                 r_str = f"({r_str})"
             self.stack.append(f"{l_str} {op} {r_str}")
+
+
+    def _op_binary_slice(self, instr: BytecodeInstruction):
+        # Python 3.11+ BINARY_SLICE pops: stop, start, container
+        if len(self.stack) >= 3:
+            stop = self.stack.pop()
+            start = self.stack.pop()
+            container = self.stack.pop()
+            
+            if str(start) == "None":
+                start = ""
+            if str(stop) == "None":
+                stop = ""
+                
+            self.stack.append(f"{container}[{start}:{stop}]")
 
         # INPLACE_* → augmented assignment
 
