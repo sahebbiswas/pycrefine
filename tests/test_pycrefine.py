@@ -4484,9 +4484,6 @@ class TestAugAssignTernary(unittest.TestCase):
 
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
 class TestVerifyScenesBugs(unittest.TestCase):
     def test_interrupted_if_combination(self):
         # api_10: Ensure condition isn't combined with "and" if an intervening statement exists
@@ -4562,3 +4559,7 @@ class TestVerifyScenesBugs(unittest.TestCase):
         )
         out = decompile(src)
         self.assertIn("lst[1:-1]", out)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

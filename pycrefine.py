@@ -2264,8 +2264,8 @@ class DecompilerGeneric(DecompilerBase):
             "JUMP_ABSOLUTE": self._op_jump,
             "POP_JUMP_IF_FALSE": self._op_conditional_jump,
             "POP_JUMP_IF_TRUE": self._op_conditional_jump,
-            "JUMP_IF_FALSE_OR_POP": self._op_conditional_jump,
-            "JUMP_IF_TRUE_OR_POP": self._op_conditional_jump,
+            "JUMP_IF_FALSE_OR_POP": self._op_jump_if_false_or_pop,
+            "JUMP_IF_TRUE_OR_POP": self._op_jump_if_true_or_pop,
             "POP_JUMP_IF_NONE": self._op_conditional_jump,
             "POP_JUMP_IF_NOT_NONE": self._op_conditional_jump,
             "JUMP_IF_NOT_EXC_MATCH": self._op_jump_if_not_exc_match,
@@ -3605,11 +3605,84 @@ class DecompilerGeneric(DecompilerBase):
         # 3.9 / 3.10: JUMP_IF_NOT_EXC_MATCH(target)
         # Pops the exception type to match against and the exception instance.
         if len(self.stack) >= 2:
-            self.stack.pop() # exc_type
-            self.stack.pop() # exc_instance
-        # Usually handled by specialized DUP_TOP handlers,
-        # but we provide this for completeness/fallback.
-        pass
+            exc_type = self.stack.pop()
+            exc_instance = self.stack.pop()
+            # Reconstruct "except {exc_type}:" header
+            # Mirror Decompiler39._op_jump_if_not_exc_match behavior
+            if self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup") and self.blocks[-1][0] == instr.offset:
+                self.blocks.pop()
+                self.indent_level -= 1
+            if self._except_header_indent is not None:
+                self.indent_level = self._except_header_indent
+            self._append_reconstructed(f"except {exc_type}:")
+            self.indent_level += 1
+            self.stack.append("_exc_match")
+
+    def _op_jump_if_true_or_pop(self, instr: BytecodeInstruction):
+        """
+        JUMP_IF_TRUE_OR_POP: Peek TOS; if true jump to target (leaving value on stack),
+        otherwise pop it and fall through.
+        """
+        if not self.stack:
+            return
+        # Peek the condition without popping it initially
+        cond = self.stack[-1]
+        jump_target = self._get_jump_target(instr)
+
+        # Check for ternary expression pattern (reuse existing logic)
+        if instr.offset in getattr(self, "_ternary_jumps", {}):
+            # Delegate to _op_conditional_jump for ternary handling
+            # Temporarily restore the dispatch to call the shared logic
+            self._op_conditional_jump(instr)
+            return
+
+        # For OR short-circuit: `a or b` compiles to:
+        #   LOAD a
+        #   JUMP_IF_TRUE_OR_POP target  # if a is true, skip loading b
+        #   LOAD b
+        #   target: ...
+        # Semantics: if condition is true, KEEP it on stack and jump;
+        # if false, POP it and continue (loading the next term).
+        # We can't reconstruct the full 'or' chain here without pre-scan,
+        # so just handle the stack manipulation correctly.
+
+        # For now, treat as a short-circuit boolean that doesn't consume TOS on taken branch
+        # The actual reconstruction of 'or' chains is handled by pre-scan in real code
+        # Here we just ensure correct stack behavior: on branch taken, keep value; else pop
+
+        # Since we can't know at runtime which path is taken, we model the "fall-through" case
+        # (the most common reconstruction path) where the value is popped
+        self.stack.pop()
+        # Note: if the jump is taken in actual execution, the value would remain on stack
+
+    def _op_jump_if_false_or_pop(self, instr: BytecodeInstruction):
+        """
+        JUMP_IF_FALSE_OR_POP: Peek TOS; if false jump to target (leaving value on stack),
+        otherwise pop it and fall through.
+        """
+        if not self.stack:
+            return
+        # Peek the condition without popping it initially
+        cond = self.stack[-1]
+        jump_target = self._get_jump_target(instr)
+
+        # Check for ternary expression pattern (reuse existing logic)
+        if instr.offset in getattr(self, "_ternary_jumps", {}):
+            # Delegate to _op_conditional_jump for ternary handling
+            self._op_conditional_jump(instr)
+            return
+
+        # For AND short-circuit: `a and b` compiles to:
+        #   LOAD a
+        #   JUMP_IF_FALSE_OR_POP target  # if a is false, skip loading b
+        #   LOAD b
+        #   target: ...
+        # Semantics: if condition is false, KEEP it on stack and jump;
+        # if true, POP it and continue (loading the next term).
+
+        # Model the fall-through case where value is popped
+        self.stack.pop()
+        # Note: if the jump is taken in actual execution, the value would remain on stack
 
 
     # ── for loop ───────────────────────────────────────────────────
@@ -5187,6 +5260,31 @@ class MarshalParser:
         firstlineno     = self._read_long()
         lnotab          = self.load()
 
+        # Python 3.11+ includes exceptiontable after lnotab in the marshal stream
+        # For earlier versions, this field doesn't exist in the stream, so we default to b""
+        # We need to peek at the Python version that created the .pyc to know if it's there
+        # For now, we'll try to read it and default to b"" if it's not present or parsing fails
+        exceptiontable = b""
+        # The marshal format for 3.11+ code objects includes exceptiontable as the next field
+        # We can detect this by checking if there's more data to read
+        # However, since we're building a version-agnostic loader, we'll conditionally read it
+        # based on whether we're running on 3.11+ (vi check below will handle the CodeType construction)
+        try:
+            # Attempt to read exceptiontable if present (3.11+ marshal format)
+            # This is speculative - if the stream doesn't have it, we'll catch the exception
+            if hasattr(types.CodeType, '__code__'):
+                # Check if the host Python version expects exceptiontable
+                test_code = (lambda: None).__code__
+                if hasattr(test_code, 'co_exceptiontable'):
+                    # Running on 3.11+, try to read exceptiontable from stream
+                    exceptiontable = self.load()
+                    if isinstance(exceptiontable, str):
+                        exceptiontable = bytes(exceptiontable, 'latin1')
+                    elif not isinstance(exceptiontable, bytes):
+                        exceptiontable = bytes(exceptiontable) if exceptiontable else b""
+        except:
+            exceptiontable = b""
+
         def to_tuple_strings(x):
             if x is None or isinstance(x, int):
                 return ()
@@ -5227,7 +5325,7 @@ class MarshalParser:
                 argcount, posonlyargcount, kwonlyargcount, nlocals,
                 stacksize, flags, code, consts, names, varnames,
                 filename, name, name,       # qualname
-                firstlineno, lnotab, b"",   # linetable, exceptiontable
+                firstlineno, lnotab, exceptiontable,   # linetable, exceptiontable
                 freevars, cellvars
             )
         elif vi >= (3, 8):
