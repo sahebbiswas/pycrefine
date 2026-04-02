@@ -38,6 +38,7 @@ TestWhilePrescan         - _prescan_while_loops internals (FIX-11)
 
 from __future__ import annotations
 
+import importlib.util
 import io
 import marshal
 import os
@@ -176,9 +177,38 @@ def _run39_full_impl(instructions):
         dec._close_blocks(instr.offset)
         dec.pc += 1
         dec._handle_instruction(instr)
-    dec._close_blocks(0x7FFFFFFF)
+    dec._close_blocks(0x7fffffff)
 
-    # Post-process like Decompiler39.decompile() does
+    # Final cleanup: suppress redundant trailing 'return None' at the base indent
+    # (mirroring DecompilerGeneric.decompile() logic)
+    if dec.reconstructed:
+        # Find last non-empty line
+        last_idx = len(dec.reconstructed) - 1
+        while last_idx >= 0 and not dec.reconstructed[last_idx].strip():
+            last_idx -= 1
+        
+        if last_idx >= 0 and dec.reconstructed[last_idx].strip() == "return None":
+            line = dec.reconstructed[last_idx]
+            # FIX: Only suppress root-level 'return None'. Indented ones (inside if/with/etc)
+            # are likely explicit and should be preserved.
+            if not (line.startswith(" ") or line.startswith("\t")):
+                # Found a trailing return None at root level. 
+                # We can safely remove it if there's other code.
+                has_others = False
+                for i in range(last_idx):
+                     strip_line = dec.reconstructed[i].strip()
+                     if strip_line and not (
+                         strip_line.startswith('"""') or strip_line.startswith("'''")
+                     ):
+                         has_others = True
+                         break
+                
+                if has_others or getattr(dec, "has_doc", False):
+                    dec.reconstructed.pop(last_idx)
+                else:
+                    indent = len(line) - len(line.lstrip())
+                    dec.reconstructed[last_idx] = line[:indent] + "pass"
+
     raw_source = "\n".join(str(s) for s in dec.reconstructed).rstrip()
     return post_process_source(raw_source)
 
@@ -962,13 +992,47 @@ class TestErrorHandling(unittest.TestCase):
             os.unlink(path)
 
     def test_invalid_magic_raises(self):
-        """A file with an unrecognised magic number raises ValueError."""
+        """A file with an unrecognised magic number raises ValueError with a descriptive message."""
         with tempfile.NamedTemporaryFile(suffix=".pyc", delete=False) as f:
             f.write(struct.pack("<I", 0xDEADBEEF))
             f.write(b"\x00" * 12)
             path = f.name
         try:
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, "Invalid or unsupported Python magic number"):
+                get_decompiler(path)
+        finally:
+            os.unlink(path)
+
+    def test_invalid_magic_inferred_version_in_error(self):
+        """ValueError for a version-valid but host-incompatible magic number includes the version name."""
+        with tempfile.NamedTemporaryFile(suffix=".pyc", delete=False) as f:
+            # 3310 is Python 3.4. This is unsupported.
+            f.write(struct.pack("<I", 3310)) 
+            f.write(b"\x00" * 12)
+            path = f.name
+        
+        # We only expect the detailed version message if the host magic is NOT 3310.
+        host_magic = int.from_bytes(importlib.util.MAGIC_NUMBER, "little")
+        if (host_magic & 0xFFFF) != 3310:
+            try:
+                with self.assertRaisesRegex(ValueError, "Input file appears to be from Python 3.4"):
+                    get_decompiler(path)
+            finally:
+                os.unlink(path)
+        else:
+            os.unlink(path)
+
+    def test_invalid_marshal_data_includes_version_in_error(self):
+        """ValueError for corrupted marshal data includes the inferred version name."""
+        with tempfile.NamedTemporaryFile(suffix=".pyc", delete=False) as f:
+            # 3495 is Python 3.12. If we run on 3.12, it skips host load but tries parser load.
+            f.write(struct.pack("<I", 3495)) 
+            f.write(b"\x00" * 12) # 4+12 = 16 bytes
+            f.write(b"GARBAGE")
+            path = f.name
+        try:
+            # We check for the name in the message.
+            with self.assertRaisesRegex(ValueError, "Inferred version: Python 3.12"):
                 get_decompiler(path)
         finally:
             os.unlink(path)
@@ -997,8 +1061,27 @@ class TestErrorHandling(unittest.TestCase):
             "        pass\n"
         )
         out = decompile(src)
-        self.assertIsInstance(out, str)
-        self.assertGreater(len(out.strip()), 0)
+        self.assertIn("class Base", out)
+        self.assertIn("class Child(Base)", out)
+        self.assertIn("while i < 10", out)
+
+    def test_empty_decompiler_output_emits_warning(self):
+        """If decompile() returns an empty string, main() prints a warning to stderr."""
+        from unittest.mock import patch, MagicMock
+        from pycrefine import main
+        
+        mock_dec = MagicMock()
+        mock_dec.decompile.return_value = "" # Empty output
+        
+        with patch("pycrefine.get_decompiler", return_value=mock_dec), \
+             patch("sys.argv", ["pycrefine", "dummy.pyc"]), \
+             patch("sys.stderr", new_callable=io.StringIO) as mock_stderr, \
+             patch("sys.exit") as mock_exit:
+            
+            main()
+            
+            self.assertIn("Warning: Decompiler returned no source code", mock_stderr.getvalue())
+            mock_exit.assert_called_with(1)
 
 
 # ---------------------------------------------------------------------------
@@ -4078,19 +4161,28 @@ class TestTernarySuppressionAllSubclasses(unittest.TestCase):
         code = compile("pass", "<test>", "exec")
         dec = Decompiler39(code)
         dec.instructions = [
+            # Pattern B (3.12/3.9): then-expr >> JUMP_FORWARD(st) >> else-expr >> STORE >> next
             Instr(124, "LOAD_FAST",          0,  "x",   0, True,  False),
             Instr(114, "POP_JUMP_IF_FALSE",  8,  8,     2, None,  False),
             Instr(100, "LOAD_CONST",         1,  1,     4, None,  False),
             Instr(110, "JUMP_FORWARD",       4, 10,     6, None,  False),
             Instr(100, "LOAD_CONST",         2,  2,     8, None,  True ),
             Instr(125, "STORE_FAST",         0,  "x",  10, None,  False),
-            Instr( 83, "RETURN_VALUE",      None, None, 12, None,  False),
+            Instr( 90, "STORE_NAME",         1, "y",   12, None,  False),
+            Instr( 83, "RETURN_VALUE",      None, None, 14, None,  False),
         ]
         dec._prescan_ternaries()
         suppress = getattr(dec, "_ternary_suppress", set())
-        # RETURN_VALUE is NOT part of the ternary
-        self.assertNotIn(12, suppress,
-            "RETURN_VALUE at offset 12 incorrectly in _ternary_suppress")
+        
+        # Positive assertions: check that the ternary branches ARE suppressed
+        self.assertIn(4, suppress, "LOAD_CONST 1 at offset 4 must be suppressed")
+        self.assertIn(6, suppress, "JUMP_FORWARD at offset 6 must be suppressed")
+        self.assertIn(8, suppress, "LOAD_CONST 2 at offset 8 must be suppressed")
+        
+        # Negative assertions: verify no leakage into subsequent instructions
+        self.assertNotIn(10, suppress, "Shared STORE_FAST at offset 10 must NOT be suppressed")
+        self.assertNotIn(12, suppress, "STORE_NAME at offset 12 must NOT be suppressed")
+        self.assertNotIn(14, suppress, "RETURN_VALUE at offset 14 must NOT be suppressed")
 
 
 # ---------------------------------------------------------------------------

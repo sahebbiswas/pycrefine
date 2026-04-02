@@ -65,6 +65,22 @@ _IS_COMP_GEN_STOP = frozenset({"LOAD_CONST", "LOAD_NAME", "LOAD_FAST", "LOAD_GLO
 
 _GENERIC_SKIP_OPS = frozenset({"RESUME", "CACHE", "NOP", "NOT_TAKEN", "COPY_FREE_VARS", "EXTENDED_ARG"})
 
+# --- Augmented Assignment Opcodes ---
+_AUG_ASSIGN_MAP = {
+    13: "+=",  14: "&=",  15: "//=", 16: "<<=", 17: "@=",
+    18: "*=",  19: "%=",  20: "|=",  21: "**=", 22: ">>=",
+    23: "-=",  24: "/=",  25: "^=",
+}
+_INPLACE_ASSIGN_MAP = {
+    "INPLACE_ADD": "+=", "INPLACE_SUBTRACT": "-=",
+    "INPLACE_MULTIPLY": "*=", "INPLACE_TRUE_DIVIDE": "/=",
+    "INPLACE_FLOOR_DIVIDE": "//=", "INPLACE_MODULO": "%=",
+    "INPLACE_POWER": "**=", "INPLACE_LSHIFT": "<<=",
+    "INPLACE_RSHIFT": ">>=", "INPLACE_AND": "&=",
+    "INPLACE_OR": "|=", "INPLACE_XOR": "^=",
+    "INPLACE_MATRIX_MULTIPLY": "@=",
+}
+
 
 def post_process_source(source: str) -> str:
     """Clean up decompiled output to be more Pythonic."""
@@ -724,10 +740,11 @@ class DecompilerGeneric(DecompilerBase):
         
         Populates two attributes used by the decompiler:
         - _ternary_jumps: maps the offset of a conditional POP_JUMP_IF_* instruction to a tuple
-          (store_name, then_instrs, else_instrs, is_true_jump) where `store_name` is the target
-          variable name, `then_instrs` and `else_instrs` are lists of instructions forming the
-          true/false branch expressions, and `is_true_jump` is True when the jump was taken
-          for the truthy branch.
+          (store_name, then_instrs, else_instrs, is_true_jump, aug_op) where `store_name` is the 
+          target variable name, `then_instrs` and `else_instrs` are lists of instructions 
+          forming the true/false branch expressions, `is_true_jump` is True when the jump 
+          was taken for the truthy branch, and `aug_op` is an optional augmented-assignment 
+          operator string (e.g. "+=") when the ternary is duplicated into an augmented path.
         - _ternary_suppress: a set of instruction offsets that should be skipped during normal
           instruction processing because they are part of a recognized ternary pattern.
         """
@@ -828,8 +845,22 @@ class DecompilerGeneric(DecompilerBase):
                         continue
                     store_name = str(store_instr.argval)
                     is_true    = "IF_TRUE" in ins.opname
+                    
+                    # ── Augmented assignment detection (B2) ───────────────
+                    aug_op = None
+                    if actual_then_expr and else_instrs:
+                        lt = actual_then_expr[-1]
+                        le = else_instrs[-1]
+                        if lt.opname == "BINARY_OP" and le.opname == "BINARY_OP" and lt.arg == le.arg:
+                            aug_op = _AUG_ASSIGN_MAP.get(int(lt.arg) if lt.arg is not None else -1)
+                        if not aug_op and "INPLACE_" in lt.opname and lt.opname == le.opname:
+                            aug_op = _INPLACE_ASSIGN_MAP.get(lt.opname)
+                        if aug_op:
+                            actual_then_expr.pop()
+                            else_instrs.pop()
+
                     self._ternary_jumps[ins.offset] = (
-                        store_name, actual_then_expr, else_instrs, is_true,
+                        store_name, actual_then_expr, else_instrs, is_true, aug_op
                     )
                     for x in then_raw:
                         self._ternary_suppress.add(x.offset)
@@ -849,16 +880,28 @@ class DecompilerGeneric(DecompilerBase):
                 is_inplace = False
 
                 if st_idx is not None:
-                    opname = self.instructions[st_idx].opname
-                    if "INPLACE_" in opname:
-                        is_inplace = True
-                        st_idx += 1  # The STORE typically follows INPLACE
-                    elif opname == "BINARY_OP":
-                        # BINARY_OP with arg in augmented-assignment range (13-25)
-                        arg_val = self.instructions[st_idx].arg
-                        if arg_val is not None and 13 <= int(arg_val) <= 25:
+                    # Check the instruction AT st_idx or immediately BEFORE it.
+                    # Some bytecode patterns land on the INPLACE op, others land 
+                    # directly on the STORE (meaning the INPLACE op is the last 
+                    # instruction of the else branch).
+                    check_idxs = [st_idx]
+                    if st_idx > 0:
+                        check_idxs.insert(0, st_idx - 1)
+                    
+                    for c_idx in check_idxs:
+                        op = self.instructions[c_idx]
+                        if "INPLACE_" in op.opname:
                             is_inplace = True
-                            st_idx += 1  # The STORE typically follows BINARY_OP
+                            if c_idx == st_idx:
+                                st_idx += 1
+                            break
+                        if op.opname == "BINARY_OP":
+                            arg_val = op.arg
+                            if arg_val is not None and 13 <= int(arg_val) <= 25:
+                                is_inplace = True
+                                if c_idx == st_idx:
+                                    st_idx += 1
+                                break
 
                 if st_idx is None or self.instructions[st_idx].opname not in _TERNARY_STORES:
                     st_idx = None
@@ -886,8 +929,22 @@ class DecompilerGeneric(DecompilerBase):
 
                 store_name = str(store_instr.argval)
                 is_true    = "IF_TRUE" in ins.opname
+
+                # ── Augmented assignment detection (B1) ───────────────
+                aug_op = None
+                if before_jf and else_instrs:
+                    lt = before_jf[-1]
+                    le = else_instrs[-1]
+                    if lt.opname == "BINARY_OP" and le.opname == "BINARY_OP" and lt.arg == le.arg:
+                        aug_op = _AUG_ASSIGN_MAP.get(int(lt.arg) if lt.arg is not None else -1)
+                    if not aug_op and "INPLACE_" in lt.opname and lt.opname == le.opname:
+                        aug_op = _INPLACE_ASSIGN_MAP.get(lt.opname)
+                    if aug_op:
+                        before_jf.pop()
+                        else_instrs.pop()
+
                 self._ternary_jumps[ins.offset] = (
-                    store_name, before_jf, else_instrs, is_true,
+                    store_name, before_jf, else_instrs, is_true, aug_op
                 )
                 for x in then_raw:
                     self._ternary_suppress.add(x.offset)
@@ -934,8 +991,21 @@ class DecompilerGeneric(DecompilerBase):
             store_name = str(then_store.argval)
             is_true    = "IF_TRUE" in ins.opname
 
+            # ── Augmented assignment detection (Pattern A) ───────────────
+            aug_op = None
+            if before_store and else_instrs:
+                lt = before_store[-1]
+                le = else_instrs[-1]
+                if lt.opname == "BINARY_OP" and le.opname == "BINARY_OP" and lt.arg == le.arg:
+                    aug_op = _AUG_ASSIGN_MAP.get(int(lt.arg) if lt.arg is not None else -1)
+                if not aug_op and "INPLACE_" in lt.opname and lt.opname == le.opname:
+                    aug_op = _INPLACE_ASSIGN_MAP.get(lt.opname)
+                if aug_op:
+                    before_store.pop()
+                    else_instrs.pop()
+
             self._ternary_jumps[ins.offset] = (
-                store_name, before_store, else_instrs, is_true
+                store_name, before_store, else_instrs, is_true, aug_op
             )
             for x in then_raw:
                 self._ternary_suppress.add(x.offset)
@@ -2778,10 +2848,28 @@ class DecompilerGeneric(DecompilerBase):
                 kwonly_start = inner_code.co_argcount
                 kwonly_end = inner_code.co_argcount + inner_code.co_kwonlyargcount
                 kwonly_names = list(inner_code.co_varnames[kwonly_start:kwonly_end])
-                kwonly_params = kwonly_names  # TODO: attach defaults if kw_defs is available
+                
+                # Attach defaults if kw_defs is available
+                if kw_defs:
+                    # kw_defs is usually a string repr of a dict like "{'x': 1, 'y': 'hi'}"
+                    # We can use regex to safely extract the value for each parameter name.
+                    for i, name in enumerate(kwonly_names):
+                        # Pattern for finding the value of a key in a dict repr
+                        m_val = re.search(rf"'{name}': ([^,}}]+)", kw_defs)
+                        if m_val:
+                            val = m_val.group(1).strip()
+                            kwonly_names[i] = f"{name}={val}"
+                kwonly_params = kwonly_names
 
             # Combine positional, keyword-only, *args, and **kwargs
             params = positional.copy()
+            
+            # Position-only arguments marker (/)
+            # inner_code.co_posonlyargcount exists in Python 3.8+
+            posonly_count = getattr(inner_code, "co_posonlyargcount", 0)
+            if posonly_count > 0:
+                params.insert(posonly_count, "/")
+
             if varargs_name:
                 params.append(varargs_name)
             if kwonly_params:
@@ -3348,19 +3436,22 @@ class DecompilerGeneric(DecompilerBase):
         # the stack instead of opening a control-flow block.
 
         if instr.offset in getattr(self, "_ternary_jumps", {}):
-            store_name, then_instrs, else_instrs, is_true = \
+            store_name, then_instrs, else_instrs, is_true, aug_op = \
                 self._ternary_jumps[instr.offset]
             cond_expr = str(self.stack.pop()) if self.stack else "?"
             then_expr = self._eval_ternary_branch(then_instrs)
             else_expr = self._eval_ternary_branch(else_instrs)
-            # POP_JUMP_IF_TRUE jumps to else-branch when True,
-            # so: x = then_expr if NOT cond else else_expr
-            # POP_JUMP_IF_FALSE jumps to else-branch when False,
-            # so: x = then_expr if cond else else_expr
-            if is_true:
-                self.stack.append(f"{then_expr} if not {cond_expr} else {else_expr}")
+
+            ternary = f"{then_expr} if {'not ' if is_true else ''}{cond_expr} else {else_expr}"
+            
+            if aug_op:
+                # Augmented ternary: the target variable was loaded onto the stack
+                # before the jump. Pop it now so we can emit the assignment statement.
+                target_var = self.stack.pop() if self.stack else store_name
+                self._append_reconstructed(f"{target_var} {aug_op} {ternary}")
             else:
-                self.stack.append(f"{then_expr} if {cond_expr} else {else_expr}")
+                # Regular ternary expr: push to stack for a following STORE to pick up.
+                self.stack.append(ternary)
             # Skip past the else-branch instructions up to (but not including)
             # the else-STORE: they have already been evaluated speculatively.
             # The else-STORE fires normally and emits the assignment.
@@ -5035,24 +5126,49 @@ class MarshalParser:
 # 3.13             3531 – 3559
 # 3.14             3560+
 
+def _get_python_version_from_magic(version_id: int) -> Optional[str]:
+    """Return a Python version string (e.g., '3.12') corresponding to the given magic number."""
+    if 3310 <= version_id <= 3349: return "3.4"
+    if 3350 <= version_id <= 3378: return "3.5"
+    if 3379 <= version_id <= 3393: return "3.6"
+    if 3394 <= version_id <= 3412: return "3.7"
+    if 3413 <= version_id <= 3413: return "3.8"
+    if 3420 <= version_id <= 3429: return "3.9"
+    if 3430 <= version_id <= 3449: return "3.10"
+    if 3450 <= version_id <= 3494: return "3.11"
+    if 3495 <= version_id <= 3530: return "3.12"
+    if 3531 <= version_id <= 3559: return "3.13"
+    if version_id >= 3560: return "3.14+"
+    return None
+
 def get_decompiler(filepath: str) -> DecompilerBase:
     with open(filepath, "rb") as f:
         all_data = f.read()
 
     if len(all_data) < 16:
-        raise ValueError("Invalid .pyc file: too short")
+        raise ValueError(f"Invalid .pyc file '{filepath}': too short (found {len(all_data)} bytes)")
 
     magic = struct.unpack("<I", all_data[0:4])[0]
     version_id = magic & 0xFFFF
 
-    if not (3000 <= version_id <= 5000):
-        host_magic = int.from_bytes(importlib.util.MAGIC_NUMBER, "little")
-        if magic != host_magic:
-            raise ValueError(
-                f"Invalid or unsupported Python magic number: 0x{magic:08x} "
-                f"(version id: {version_id}). File may be corrupt or from an "
-                "unsupported Python version."
-            )
+    host_magic = int.from_bytes(importlib.util.MAGIC_NUMBER, "little")
+    host_version_id = host_magic & 0xFFFF
+
+    if magic != host_magic and not (3410 <= version_id <= 5000):
+        # We don't recognize the magic or it's very old/corrupt
+        input_ver = _get_python_version_from_magic(version_id)
+        host_ver = _get_python_version_from_magic(host_magic & 0xFFFF)
+        
+        msg = f"Invalid or unsupported Python magic number: 0x{magic:08x} (version id: {version_id})."
+        if input_ver:
+            msg += f"\n- Input file appears to be from Python {input_ver}."
+        else:
+            msg += "\n- Input file version is unrecognized or may be corrupt."
+            
+        if host_ver:
+            msg += f"\n- Current interpreter is Python {host_ver} (magic: 0x{host_magic:08x})."
+        
+        raise ValueError(msg)
 
     host_magic = int.from_bytes(importlib.util.MAGIC_NUMBER, "little")
 
@@ -5079,7 +5195,11 @@ def get_decompiler(filepath: str) -> DecompilerBase:
                 continue
 
     if not isinstance(code_obj, types.CodeType):
-        raise ValueError("Could not find valid marshal code object in .pyc file")
+        input_ver = _get_python_version_from_magic(version_id)
+        msg = f"Could not find valid marshal code object in .pyc file '{filepath}'."
+        if input_ver:
+            msg += f" (Inferred version: Python {input_ver})"
+        raise ValueError(msg)
 
     # corrected dispatch table
     if 3410 <= version_id <= 3429:      # 3.9
@@ -5122,7 +5242,11 @@ def main():
                 print(f"Error: Failed to save decompiled output to {args.output}: {e}", file=sys.stderr)
                 sys.exit(1)
         else:
-            print(output_text)
+            if output_text and output_text.strip():
+                print(output_text)
+            else:
+                print(f"Warning: Decompiler returned no source code for {args.input}", file=sys.stderr)
+                sys.exit(1)
             
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
