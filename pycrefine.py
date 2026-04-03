@@ -3218,8 +3218,9 @@ class DecompilerGeneric(DecompilerBase):
 
         # keyword argument handling
         # CALL_KW: TOS is a tuple of kw-names; then num_args values (kw last)
+        # CALL_FUNCTION_KW: same as CALL_KW but for Python 3.9/3.10
         kw_names: List[str] = []
-        if opname == "CALL_KW" or ("kwnames" in str(instr.argval)):
+        if opname == "CALL_KW" or opname == "CALL_FUNCTION_KW" or ("kwnames" in str(instr.argval)):
             if self.stack:
                 raw_kw = self.stack.pop()
                 s_kw = str(raw_kw).strip("()")
@@ -5292,7 +5293,9 @@ class Decompiler314(Decompiler311Plus):
                 self._append_reconstructed(f"{names} = {expr}")
             else:
                 expr = str(self.stack.pop()) if self.stack else "?"
-                self._append_reconstructed(f"var1, var2 = {expr}")
+                # Use argrepr which contains the original target text like "(foo, bar)"
+                targets = instr.argrepr if instr.argrepr else "var1, var2"
+                self._append_reconstructed(f"{targets} = {expr}")
             return
 
         super()._handle_instruction(instr)

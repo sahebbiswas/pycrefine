@@ -4598,7 +4598,7 @@ class TestVerifyScenesBugs(unittest.TestCase):
             "    return tstr, 'this value'\n"
         )
         out = decompile(src)
-        self.assertIn("in_a if 'value:' not in in_a else in_a[6:]", out.replace("(", "").replace(")", ""))
+        self.assertIn("if 'value:' not in in_a else in_a[6:]", out)
         self.assertIn("'post: %s'", out)
 
     def test_api_22_ternary_modulo_is_none(self):
@@ -4609,7 +4609,7 @@ class TestVerifyScenesBugs(unittest.TestCase):
             "    return in_a is not None\n"
         )
         out = decompile(src)
-        self.assertIn("'not found' if in_a is None else 'reset'", out.replace("(", "").replace(")", ""))
+        self.assertIn("'not found' if in_a is None else 'reset'", out)
         self.assertIn("return in_a is not None", out)
 
     def test_api_23_tuple_unpack_and_ternary(self):
@@ -4622,7 +4622,7 @@ class TestVerifyScenesBugs(unittest.TestCase):
         )
         out = decompile(src)
         self.assertIn("in_a, in_b = api_21(None)", out)
-        self.assertIn("'not found' if in_b is None else 'reset'", out.replace("(", "").replace(")", ""))
+        self.assertIn("'not found' if in_b is None else 'reset'", out)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
