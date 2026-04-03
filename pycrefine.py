@@ -647,16 +647,13 @@ class DecompilerGeneric(DecompilerBase):
 
     def _append_reconstructed(self, line: str, indent_multiline: bool = False):
         """
-        Append a reconstructed source line (or multi-line block) to the decompiler's output buffer with proper indentation and spacing.
+        Append a reconstructed source line or block to the decompiler's output buffer with proper indentation and optional multi-line indentation.
         
-        This method mutates self.reconstructed by:
-        - inserting a blank line before top-level/major block headers (`def`, `class`, `if`, `for`, `while`, `try:`) when the previous line is not already blank;
-        - splitting multi-line input on `\n` and emitting each line, either indenting every line when `indent_multiline` is true or only indenting the first line when false;
-        - prefixing emitted lines with the current indentation (four spaces per indent level) and preserving empty lines.
+        This method updates self.reconstructed in place. If `line` is empty it is ignored. When `line` begins a major top-level block header (starts with `def `, `class `, `if `, `for `, `while `, or `try:`) a blank line is inserted before it if the previous output line is not already blank. If `line` contains embedded newlines it is split on `\n`; when `indent_multiline` is True every produced line is prefixed with the current indentation, otherwise only the first line is indented. Empty lines are preserved.
         
         Parameters:
             line (str): Source text to append; may contain embedded newlines. An empty string is ignored.
-            indent_multiline (bool): If true, apply indentation to every line produced by splitting `line`; if false, only the first line is indented.
+            indent_multiline (bool): If True, apply indentation to every line produced by splitting `line`; if False, only the first line is indented.
         """
         if not line:
             return
@@ -687,6 +684,20 @@ class DecompilerGeneric(DecompilerBase):
 
     def _format_val(self, val):
         # Format slice objects as proper Python slice notation (e.g. slice(6, None, None) → '6:')
+        """
+        Format a constant value for insertion into reconstructed source.
+        
+        Converts values into a Python-syntax-friendly string: slices become Python slice notation like
+        'start:stop' or 'start:stop:step' (omitting parts that are None), multiline strings are wrapped
+        in triple quotes using the alternate quote style if the content contains triple double-quotes,
+        and all other values are represented using their `repr()`.
+        
+        Parameters:
+            val: The constant value to format (e.g., slice, str, number, None, etc.).
+        
+        Returns:
+            A string containing the value rendered in a form suitable for emitted Python source.
+        """
         if isinstance(val, slice):
             start = '' if val.start is None else repr(val.start)
             stop  = '' if val.stop  is None else repr(val.stop)
@@ -749,17 +760,22 @@ class DecompilerGeneric(DecompilerBase):
 
     def _prescan_ternaries(self) -> None:
         """
-        Identify bytecode sequences that encode ternary assignments and record them for later reconstruction.
+        Detect ternary (conditional) expressions encoded in the function bytecode and record them for later reconstruction.
         
         Populates two attributes used by the decompiler:
-        - _ternary_jumps: maps the offset of a conditional POP_JUMP_IF_* instruction to a tuple
-          (store_name, then_instrs, else_instrs, is_true_jump, aug_op) where `store_name` is the 
-          target variable name, `then_instrs` and `else_instrs` are lists of instructions 
-          forming the true/false branch expressions, `is_true_jump` is True when the jump 
-          was taken for the truthy branch, and `aug_op` is an optional augmented-assignment 
-          operator string (e.g. "+=") when the ternary is duplicated into an augmented path.
-        - _ternary_suppress: a set of instruction offsets that should be skipped during normal
-          instruction processing because they are part of a recognized ternary pattern.
+        - _ternary_jumps: dict mapping the offset of a conditional POP_JUMP_IF_* instruction to a tuple
+          (store_name, then_instrs, else_instrs, is_true_jump, aug_op):
+            - store_name (str): target variable name, or empty string when the ternary result is pushed
+              for immediate consumption (no explicit store).
+            - then_instrs / else_instrs (List[BytecodeInstruction]): instruction slices forming the
+              true/false branch expressions (skip-list already removed).
+            - is_true_jump (bool): True when the jump corresponds to the truthy branch (e.g., IF_TRUE).
+            - aug_op (Optional[str]): augmented-assignment operator (e.g., "+=") when the ternary is
+              part of an augmented-assignment pattern; otherwise None.
+        - _ternary_suppress: set of instruction offsets that should be skipped during normal
+          instruction processing because they belong to a recognized ternary pattern.
+        
+        Only high-level, reconstructible ternary patterns are recorded; instructions not matched remain unchanged.
         """
 
         self._ternary_jumps: dict = {}
@@ -1359,10 +1375,10 @@ class DecompilerGeneric(DecompilerBase):
 
     def _eval_ternary_branch(self, instrs: list) -> str:
         """
-        Reconstructs a Python expression string from a sequence of pure-expression bytecode instructions.
+        Reconstructs a Python expression from a sequence of pure-expression bytecode instructions.
         
         Parameters:
-        	instrs (list): Disassembled instruction objects representing the then- or else-branch of a ternary expression; should contain only expression-building opcodes.
+        	instrs (list): Disassembled instruction objects for a ternary branch; expected to contain only expression-building opcodes.
         
         Returns:
         	expr (str): The reconstructed expression as source text, or "?" if an expression could not be determined.
@@ -2294,6 +2310,16 @@ class DecompilerGeneric(DecompilerBase):
     # ------------------------------------------------------------------
 
     def _build_dispatch(self):
+        """
+        Initialize the opcode dispatch table used to route bytecode instructions to handler methods.
+        
+        Populates self._dispatch with a mapping from opcode name strings to the corresponding
+        instance methods that implement their decompilation behavior (loads, stores, imports,
+        calls, control-flow, exception handling, collection builders, stack manipulation, and
+        no-op/suppressed opcodes). The table includes expanded call opcode routing, sequence
+        unpack handling, slice/subscript operators, combined no-op entries, and specialized
+        handlers for exception/with/try-related opcodes.
+        """
         self._dispatch = {
             # Loads
             "LOAD_CONST": self._op_load, "LOAD_NAME": self._op_load, "LOAD_FAST": self._op_load,
@@ -2566,6 +2592,14 @@ class DecompilerGeneric(DecompilerBase):
 
 
     def _op_import_from(self, instr: BytecodeInstruction):
+        """
+        Emit a `from <module> import <name>` statement when pairing an IMPORT_FROM with a prior IMPORT_NAME tuple on the stack.
+        
+        If the top-of-stack is the import sentinel tuple produced by IMPORT_NAME (("import", module, fromlist, level)), this emits a corresponding `from ... import <name>` line (respecting relative import `level`) and pushes a sentinel `("_from_import_done", name)` so a subsequent STORE_* does not re-emit the symbol. Otherwise, pushes the import name value from `instr.argval` onto the expression stack for later use.
+        
+        Parameters:
+            instr (BytecodeInstruction): The IMPORT_FROM instruction being processed; `instr.argval` is the imported symbol name.
+        """
         opname = instr.opname
         # TOS is the ("import", module, fromlist, level) tuple from IMPORT_NAME.
         # Emit `from module import name` immediately and leave the module tuple
@@ -2588,6 +2622,14 @@ class DecompilerGeneric(DecompilerBase):
         # UNPACK_SEQUENCE N followed by N STORE_FAST/STORE_NAME
         # instructions emits a tuple-unpacking assignment: a, b = expr.
         # Peek ahead from the current position (self.pc) to collect the N store targets.
+        """
+        Attempt to collapse an UNPACK_SEQUENCE followed by consecutive STORE_* instructions into a single tuple-unpacking assignment.
+        
+        Inspects the UNPACK_SEQUENCE argument count and peeks forward from the current program counter to collect the next N store targets (STORE_FAST/STORE_NAME/STORE_GLOBAL/STORE_DEREF), skipping harmless markers (RESUME, NOP, CACHE, NOT_TAKEN). If exactly N targets are found and an expression is available on the decompiler stack, emits:
+        - "a, b = expr" when N >= 2, or
+        - "a, = expr" when N == 1
+        and advances self.pc past the consumed store instructions. If the lookahead fails to find N valid store targets or the stack lacks an expression, no emission occurs and normal per-store handling is left to proceed.
+        """
         n = int(instr.arg) if instr.arg is not None else 0
         if n < 1:
             return
@@ -2624,6 +2666,14 @@ class DecompilerGeneric(DecompilerBase):
         # ── subscript / attr ───────────────────────────────────────────
 
     def _op_binary_subscr(self, instr: BytecodeInstruction):
+        """
+        Constructs a subscription expression from the top two stack entries and pushes the resulting string back onto the expression stack.
+        
+        Pops the subscript expression and the container expression (if available), formats them as "container[subscript]", and appends that string to self.stack. If there are fewer than two items on the stack, no change is made.
+        
+        Parameters:
+            instr (BytecodeInstruction): The bytecode instruction being handled; provided for context but not otherwise inspected by this handler.
+        """
         opname = instr.opname
         if len(self.stack) >= 2:
             sub = self.stack.pop()
@@ -3214,6 +3264,23 @@ class DecompilerGeneric(DecompilerBase):
         # ── calls ──────────────────────────────────────────────────────
 
     def _op_call(self, instr: BytecodeInstruction):
+        """
+        Reconstruct a function or method call from the bytecode instruction and push the resulting expression or special placeholder onto the decompiler stack.
+        
+        Handles positional and keyword argument collection for CALL/CALL_KW/CALL_FUNCTION_* variants, reconstructs call argument lists, and consumes the callable and arguments from self.stack. Recognizes and transforms several high-level patterns instead of emitting a plain call:
+        - Decorator application: when a freshly-made function object is immediately called by a CALL following MAKE_FUNCTION, it packages a decorated function tuple ("func", "<decorated def...>") and pushes it back on the stack.
+        - Immediate anonymous-function invocation: converts called anonymous function tuples into an inline expression via _render_func_tuple and pushes the rendered result.
+        - Class construction via __build_class__: detects the class-builder pattern and pushes a ("class", "<class ...>") tuple with reconstructed class header and body.
+        - super(): when called with no arguments emits "super()".
+        - Normal calls: pushes a string "callable(arg1, arg2, kw=val, ...)" when no special pattern applies.
+        
+        Side effects:
+        - Pops argument and callable values from self.stack and pushes the reconstructed call or special tuple/string back onto self.stack.
+        - May modify intermediate argument formatting (e.g., strip NULL sentinels).
+        
+        Parameters:
+            instr (BytecodeInstruction): The CALL-family bytecode instruction being processed; its opname and arg determine the number and kind of arguments to consume.
+        """
         opname = instr.opname
         num_args = int(instr.arg) if instr.arg is not None else 0
 
@@ -3613,6 +3680,20 @@ class DecompilerGeneric(DecompilerBase):
 
 
     def _op_conditional_jump(self, instr: BytecodeInstruction):
+        """
+        Handle a conditional jump instruction, emitting reconstructed `if`, `while`, or ternary code and updating decompiler state.
+        
+        This method detects compiler patterns and mutates the decompiler's stack, reconstructed output, indentation, block stack, and program counter as appropriate:
+        - If the jump was pre-identified as a ternary, evaluates both branches and either emits an augmented-assignment form or pushes a ternary expression onto the stack; advances the PC past the else-branch instructions that were speculatively evaluated.
+        - Suppresses duplicate condition values produced for `while` guards and exception-match checks.
+        - Rewrites `POP_JUMP_IF_NONE` / `POP_JUMP_IF_NOT_NONE` style tests into `is None` / `is not None` predicates when necessary.
+        - Emits combined `and`/`or` compound conditions when a compound condition was precomputed by prescan.
+        - Emits `while` headers for backward-jump guards detected by prescan.
+        - Emits `if` headers for forward conditional jumps, adjusts indentation, and records block end offsets for later closing; recognizes certain immediate jump targets (returns, breaks, raises) to influence block handling.
+        
+        Parameters:
+            instr (BytecodeInstruction): The conditional jump instruction to handle; its `opname`, `offset`, and argument fields are used to determine emitted source and control-flow updates.
+        """
         opname = instr.opname
         # ── Ternary expression detection ──────────────────────────────
         # If _prescan_ternaries identified this jump as a ternary, evaluate
@@ -4372,12 +4453,12 @@ class Decompiler39(DecompilerGeneric):
     def _handle_instruction(self, instr: BytecodeInstruction):
         # Suppress exception-path finally bodies
         """
-        Handle a single disassembled bytecode instruction and update the decompiler's reconstruction state.
+        Process a single disassembled instruction and update the decompiler's internal state and reconstructed output accordingly.
         
-        This method dispatches on the instruction's opname and performs the appropriate reconstruction actions for that opcode: it may push or pop expression fragments on the internal stack, append emitted source lines to self.reconstructed, open or close control-flow blocks, adjust self.indent_level, modify self.blocks and various suppression/scan tables, and advance or adjust self.pc. For opcodes not specialized here the handler delegates to the superclass implementation.
+        This method dispatches on the instruction's opname to mutate the expression stack, emit or suppress reconstructed source lines, open/close control-flow blocks, adjust indentation and block stacks, modify prescan/suppression tables, and advance or adjust the program counter as needed. It implements numerous 3.9-specific and generic bytecode-to-source translations (for example: binary/inplace ops, comparisons, various CALL/CALL_* forms including class and decorator patterns, while-loop guards and while True headers, ternary/compound-condition suppression, unpacking/call/attribute/method patterns, and try/except/finally handler and with/cleanup machinery). The handler delegates to the superclass for opcodes it does not special-case.
         
         Parameters:
-            instr (BytecodeInstruction): The disassembled instruction to process (uses fields such as opname, arg, argval, offset, and is_jump_target).
+            instr (BytecodeInstruction): The instruction to handle; uses fields such as opname, arg, argval, offset, and is_jump_target.
         """
         # Suppress then-branch instructions of detected ternary expressions
         if instr.offset in getattr(self, "_ternary_suppress", ()):
@@ -5063,6 +5144,20 @@ class Decompiler311Plus(DecompilerGeneric):
 
     def _handle_instruction(self, instr: BytecodeInstruction):
         # Suppress then-branch instructions of detected ternary expressions
+        """
+        Handle a single bytecode instruction, reconstructing binary and in-place operations and delegating other opcodes.
+        
+        If the instruction offset is recorded in ternary or compound-suppression sets it is ignored. For BINARY_OP instructions this method:
+        - Emits subscript expressions when the op index maps to subscript semantics.
+        - Builds binary-expression strings for known binary operator indices and pushes them onto the expression stack.
+        - Detects in-place operator indices and, when the following instruction stores back to the same target, emits an augmented-assignment statement and advances the program counter past the store; otherwise it pushes a parenthesized in-place expression onto the stack.
+        - Falls back to a placeholder expression for unknown operator indices.
+        
+        For non-BINARY_OP/RESUME opcodes, handling is delegated to the superclass implementation.
+        
+        Parameters:
+        	instr (BytecodeInstruction): The disassembled instruction to process. This method may mutate the decompiler's `stack`, `pc`, and reconstructed output.
+        """
         if instr.offset in getattr(self, "_ternary_suppress", ()):
             return
         # Suppress intermediate instructions belonging to a compound boolean
@@ -5155,21 +5250,22 @@ class Decompiler314(Decompiler311Plus):
     """
     def _handle_instruction(self, instr: BytecodeInstruction):
         """
-        Dispatch a single disassembled instruction to the decompiler's reconstruction logic, including Python 3.14-specific handling for with-statement preambles and normal-path cleanup suppression.
+        Dispatch a single bytecode instruction to the decompiler, handling Python 3.14-specific with-statement preambles and cleanup suppression before delegating to the generic handler.
         
         This method:
-        - Recognizes and skips LOAD_SPECIAL opcodes used for with/async-with scaffolding unless part of a detected call sequence.
-        - Detects a Python 3.14 with-preamble pattern (COPY 1 followed by a LOAD_SPECIAL/CALL sequence), emits a corresponding "with <ctx>" header, increments indentation, and pushes a with-body block; it may consume following STORE_/POP_TOP instructions and advance the program counter.
+        - Recognizes and suppresses instruction offsets reserved by prescans (ternary/compound-condition suppression and recorded with-exit cleanup offsets).
+        - Detects Python 3.14 with-statement preambles (COPY 1 + LOAD_SPECIAL/CALL sequence), emits a corresponding `with <ctx>[ as name]:` header, increases indentation, pushes an internal with sentinel on the expression stack, and records/opens a with-body block based on exception-table-derived boundaries.
         - Records and suppresses normal-path __exit__ cleanup sequences by populating an internal _with_exit_suppress set so those instructions are ignored later.
-        - Suppresses a common three-None CALL/POP_TOP cleanup pattern and removes any internal "_with_info" sentinel left on the stack.
-        - Ensures any internal with-sentinel (`("_with_info", ...)`) is removed from the expression stack before emitting a return, while preserving the runtime return value.
-        - Delegates all non-specialized or remaining instruction handling to the superclass implementation.
+        - Suppresses a common three-None cleanup pattern (LOAD_CONST None x2/3 + CALL 3 + POP_TOP) and removes any internal "_with_info" sentinel left on the stack.
+        - Ensures any internal with-sentinel (`("_with_info", ...)`) is removed from the expression stack before emitting a return while preserving the actual return value.
+        - Handles Python 3.14 combined-store `STORE_FAST_STORE_FAST` by emitting tuple-unpacking assignment text when possible.
+        - Delegates all remaining or non-specialized opcodes to the superclass implementation for normal reconstruction.
         
         Parameters:
-            instr (BytecodeInstruction): The instruction to process; its opname, opcode, arg, argval, and offset are used to match patterns and drive stack/block changes.
+            instr (BytecodeInstruction): The disassembled instruction to process; its opname, opcode, arg, argval, and offset are used to match patterns and drive stack/block changes.
         
         Side effects:
-            May mutate self.pc, self.stack, self.blocks, self.indent_level, self.reconstructed, and may create or update self._with_exit_suppress. Delegates to super()._handle_instruction for further emission when appropriate.
+            May mutate self.pc, self.stack, self.blocks, self.indent_level, self.reconstructed, and may create or update self._with_exit_suppress. Delegates further emission and handling to super()._handle_instruction when appropriate.
         """
         # Suppress then-branch instructions of detected ternary expressions
         if instr.offset in getattr(self, "_ternary_suppress", ()):

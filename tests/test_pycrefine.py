@@ -4565,6 +4565,12 @@ class TestVerifyScenesBugs(unittest.TestCase):
         # Python 3.14 compiler duplicates `print` into separate if/else blocks,
         # so we run the explicit Python 3.9 bytecode layout using a synthetic test
         # to ensure the 'stacksink' ternary logic (join-point at CALL_FUNCTION) works.
+        """
+        Test ternary expression used as a function argument where one branch builds a slice, using a synthetic Python 3.9-style instruction sequence.
+        
+        Asserts the decompiler reconstructs the ternary inside a call-site (join-point) so the output contains:
+            print(in_a if 'value:' not in in_a else in_a[6:])
+        """
         from pycrefine import BytecodeInstruction as I
         instructions = [
             I(0, "LOAD_GLOBAL",      0, "print",    0,  None, False),
