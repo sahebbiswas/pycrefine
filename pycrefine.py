@@ -686,6 +686,14 @@ class DecompilerGeneric(DecompilerBase):
             self.reconstructed.append("    " * self.indent_level + line)
 
     def _format_val(self, val):
+        # Format slice objects as proper Python slice notation (e.g. slice(6, None, None) → '6:')
+        if isinstance(val, slice):
+            start = '' if val.start is None else repr(val.start)
+            stop  = '' if val.stop  is None else repr(val.stop)
+            if val.step is None:
+                return f'{start}:{stop}'
+            step = '' if val.step is None else repr(val.step)
+            return f'{start}:{stop}:{step}'
         if isinstance(val, str) and "\n" in val:
             if '"""' in val:
                 return f"'''{val}'''"
@@ -759,8 +767,26 @@ class DecompilerGeneric(DecompilerBase):
 
         offset_to_idx = {ins.offset: i for i, ins in enumerate(self.instructions)}
 
+        # Opcodes considered as ternary condition jumps (Python 3.9+):
+        #  POP_JUMP_IF_FALSE / POP_JUMP_IF_TRUE (all versions)
+        #  POP_JUMP_IF_NONE / POP_JUMP_IF_NOT_NONE (3.11+)
+        _TERNARY_CJUMPS = (
+            "POP_JUMP_IF_FALSE", "POP_JUMP_IF_TRUE",
+            "POP_JUMP_IF_NONE", "POP_JUMP_IF_NOT_NONE",
+        )
+        # Set of opcode name fragments that are "stacksink" join-point operations:
+        # when a JUMP_FORWARD from the then-branch targets one of these, the ternary
+        # result is consumed by that op (not stored). We still recognise the ternary.
+        _STACKSINK_OPS = frozenset((
+            "BINARY_OP", "BINARY_MODULO", "BINARY_ADD", "BINARY_SUBTRACT",
+            "BINARY_MULTIPLY", "BINARY_TRUE_DIVIDE", "BINARY_FLOOR_DIVIDE",
+            "BINARY_AND", "BINARY_OR", "BINARY_XOR", "BINARY_LSHIFT",
+            "BINARY_RSHIFT", "BINARY_POWER", "BINARY_MATRIX_MULTIPLY",
+            "CALL_FUNCTION", "CALL", "CALL_METHOD", "CALL_FUNCTION_KW",
+        ))
         for idx, ins in enumerate(self.instructions):
-            if "POP_JUMP_IF_FALSE" not in ins.opname and "POP_JUMP_IF_TRUE" not in ins.opname:
+            if not any(ins.opname.startswith(op) or ins.opname == op
+                       for op in _TERNARY_CJUMPS):
                 continue
             jump_target = self._get_jump_target(ins)
             t_idx = offset_to_idx.get(jump_target)
@@ -908,12 +934,48 @@ class DecompilerGeneric(DecompilerBase):
                                     st_idx += 1
                                 break
 
+                # ── B1 sub-case: join-point is a STORE (regular ternary) ──
+                is_stacksink = False
                 if st_idx is None or self.instructions[st_idx].opname not in _TERNARY_STORES:
-                    st_idx = None
-                    for fi in range(t_idx, min(t_idx + _MAX_TERNARY_SEARCH_WINDOW, len(self.instructions))):
-                        if self.instructions[fi].opname in _TERNARY_STORES:
-                            st_idx = fi
-                            break
+                    # Before giving up: check if the JUMP_FORWARD target is a
+                    # 'stacksink' joinpoint (CALL / BINARY_OP).  In that case
+                    # the ternary result is consumed by that op, not stored to
+                    # a variable.  We still push the ternary onto the stack.
+                    if (st_idx is not None
+                            and self.instructions[st_idx].opname in _STACKSINK_OPS):
+                        is_stacksink = True
+                        # else_raw = from t_idx up to (but NOT including) the join op
+                        else_end_ss  = st_idx
+                        else_raw_ss  = self.instructions[t_idx : else_end_ss]
+                        else_instrs_ss = [x for x in else_raw_ss
+                                          if x.opname not in _TERNARY_SKIP]
+                        # Validate: no control-flow ops in else branch
+                        if any(x.opname == "POP_TOP" or "POP_JUMP_IF" in x.opname
+                               for x in else_instrs_ss):
+                            is_stacksink = False
+                        elif not all(x.opname in _TERNARY_PURE for x in else_instrs_ss):
+                            is_stacksink = False
+                        if is_stacksink:
+                            is_true_ss = "IF_TRUE" in ins.opname
+                            # store_name="" signals a stacksink (push to stack, no explicit store)
+                            self._ternary_jumps[ins.offset] = (
+                                "", before_jf, else_instrs_ss, is_true_ss, None
+                            )
+                            for x in then_raw:
+                                self._ternary_suppress.add(x.offset)
+                            for x in else_instrs_ss:
+                                self._ternary_suppress.add(x.offset)
+                            # Do NOT suppress the join-point op itself
+                            continue
+
+                    if not is_stacksink:
+                        # Fall back: look for a downstream STORE
+                        st_idx = None
+                        for fi in range(t_idx, min(t_idx + _MAX_TERNARY_SEARCH_WINDOW,
+                                                   len(self.instructions))):
+                            if self.instructions[fi].opname in _TERNARY_STORES:
+                                st_idx = fi
+                                break
                 if st_idx is None:
                     continue
 
@@ -1380,10 +1442,33 @@ class DecompilerGeneric(DecompilerBase):
             elif op in ("UNARY_NEGATIVE",):
                 if mini_stack:
                     mini_stack.append(f"-{mini_stack.pop()}")
+            elif op == "BUILD_SLICE":
+                # Python 3.9: BUILD_SLICE N pops stop,start (and optionally step)
+                argc = ins.arg if ins.arg is not None else 2
+                step = str(mini_stack.pop()) if (argc == 3 and mini_stack) else None
+                stop = str(mini_stack.pop()) if mini_stack else 'None'
+                start = str(mini_stack.pop()) if mini_stack else 'None'
+                s = '' if start == 'None' else start
+                e = '' if stop  == 'None' else stop
+                if step is None or step == 'None':
+                    mini_stack.append(f'{s}:{e}')
+                else:
+                    mini_stack.append(f'{s}:{e}:{step}')
+            elif op == "BINARY_SLICE":
+                # Python 3.11+: pops stop, start, container
+                if len(mini_stack) >= 3:
+                    stop, start, container = mini_stack.pop(), mini_stack.pop(), mini_stack.pop()
+                    s = "" if str(start) == "None" else str(start)
+                    e = "" if str(stop) == "None" else str(stop)
+                    mini_stack.append(f"{container}[{s}:{e}]")
             elif op == "BINARY_SUBSCR":
                 if len(mini_stack) >= 2:
                     key, obj = mini_stack.pop(), mini_stack.pop()
-                    mini_stack.append(f"{obj}[{key}]")
+                    # If key is a slice-notation string (from BUILD_SLICE), keep it as-is
+                    if isinstance(key, str) and ':' in key and not key.startswith("'"):
+                        mini_stack.append(f"{obj}[{key}]")
+                    else:
+                        mini_stack.append(f"{obj}[{key}]")
             elif op in (
                 "BINARY_ADD", "BINARY_SUBTRACT", "BINARY_MULTIPLY",
                 "BINARY_TRUE_DIVIDE", "BINARY_FLOOR_DIVIDE", "BINARY_MODULO",
@@ -2244,6 +2329,11 @@ class DecompilerGeneric(DecompilerBase):
             # Returns
             "RETURN_VALUE": self._op_return_value, "RETURN_CONST": self._op_return_const,
             
+            # Functions
+            "CALL": self._op_call, "CALL_FUNCTION": self._op_call,
+            "CALL_FUNCTION_KW": self._op_call, "CALL_FUNCTION_EX": self._op_call,
+            "CALL_METHOD": self._op_call,
+            
             # Pops
             "POP_TOP": self._op_pop_top,
             
@@ -2258,7 +2348,6 @@ class DecompilerGeneric(DecompilerBase):
             "FORMAT_VALUE": self._op_fstring, "FORMAT_SIMPLE": self._op_fstring,
             "BUILD_STRING": self._op_build_string,
             
-            # Jumps
             # Jumps
             "JUMP_FORWARD": self._op_jump, "JUMP_BACKWARD": self._op_jump,
             "JUMP_ABSOLUTE": self._op_jump,
@@ -2278,7 +2367,7 @@ class DecompilerGeneric(DecompilerBase):
             "BUILD_SET": self._op_build_collection, "BUILD_MAP": self._op_build_map,
             "BUILD_SLICE": self._op_build_slice,
             "BUILD_CONST_KEY_MAP": self._op_build_const_key_map,
-            "GET_ITER": self._op_no_op, "UNPACK_SEQUENCE": self._op_no_op,
+            "GET_ITER": self._op_no_op, "UNPACK_SEQUENCE": self._op_unpack_sequence,
             "LIST_EXTEND": self._op_list_extend, "DICT_MERGE": self._op_dict_merge,
             "DICT_UPDATE": self._op_dict_merge,
             
@@ -2495,6 +2584,41 @@ class DecompilerGeneric(DecompilerBase):
             self.stack.append(("_from_import_done", sym))
         else:
             self.stack.append(instr.argval)
+
+    def _op_unpack_sequence(self, instr: BytecodeInstruction):
+        # UNPACK_SEQUENCE N followed by N STORE_FAST/STORE_NAME
+        # instructions emits a tuple-unpacking assignment: a, b = expr.
+        # Peek ahead from the current position (self.pc) to collect the N store targets.
+        n = int(instr.arg) if instr.arg is not None else 0
+        if n < 1:
+            return
+
+        look = self.pc
+        store_targets = []
+        while look < len(self.instructions) and len(store_targets) < n:
+            op_look = self.instructions[look].opname
+            # If the value is stored to a variable, we can combine it into `v1, v2 = ...`
+            if op_look in ("STORE_FAST", "STORE_NAME", "STORE_GLOBAL", "STORE_DEREF"):
+                store_targets.append(str(self.instructions[look].argval))
+                look += 1
+            # Skip harmless internal/no-op markers (RESUME, NOP, CACHE, NOT_TAKEN)
+            elif op_look in ("RESUME", "NOP", "CACHE", "NOT_TAKEN"):
+                look += 1
+            else:
+                # Encountered something that isn't a store (e.g. a LOAD or a jump)
+                # before finishing the unpack sequence.  Bail out — the decompiler
+                # will fall back to using individual STORE_* calls from the stack.
+                break
+
+        if len(store_targets) == n and n >= 2 and self.stack:
+            expr = str(self.stack.pop())
+            lhs = ", ".join(store_targets)
+            self._append_reconstructed(f"{lhs} = {expr}")
+            self.pc = look  # advance past the consumed instructions
+        elif len(store_targets) == n and n == 1 and self.stack:
+            # Single target: let the following STORE_* handle it normally
+            pass
+        # else: leave items on stack for individual STORE_* to handle (original behavior)
 
         # ── subscript / attr ───────────────────────────────────────────
 
@@ -3497,6 +3621,14 @@ class DecompilerGeneric(DecompilerBase):
             store_name, then_instrs, else_instrs, is_true, aug_op = \
                 self._ternary_jumps[instr.offset]
             cond_expr = str(self.stack.pop()) if self.stack else "?"
+            # For POP_JUMP_IF_NONE / POP_JUMP_IF_NOT_NONE the raw condition
+            # on the stack is the *value* being tested (not a bool expression).
+            # Rewrite it to the appropriate 'is None' / 'is not None' form
+            # so the emitted ternary reads correctly.
+            if "IF_NOT_NONE" in opname and "is " not in cond_expr:
+                cond_expr = f"{cond_expr} is None"
+            elif "IF_NONE" in opname and "NOT" not in opname and "is " not in cond_expr:
+                cond_expr = f"{cond_expr} is not None"
             then_expr = self._eval_ternary_branch(then_instrs)
             else_expr = self._eval_ternary_branch(else_instrs)
 
@@ -4365,7 +4497,13 @@ class Decompiler39(DecompilerGeneric):
             if len(self.stack) >= 2:
                 right = self.stack.pop()
                 left = self.stack.pop()
-                self.stack.append(f"({left} {_bin39[opname]} {right})")
+                # Wrap the right operand in parens when it contains a ternary
+                # expression (e.g. 'x if cond else y') to prevent operator-
+                # precedence ambiguity (% binds tighter than if...else).
+                r_str = str(right)
+                if ' if ' in r_str and ' else ' in r_str:
+                    r_str = f'({r_str})'
+                self.stack.append(f"({left} {_bin39[opname]} {r_str})")
 
         elif opname in _inplace39:
             if len(self.stack) >= 2:
@@ -4972,7 +5110,12 @@ class Decompiler311Plus(DecompilerGeneric):
                     # Fallback: push result for STORE to handle
                     self.stack.append(f"({left} {inplace_op} {right})")
                 elif bin_op:
-                    self.stack.append(f"({left} {bin_op} {right})")
+                    r_str = str(right)
+                    # Wrap ternary right-hand sides to prevent precedence bugs:
+                    # e.g. 'post %s in input' % ('x' if cond else 'y')
+                    if ' if ' in r_str and ' else ' in r_str:
+                        r_str = f'({r_str})'
+                    self.stack.append(f"({left} {bin_op} {r_str})")
                 else:
                     # Unknown BINARY_OP index — use ? as a safe placeholder
                     self.stack.append(f"({left} ? {right})")
@@ -5140,6 +5283,17 @@ class Decompiler314(Decompiler311Plus):
                         break
                 self.stack.append(val)
             # Fall through to super()
+
+        elif opname == "STORE_FAST_STORE_FAST":
+            # Python 3.14 combined store for tuple unpacking (after UNPACK_SEQUENCE)
+            if isinstance(instr.argval, (tuple, list)) and len(instr.argval) >= 2:
+                names = ", ".join(str(x) for x in instr.argval)
+                expr = str(self.stack.pop()) if self.stack else "?"
+                self._append_reconstructed(f"{names} = {expr}")
+            else:
+                expr = str(self.stack.pop()) if self.stack else "?"
+                self._append_reconstructed(f"var1, var2 = {expr}")
+            return
 
         super()._handle_instruction(instr)
 

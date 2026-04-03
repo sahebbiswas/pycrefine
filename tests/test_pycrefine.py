@@ -4560,6 +4560,69 @@ class TestVerifyScenesBugs(unittest.TestCase):
         out = decompile(src)
         self.assertIn("lst[1:-1]", out)
 
+    def test_api_20_ternary_with_slice(self):
+        # api_20: ternary condition used as function argument, producing slice.
+        # Python 3.14 compiler duplicates `print` into separate if/else blocks,
+        # so we run the explicit Python 3.9 bytecode layout using a synthetic test
+        # to ensure the 'stacksink' ternary logic (join-point at CALL_FUNCTION) works.
+        from pycrefine import BytecodeInstruction as I
+        instructions = [
+            I(0, "LOAD_GLOBAL",      0, "print",    0,  None, False),
+            I(0, "LOAD_CONST",       1, 'value:',   2,  None, False),
+            I(0, "LOAD_FAST",        0, "in_a",     4,  None, False),
+            I(0, "COMPARE_OP",       7, "not in",   6,  None, False),
+            I(0, "POP_JUMP_IF_FALSE",0, 18,         8,  None, False),
+            I(0, "LOAD_FAST",        0, "in_a",    10,  None, False),
+            I(0, "JUMP_FORWARD",     0, 28,        12,  None, False),
+            I(0, "LOAD_FAST",        0, "in_a",    18,  None, True),
+            I(0, "LOAD_CONST",       2, 6,         20,  None, False),
+            I(0, "LOAD_CONST",       3, None,      22,  None, False),
+            I(0, "BUILD_SLICE",      2, 2,         24,  None, False),
+            I(0, "BINARY_SUBSCR",    0, None,      26,  None, False),
+            I(0, "CALL_FUNCTION",    1, 1,         28,  None, True),
+            I(0, "POP_TOP",          0, None,      30,  None, False),
+            I(0, "LOAD_CONST",       0, None,      32,  None, False),
+            I(0, "RETURN_VALUE",     0, None,      34,  None, False),
+        ]
+        out = _run39_full_impl(instructions)
+        self.assertIn("print(in_a if 'value:' not in in_a else in_a[6:])", out)
+
+    def test_api_21_ternary_in_modulo(self):
+        # api_21: ternary condition inside format string modulo
+        src = (
+            "def f(in_a):\n"
+            "    if type(in_a) == str:\n"
+            "        tstr = 'post: %s' % (in_a if 'value:' not in in_a else in_a[6:])\n"
+            "    else:\n"
+            "        tstr = 'post: {}'.format(in_a)\n"
+            "    return tstr, 'this value'\n"
+        )
+        out = decompile(src)
+        self.assertIn("in_a if 'value:' not in in_a else in_a[6:]", out.replace("(", "").replace(")", ""))
+        self.assertIn("'post: %s'", out)
+
+    def test_api_22_ternary_modulo_is_none(self):
+        # api_22: ternary testing `is None` inside percent formatting
+        src = (
+            "def f(in_a):\n"
+            "    print('post %s in input' % ('not found' if in_a is None else 'reset'))\n"
+            "    return in_a is not None\n"
+        )
+        out = decompile(src)
+        self.assertIn("'not found' if in_a is None else 'reset'", out.replace("(", "").replace(")", ""))
+        self.assertIn("return in_a is not None", out)
+
+    def test_api_23_tuple_unpack_and_ternary(self):
+        # api_23: tuple unpacking and ternary test
+        src = (
+            "def f():\n"
+            "    in_a, in_b = api_21(None)\n"
+            "    print('post %s in input' % ('not found' if in_b is None else 'reset'))\n"
+            "    return in_a is not None\n"
+        )
+        out = decompile(src)
+        self.assertIn("in_a, in_b = api_21(None)", out)
+        self.assertIn("'not found' if in_b is None else 'reset'", out.replace("(", "").replace(")", ""))
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
