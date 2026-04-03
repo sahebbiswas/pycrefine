@@ -785,8 +785,7 @@ class DecompilerGeneric(DecompilerBase):
             "CALL_FUNCTION", "CALL", "CALL_METHOD", "CALL_FUNCTION_KW",
         ))
         for idx, ins in enumerate(self.instructions):
-            if not any(ins.opname.startswith(op) or ins.opname == op
-                       for op in _TERNARY_CJUMPS):
+            if not self._is_compound_cjump(ins.opname):
                 continue
             jump_target = self._get_jump_target(ins)
             t_idx = offset_to_idx.get(jump_target)
@@ -2616,8 +2615,10 @@ class DecompilerGeneric(DecompilerBase):
             self._append_reconstructed(f"{lhs} = {expr}")
             self.pc = look  # advance past the consumed instructions
         elif len(store_targets) == n and n == 1 and self.stack:
-            # Single target: let the following STORE_* handle it normally
-            pass
+            # Single target: emit singleton-unpacking form with trailing comma
+            expr = str(self.stack.pop())
+            self._append_reconstructed(f"{store_targets[0]}, = {expr}")
+            self.pc = look  # advance past the consumed instruction
         # else: leave items on stack for individual STORE_* to handle (original behavior)
 
         # ── subscript / attr ───────────────────────────────────────────
@@ -4504,7 +4505,11 @@ class Decompiler39(DecompilerGeneric):
                 r_str = str(right)
                 if ' if ' in r_str and ' else ' in r_str:
                     r_str = f'({r_str})'
-                self.stack.append(f"({left} {_bin39[opname]} {r_str})")
+                # Wrap the left operand in parens when it contains a ternary
+                l_str = str(left)
+                if ' if ' in l_str and ' else ' in l_str:
+                    l_str = f'({l_str})'
+                self.stack.append(f"({l_str} {_bin39[opname]} {r_str})")
 
         elif opname in _inplace39:
             if len(self.stack) >= 2:
@@ -4530,7 +4535,14 @@ class Decompiler39(DecompilerGeneric):
                         self.pc = next_pc + 1  # consume the STORE
                         return
                 # Fallback: push as expression for STORE to handle
-                self.stack.append(f"({left} {op} {right})")
+                # Wrap operands in parens when they contain a ternary
+                r_str = str(right)
+                if ' if ' in r_str and ' else ' in r_str:
+                    r_str = f'({r_str})'
+                l_str = str(left)
+                if ' if ' in l_str and ' else ' in l_str:
+                    l_str = f'({l_str})'
+                self.stack.append(f"({l_str} {op} {r_str})")
 
         elif opname == "COMPARE_OP":
             if len(self.stack) >= 2:
