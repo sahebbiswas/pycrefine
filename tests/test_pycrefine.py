@@ -43,6 +43,7 @@ import io
 import marshal
 import os
 import py_compile
+import re
 import struct
 import sys
 import tempfile
@@ -4591,7 +4592,9 @@ class TestVerifyScenesBugs(unittest.TestCase):
             I(0, "RETURN_VALUE",     0, None,      34,  None, False),
         ]
         out = _run39_full_impl(instructions)
-        self.assertIn("print(in_a if 'value:' not in in_a else in_a[6:])", out)
+        # Verify the call using a regex to tolerate quote and whitespace variations
+        expected_pattern = r'print\(\s*in_a\s+if\s+[\'"]value:[\'"]\s+not\s+in\s+in_a\s+else\s+in_a\[6:\]\s*\)'
+        self.assertRegex(out, expected_pattern)
 
     def test_api_21_ternary_in_modulo(self):
         # api_21: ternary condition inside format string modulo

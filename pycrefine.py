@@ -3284,6 +3284,39 @@ class DecompilerGeneric(DecompilerBase):
         opname = instr.opname
         num_args = int(instr.arg) if instr.arg is not None else 0
 
+        # CALL_FUNCTION_EX: *args [and **kwargs]
+        if opname == "CALL_FUNCTION_EX":
+            flags = num_args
+            kwargs = ""
+            if flags & 1:
+                kwargs_dict = self.stack.pop() if self.stack else "{}"
+                # Handle tuple placeholders ("func", "...") or ("class", "...")
+                if isinstance(kwargs_dict, tuple) and len(kwargs_dict) >= 2 and kwargs_dict[0] in ("func", "class"):
+                    kwargs = f"**{kwargs_dict[1]}"
+                else:
+                    kwargs = f"**{kwargs_dict}"
+            
+            args_tuple = self.stack.pop() if self.stack else "()"
+            if isinstance(args_tuple, tuple) and len(args_tuple) >= 2 and args_tuple[0] in ("func", "class"):
+                args = f"*{args_tuple[1]}"
+            else:
+                args = f"*{args_tuple}"
+            
+            func_val = self.stack.pop() if self.stack else "unknown_func"
+            if str(func_val) == "None" and self.stack:
+                func_val = self.stack.pop()
+            
+            if " + NULL" in str(func_val) or "|NULL" in str(func_val):
+                func_val = str(func_val).split(" + ")[0].split("|")[0]
+            
+            # Reconstruct call
+            call_args = [args]
+            if kwargs:
+                call_args.append(kwargs)
+            
+            self.stack.append(f"{func_val}({', '.join(call_args)})")
+            return
+
         # keyword argument handling
         # CALL_KW: TOS is a tuple of kw-names; then num_args values (kw last)
         # CALL_FUNCTION_KW: same as CALL_KW but for Python 3.9/3.10
@@ -5218,12 +5251,15 @@ class Decompiler311Plus(DecompilerGeneric):
                     # Fallback: push result for STORE to handle
                     self.stack.append(f"({left} {inplace_op} {right})")
                 elif bin_op:
+                    l_str = str(left)
                     r_str = str(right)
-                    # Wrap ternary right-hand sides to prevent precedence bugs:
+                    # Wrap ternary operands to prevent precedence bugs:
                     # e.g. 'post %s in input' % ('x' if cond else 'y')
+                    if ' if ' in l_str and ' else ' in l_str:
+                        l_str = f"({l_str})"
                     if ' if ' in r_str and ' else ' in r_str:
-                        r_str = f'({r_str})'
-                    self.stack.append(f"({left} {bin_op} {r_str})")
+                        r_str = f"({r_str})"
+                    self.stack.append(f"({l_str} {bin_op} {r_str})")
                 else:
                     # Unknown BINARY_OP index — use ? as a safe placeholder
                     self.stack.append(f"({left} ? {right})")
