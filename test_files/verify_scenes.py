@@ -131,3 +131,31 @@ def api_12(to_input):
             pass
 
     return value if value else None
+
+
+def api_20(in_a):
+    print( in_a if 'value:' not in in_a else in_a[6:])
+
+
+def api_21(in_a):
+    if type(in_a) == str:
+        tstr = "post: %s" % (
+            in_a if 'value:' not in in_a else in_a[6:])
+    else:
+        tstr = "post: {}".format(in_a)
+
+    return tstr, "this value"
+
+
+def api_22( in_a ):
+    print("post %s in input" %
+          ('not found' if in_a is None else 'reset'))
+    return in_a is not None
+
+
+def api_23( ):
+    in_a, in_b = api_21(None)
+
+    print("post %s in input" %
+          ('not found' if in_b is None else 'reset'))
+    return in_a is not None 

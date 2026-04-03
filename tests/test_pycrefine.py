@@ -43,6 +43,7 @@ import io
 import marshal
 import os
 import py_compile
+import re
 import struct
 import sys
 import tempfile
@@ -4545,12 +4546,17 @@ class TestVerifyScenesBugs(unittest.TestCase):
             "            value += int(to_input[1:])\n"
             "        except Exception:\n"
             "            pass\n"
+            "        try:\n"
+            "            value += int(to_input[2:])\n"
+            "        except Exception:\n"
+            "            pass\n"
+            "    return value\n"
         )
         out = decompile(src)
-        self.assertIn("try:", out)
-        self.assertEqual(out.count("try:"), 2)
-        self.assertEqual(out.count("except Exception:"), 2)
-        self.assertIn("pass", out)
+        self.assertEqual(out.count("try:"), 3)
+        self.assertEqual(out.count("except Exception:"), 3)
+        # Check indentation of the final return statement (should be 4 spaces / 1 indent)
+        self.assertRegex(out, r"\n    return value\s*$", f"Final return not correctly unindented:\n{out}")
 
     def test_build_slice_support(self):
         src = (
@@ -4559,6 +4565,129 @@ class TestVerifyScenesBugs(unittest.TestCase):
         )
         out = decompile(src)
         self.assertIn("lst[1:-1]", out)
+
+    def test_api_20_ternary_with_slice(self):
+        # api_20: ternary condition used as function argument, producing slice.
+        # Python 3.14 compiler duplicates `print` into separate if/else blocks,
+        # so we run the explicit Python 3.9 bytecode layout using a synthetic test
+        # to ensure the 'stacksink' ternary logic (join-point at CALL_FUNCTION) works.
+        """
+        Test ternary expression used as a function argument where one branch builds a slice, using a synthetic Python 3.9-style instruction sequence.
+        
+        Asserts the decompiler reconstructs the ternary inside a call-site (join-point) so the output contains:
+            print(in_a if 'value:' not in in_a else in_a[6:])
+        """
+        from pycrefine import BytecodeInstruction as I
+        instructions = [
+            I(0, "LOAD_GLOBAL",      0, "print",    0,  None, False),
+            I(0, "LOAD_CONST",       1, 'value:',   2,  None, False),
+            I(0, "LOAD_FAST",        0, "in_a",     4,  None, False),
+            I(0, "COMPARE_OP",       7, "not in",   6,  None, False),
+            I(0, "POP_JUMP_IF_FALSE",0, 18,         8,  None, False),
+            I(0, "LOAD_FAST",        0, "in_a",    10,  None, False),
+            I(0, "JUMP_FORWARD",     0, 28,        12,  None, False),
+            I(0, "LOAD_FAST",        0, "in_a",    18,  None, True),
+            I(0, "LOAD_CONST",       2, 6,         20,  None, False),
+            I(0, "LOAD_CONST",       3, None,      22,  None, False),
+            I(0, "BUILD_SLICE",      2, 2,         24,  None, False),
+            I(0, "BINARY_SUBSCR",    0, None,      26,  None, False),
+            I(0, "CALL_FUNCTION",    1, 1,         28,  None, True),
+            I(0, "POP_TOP",          0, None,      30,  None, False),
+            I(0, "LOAD_CONST",       0, None,      32,  None, False),
+            I(0, "RETURN_VALUE",     0, None,      34,  None, False),
+        ]
+        out = _run39_full_impl(instructions)
+        # Verify the call using a regex to tolerate quote and whitespace variations
+        expected_pattern = r'print\(\s*in_a\s+if\s+[\'"]value:[\'"]\s+not\s+in\s+in_a\s+else\s+in_a\[6:\]\s*\)'
+        self.assertRegex(out, expected_pattern)
+
+    def test_api_21_ternary_in_modulo(self):
+        # api_21: ternary condition inside format string modulo
+        src = (
+            "def f(in_a):\n"
+            "    if type(in_a) == str:\n"
+            "        tstr = 'post: %s' % (in_a if 'value:' not in in_a else in_a[6:])\n"
+            "    else:\n"
+            "        tstr = 'post: {}'.format(in_a)\n"
+            "    return tstr, 'this value'\n"
+        )
+        out = decompile(src)
+        self.assertIn("if 'value:' not in in_a else in_a[6:]", out)
+        self.assertIn("'post: %s'", out)
+
+    def test_api_22_ternary_modulo_is_none(self):
+        # api_22: ternary testing `is None` inside percent formatting
+        src = (
+            "def f(in_a):\n"
+            "    print('post %s in input' % ('not found' if in_a is None else 'reset'))\n"
+            "    return in_a is not None\n"
+        )
+        out = decompile(src)
+        self.assertIn("'not found' if in_a is None else 'reset'", out)
+        self.assertIn("return in_a is not None", out)
+
+    def test_api_23_tuple_unpack_and_ternary(self):
+        # api_23: tuple unpacking and ternary test
+        src = (
+            "def f():\n"
+            "    in_a, in_b = api_21(None)\n"
+            "    print('post %s in input' % ('not found' if in_b is None else 'reset'))\n"
+            "    return in_a is not None\n"
+        )
+        out = decompile(src)
+        self.assertIn("in_a, in_b = api_21(None)", out)
+        self.assertIn("'not found' if in_b is None else 'reset'", out)
+
+
+# ---------------------------------------------------------------------------
+# Findings refinement (FIX- findings)
+# ---------------------------------------------------------------------------
+
+class TestFindingsRefinement(unittest.TestCase):
+    def test_blank_separator_nested_logic(self):
+        """Verify that blank lines are only added before major blocks at top-level."""
+        src = "def outer(x):\n    if x > 0:\n        print(x)\ndef another():\n    pass\n"
+        out = decompile(src)
+        # Should NOT have a blank line between 'def outer' block header and its first statement 'if'.
+        # We look for the ':' followed by a single newline then indentation and 'if'.
+        # \s* matches potential trailing spaces on the header line.
+        self.assertNotRegex(out, r":\s*\n\s*\n\s*if x > 0", f"Unexpected blank line between def and nested if:\n{out}")
+        
+        # SHOULD have a blank line before 'def another' (top-level block).
+        self.assertRegex(out, r"\n\s*\ndef another", f"Missing blank line before top-level def:\n{out}")
+
+    def test_call_function_ex_normalization_starred(self):
+        """Verify CALL_FUNCTION_EX correctly normalizes starred arguments and lambdas."""
+        src = "a = [1, 2]\n(lambda x, y: x+y)(*a)\n"
+        out = decompile(src)
+        # We expect a call to a lambda with *a.
+        # Use regex to be flexible about spaces and parentheses.
+        self.assertRegex(out, r"lambda.*?\)\s*\(\*a\)", f"Call reconstruction failed to render lambda call:\n{out}")
+        # Ensure decompiler-internal tuple tags don't leak
+        self.assertNotIn("('func'", out)
+
+    def test_keyword_call_reconstruction(self):
+        """Verify keyword calls (including 3.11+ KW_NAMES) are correctly reconstructed."""
+        src = "def f(a=0, b=0): return a + b\nf(a=1, b=2)\n"
+        out = decompile(src)
+        # Normalize spaces to check for keyword assignments
+        compact = out.replace(" ", "")
+        self.assertIn("a=1", compact, f"Keyword a=1 missing or mangled:\n{out}")
+        self.assertIn("b=2", compact, f"Keyword b=2 missing or mangled:\n{out}")
+
+    def test_unpack_sequence_failure_resilience(self):
+        """Baseline resilience for UNPACK_SEQUENCE."""
+        src = "a, b = [1, 2]\n"
+        out = decompile(src)
+        self.assertIn("a, b =", out)
+
+    def test_unpack_sequence_unbalanced(self):
+        """Verify that UNPACK_SEQUENCE doesn't crash on atypical structures."""
+        # This is hard to trigger from source because the compiler is good,
+        # but we can test a compound assignment which uses UNPACK_SEQUENCE.
+        src = "(a, b), c = [[1, 2], 3]\n"
+        out = decompile(src)
+        self.assertIn("(a, b), c =", out)
 
 
 if __name__ == "__main__":
