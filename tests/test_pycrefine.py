@@ -4633,5 +4633,49 @@ class TestVerifyScenesBugs(unittest.TestCase):
         self.assertIn("in_a, in_b = api_21(None)", out)
         self.assertIn("'not found' if in_b is None else 'reset'", out)
 
+
+# ---------------------------------------------------------------------------
+# Findings refinement (FIX- findings)
+# ---------------------------------------------------------------------------
+
+class TestFindingsRefinement(unittest.TestCase):
+    def test_blank_separator_nested_logic(self):
+        """Verify that blank lines are only added before major blocks at top-level."""
+        src = "def outer(x):\n    if x > 0:\n        print(x)\ndef another():\n    pass\n"
+        out = decompile(src)
+        # Should NOT have a blank line between 'def outer' block header and its first statement 'if'.
+        # We look for the ':' followed by a single newline then indentation and 'if'.
+        # \s* matches potential trailing spaces on the header line.
+        self.assertNotRegex(out, r":\s*\n\s*\n\s*if x > 0", f"Unexpected blank line between def and nested if:\n{out}")
+        
+        # SHOULD have a blank line before 'def another' (top-level block).
+        self.assertRegex(out, r"\n\s*\ndef another", f"Missing blank line before top-level def:\n{out}")
+
+    def test_call_function_ex_normalization_starred(self):
+        """Verify CALL_FUNCTION_EX correctly normalizes starred arguments and lambdas."""
+        src = "a = [1, 2]\n(lambda x, y: x+y)(*a)\n"
+        out = decompile(src)
+        # We expect a call to a lambda with *a.
+        # Use regex to be flexible about spaces and parentheses.
+        self.assertRegex(out, r"lambda.*?\)\s*\(\*a\)", f"Call reconstruction failed to render lambda call:\n{out}")
+        # Ensure decompiler-internal tuple tags don't leak
+        self.assertNotIn("('func'", out)
+
+    def test_keyword_call_reconstruction(self):
+        """Verify keyword calls (including 3.11+ KW_NAMES) are correctly reconstructed."""
+        src = "def f(a=0, b=0): return a + b\nf(a=1, b=2)\n"
+        out = decompile(src)
+        # Normalize spaces to check for keyword assignments
+        compact = out.replace(" ", "")
+        self.assertIn("a=1", compact, f"Keyword a=1 missing or mangled:\n{out}")
+        self.assertIn("b=2", compact, f"Keyword b=2 missing or mangled:\n{out}")
+
+    def test_unpack_sequence_failure_resilience(self):
+        """Baseline resilience for UNPACK_SEQUENCE."""
+        src = "a, b = [1, 2]\n"
+        out = decompile(src)
+        self.assertIn("a, b =", out)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
