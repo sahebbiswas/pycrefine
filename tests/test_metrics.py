@@ -5,6 +5,17 @@ import importlib
 import tempfile
 import textwrap
 
+def _import_check_coherency():
+    cc_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "debug")
+    if cc_dir not in sys.path:
+        sys.path.insert(0, cc_dir)
+    try:
+        return importlib.import_module("check_coherency")
+    except ModuleNotFoundError as exc:
+        if exc.name == "check_coherency":
+            return None
+        raise
+
 class TestTokenHamming(unittest.TestCase):
     """
     Unit tests for the Token Hamming distance dimension added to
@@ -18,14 +29,7 @@ class TestTokenHamming(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """Import check_coherency as a module via sys.path."""
-        cc_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "debug")
-        if cc_dir not in sys.path:
-            sys.path.insert(0, cc_dir)
-        try:
-            cls.cc = importlib.import_module("check_coherency")
-        except ImportError:
-            # Fallback if debug/check_coherency.py is missing or renamed
-            cls.cc = None
+        cls.cc = _import_check_coherency()
 
     def setUp(self):
         if self.cc is None:
@@ -64,7 +68,7 @@ class TestTokenHamming(unittest.TestCase):
         self.assertEqual(matched, total)
 
     def test_empty_orig_gives_one(self):
-        score, matched, total, flips, _ = self.cc._hamming_score_line_aligned(
+        score, _matched, total, _flips, _ = self.cc._hamming_score_line_aligned(
             [], ["x = 1"]
         )
         self.assertEqual(score, 1.0)
@@ -88,14 +92,14 @@ class TestTokenHamming(unittest.TestCase):
     def test_extra_parens_are_zero_cost(self):
         orig = ["y = x + 1"]
         dec  = ["y = (x + 1)"]
-        score, _, total, flips, _ = self.cc._hamming_score_line_aligned(orig, dec)
+        score, _, _total, flips, _ = self.cc._hamming_score_line_aligned(orig, dec)
         self.assertEqual(flips, 0)
         self.assertEqual(score, 1.0)
 
     def test_pass_insertion_is_zero_cost(self):
         orig = ["class Foo:"]
         dec  = ["class Foo:", "pass"]
-        score, _, total, flips, _ = self.cc._hamming_score_line_aligned(orig, dec)
+        score, _, _total, flips, _ = self.cc._hamming_score_line_aligned(orig, dec)
         self.assertEqual(flips, 0)
         self.assertEqual(score, 1.0)
 
@@ -243,13 +247,7 @@ class TestOutputCleanliness(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        import sys, importlib, os
-        cc_dir = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "..", "debug"
-        )
-        if cc_dir not in sys.path:
-            sys.path.insert(0, cc_dir)
-        cls.cc = importlib.import_module("check_coherency")
+        cls.cc = _import_check_coherency()
 
     def setUp(self):
         if self.cc is None:

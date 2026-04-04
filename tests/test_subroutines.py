@@ -299,7 +299,7 @@ class TestDecorators(unittest.TestCase):
 
     def test_decorator_body_preserved(self):
         out = decompile("@deco\ndef f(x):\n    return x + 1\n")
-        self.assertIn("return x", out)
+        self.assertRegex(out, r"return\s+\(?x\s*\+\s*1\)?")
 
     def test_no_spurious_decorator_on_genexpr(self):
         out = decompile("result = sum(x**2 for x in range(10))\n")
