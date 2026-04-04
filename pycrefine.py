@@ -476,8 +476,8 @@ class DecompilerGeneric(DecompilerBase):
             _exc_as_store_offset (int): Bytecode offset of a STORE_* that implements `except ... as name`
                 and should be skipped during normal emission (-1 when none).
             _exc_cleanup_name (Optional[str]): Exception cleanup temporary name to suppress from output.
-            _except_header_indent (Optional[int]): Indentation level to use when emitting except headers (None when none).
-            _except_end_offset (int): End offset for an exception region used to suppress intervening jumps.
+            _except_header_indents (List[int]): Stack of indentation levels for except headers.
+            _except_end_offsets (List[int]): Stack of end-offsets for exception regions used to suppress intervening jumps.
             _exc_bound_names (set): Names that have been bound via `except ... as name`.
             _try_nop_offsets (set): Offsets of NOP markers that indicate try-entry points (filled by prescan).
             _suppress_push_exc_offsets (set): Offsets of PUSH_EXC_INFO instructions to suppress (filled by prescan).
@@ -4800,8 +4800,8 @@ class Decompiler39(DecompilerGeneric):
                 super()._handle_instruction(instr)
             else:
                 # Check for break: forward jump whose target matches the enclosing
-                # while-loop end.  This must be tested BEFORE the _except_header_indent
-                # suppression, because break inside try: still sets _except_header_indent
+                # while-loop end.  This must be tested BEFORE the _except_header_indents
+                # suppression, because break inside try: still sets _except_header_indents
                 # via POP_BLOCK, but the jump is semantically a break not an else:
                 _is_break = False
                 for _b_off, _b_type in reversed(self.blocks):
@@ -4963,8 +4963,8 @@ class Decompiler39(DecompilerGeneric):
             if self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup") and self.blocks[-1][0] == instr.offset:
                 self.blocks.pop()
                 self.indent_level -= 1
-            if self._except_header_indent is not None:
-                self.indent_level = self._except_header_indent
+            if self._except_header_indents:
+                self.indent_level = self._except_header_indents[-1]
             self._append_reconstructed(f"except {exc_type}:")
             self.indent_level += 1
             self.stack.append("_exc_match")
@@ -5018,7 +5018,7 @@ class Decompiler39(DecompilerGeneric):
                 if next_is_setup:
                     # Outer wrapper only — inner SETUP_FINALLY will emit try:
                     # Save current indent level so POP_BLOCK can correctly emit
-                    # finally: at the right level even if _except_header_indent
+                    # finally: at the right level even if _except_header_indents
                     # has been cleared by then.
                     if not hasattr(self, "_finally_wrapper_indent"):
                         self._finally_wrapper_indent = {}
