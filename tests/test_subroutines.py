@@ -1,6 +1,6 @@
 import unittest
 import os
-from tests.test_helpers import decompile, assert_contains
+from .test_helpers import decompile, assert_contains
 
 class TestFunctions(unittest.TestCase):
     def test_simple_function(self):

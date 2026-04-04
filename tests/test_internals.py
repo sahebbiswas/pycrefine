@@ -13,7 +13,7 @@ from pycrefine import (
     DecompilerGeneric,
     Decompiler311Plus,
 )
-from tests.test_helpers import _compile, decompile, _run39_full_impl
+from .test_helpers import _compile, decompile, _run39_full_impl
 
 
 

@@ -1,6 +1,6 @@
 import unittest
 import os
-from tests.test_helpers import decompile, assert_contains
+from .test_helpers import decompile, assert_contains
 
 class TestControlFlow(unittest.TestCase):
     def test_if_simple(self):

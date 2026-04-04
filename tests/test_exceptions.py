@@ -1,6 +1,6 @@
 import unittest
 import sys
-from tests.test_helpers import decompile, assert_contains
+from .test_helpers import decompile, assert_contains
 
 class TestExceptions(unittest.TestCase):
     def test_try_except_typed(self):

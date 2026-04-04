@@ -2,7 +2,7 @@ import unittest
 import os
 import sys
 import tempfile
-from tests.test_helpers import decompile, assert_contains, _run39_full_impl
+from .test_helpers import decompile, assert_contains, _run39_full_impl
 
 class TestEdgeCases(unittest.TestCase):
     def test_empty_module(self):
