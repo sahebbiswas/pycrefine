@@ -4546,12 +4546,17 @@ class TestVerifyScenesBugs(unittest.TestCase):
             "            value += int(to_input[1:])\n"
             "        except Exception:\n"
             "            pass\n"
+            "        try:\n"
+            "            value += int(to_input[2:])\n"
+            "        except Exception:\n"
+            "            pass\n"
+            "    return value\n"
         )
         out = decompile(src)
-        self.assertIn("try:", out)
-        self.assertEqual(out.count("try:"), 2)
-        self.assertEqual(out.count("except Exception:"), 2)
-        self.assertIn("pass", out)
+        self.assertEqual(out.count("try:"), 3)
+        self.assertEqual(out.count("except Exception:"), 3)
+        # Check indentation of the final return statement (should be 4 spaces / 1 indent)
+        self.assertRegex(out, r"\n    return value\s*$", f"Final return not correctly unindented:\n{out}")
 
     def test_build_slice_support(self):
         src = (
@@ -4675,6 +4680,14 @@ class TestFindingsRefinement(unittest.TestCase):
         src = "a, b = [1, 2]\n"
         out = decompile(src)
         self.assertIn("a, b =", out)
+
+    def test_unpack_sequence_unbalanced(self):
+        """Verify that UNPACK_SEQUENCE doesn't crash on atypical structures."""
+        # This is hard to trigger from source because the compiler is good,
+        # but we can test a compound assignment which uses UNPACK_SEQUENCE.
+        src = "(a, b), c = [[1, 2], 3]\n"
+        out = decompile(src)
+        self.assertIn("(a, b), c =", out)
 
 
 if __name__ == "__main__":

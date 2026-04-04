@@ -2623,58 +2623,57 @@ class DecompilerGeneric(DecompilerBase):
             self.stack.append(instr.argval)
 
     def _op_unpack_sequence(self, instr: BytecodeInstruction):
-        # UNPACK_SEQUENCE N followed by N STORE_FAST/STORE_NAME
-        # instructions emits a tuple-unpacking assignment: a, b = expr.
-        # Peek ahead from the current position (self.pc) to collect the N store targets.
-        """
-        Attempt to collapse an UNPACK_SEQUENCE followed by consecutive STORE_* instructions into a single tuple-unpacking assignment.
-        
-        Inspects the UNPACK_SEQUENCE argument count and peeks forward from the current program counter to collect the next N store targets (STORE_FAST/STORE_NAME/STORE_GLOBAL/STORE_DEREF), skipping harmless markers (RESUME, NOP, CACHE, NOT_TAKEN). If exactly N targets are found and an expression is available on the decompiler stack, emits:
-        - "a, b = expr" when N >= 2, or
-        - "a, = expr" when N == 1
-        and advances self.pc past the consumed store instructions. If the lookahead fails to find N valid store targets or the stack lacks an expression, no emission occurs and normal per-store handling is left to proceed.
-        """
+        # UNPACK_SEQUENCE N followed by N targets (STORE_* or UNPACK_SEQUENCE)
+        # instructions emits a tuple-unpacking assignment: (a, b), c = expr.
         n = int(instr.arg) if instr.arg is not None else 0
         if n < 1:
             return
 
-        look = self.pc
-        store_targets = []
-        while look < len(self.instructions) and len(store_targets) < n:
-            op_look = self.instructions[look].opname
-            # If the value is stored to a variable, we can combine it into `v1, v2 = ...`
-            if op_look in ("STORE_FAST", "STORE_NAME", "STORE_GLOBAL", "STORE_DEREF"):
-                store_targets.append(str(self.instructions[look].argval))
-                look += 1
-            # Skip harmless internal/no-op markers (RESUME, NOP, CACHE, NOT_TAKEN)
-            elif op_look in ("RESUME", "NOP", "CACHE", "NOT_TAKEN"):
-                look += 1
-            else:
-                # Encountered something that isn't a store (e.g. a LOAD or a jump)
-                # before finishing the unpack sequence.  Bail out — the decompiler
-                # will fall back to using individual STORE_* calls from the stack.
-                break
+        def _peek_targets(start_pc, count):
+            targets = []
+            cur = start_pc
+            while cur < len(self.instructions) and len(targets) < count:
+                op = self.instructions[cur].opname
+                if op in ("STORE_FAST", "STORE_NAME", "STORE_GLOBAL", "STORE_DEREF"):
+                    targets.append(str(self.instructions[cur].argval))
+                    cur += 1
+                elif op == "UNPACK_SEQUENCE":
+                    nested_n = int(self.instructions[cur].arg)
+                    nested_targets, new_cur = _peek_targets(cur + 1, nested_n)
+                    if nested_targets is not None:
+                        # Wrap nested LHS in parens
+                        targets.append(f"({', '.join(nested_targets)})")
+                        cur = new_cur
+                    else:
+                        return None, cur
+                elif op in ("RESUME", "NOP", "CACHE", "NOT_TAKEN"):
+                    cur += 1
+                else:
+                    return None, cur
+            if len(targets) == count:
+                return targets, cur
+            return None, cur
 
-        if len(store_targets) == n and n >= 2 and self.stack:
+        targets, next_pc = _peek_targets(self.pc, n)
+        
+        if targets is not None and self.stack:
             expr = str(self.stack.pop())
-            lhs = ", ".join(store_targets)
+            lhs = ", ".join(targets)
+            if n == 1:
+                lhs += ","
             self._append_reconstructed(f"{lhs} = {expr}")
-            self.pc = look  # advance past the consumed instructions
-        elif len(store_targets) == n and n == 1 and self.stack:
-            # Single target: emit singleton-unpacking form with trailing comma
-            expr = str(self.stack.pop())
-            self._append_reconstructed(f"{store_targets[0]}, = {expr}")
-            self.pc = look  # advance past the consumed instruction
-        else:
-            # Lookahead failed: decompiler will process STORE_* instructions
-            # individually. We must pop the original iterable and push N
-            # unpacked placeholders so the subsequent STORE_ handlers pop
-            # the correct number of values.
-            if self.stack:
-                expr = self.stack.pop()
-                for i in range(n):
-                    # Push N unpacked entries (reversed order since STORE_* pops them)
-                    self.stack.append(f"{expr}[{n - 1 - i}]")
+            self.pc = next_pc
+        elif self.stack:
+            # Fallback for complex un-matched structures:
+            # discrete indexed extraction from the stack value
+            val = self.stack.pop()
+            val_str = str(val)
+            # Push discrete accessors onto the stack for subsequent STORE_*
+            # to consume.  Since STOREs are processed sequentially, we push
+            # item[n-1], then item[n-2], ..., item[0] so that the stack
+            # serves them up in 0..n-1 order.
+            for i in reversed(range(n)):
+                self.stack.append(f"{val_str}[{i}]")
 
         # ── subscript / attr ───────────────────────────────────────────
 
