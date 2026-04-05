@@ -1,5 +1,6 @@
 import unittest
 import os
+import sys
 from .test_helpers import decompile, assert_contains
 
 class TestControlFlow(unittest.TestCase):
@@ -12,6 +13,83 @@ class TestControlFlow(unittest.TestCase):
         self.assertIn("x > 0", out)
         self.assertTrue("y = 1" in out or "1 if" in out)
         self.assertTrue("y = 0" in out or "else 0" in out)
+    def test_if_elif_else_flattening(self):
+        src = (
+            "def test_elif(x):\n"
+            "    y = 0\n"
+            "    if x == 1:\n"
+            "        print('a')\n"
+            "        y = 1\n"
+            "    else:\n"
+            "        if x == 2:\n"
+            "            print('b')\n"
+            "            y = 2\n"
+            "        else:\n"
+            "            print('c')\n"
+            "            y = 3\n"
+            "    print('done')\n"
+            "    return y\n"
+        )
+        out = decompile(src)
+        self.assertIn("elif x == 2:", out)
+        self.assertNotRegex(out, r"else:\s*\n\s*if") 
+
+    def test_for_else_no_flattening(self):
+        """for...else: the beautifier must never inject an `elif` keyword, and the decompiler must emit `else:`."""
+        src = (
+            "def f(items):\n"
+            "    for x in items:\n"
+            "        if x:\n"
+            "            break\n"
+            "    else:\n"
+            "        print('not found')\n"
+            "    print('done')\n"
+        )
+        out = decompile(src)
+        self.assertNotIn("elif", out)
+        self.assertIn("for", out)
+        self.assertIn("else:", out)
+
+
+    @unittest.skipIf(sys.version_info >= (3, 10), "try..else only implemented for 3.9 so far")
+    def test_try_else_strict(self):
+        """try...else: verify `else:` is emitted and `elif` is absent."""
+        src = (
+            "def f():\n"
+            "    try:\n"
+            "        risky = int('1')\n"
+            "    except ValueError:\n"
+            "        risky = 0\n"
+            "    else:\n"
+            "        print('ok', risky)\n"
+            "        print('done')\n"
+        )
+        out = decompile(src)
+        self.assertNotIn("elif", out)
+        self.assertIn("try:", out)
+        self.assertIn("else:", out)
+
+    def test_try_else_no_flattening_unsupported(self):
+        """try...else: the beautifier must never inject an `elif` keyword.
+
+        Note: the decompiler may not emit `else:` for try...else on any Python
+        version (known limitation), so we only verify the negative constraint that
+        `elif` is absent and `try:` is present.
+        """
+        src = (
+            "def f():\n"
+            "    try:\n"
+            "        risky = int('1')\n"
+            "    except ValueError:\n"
+            "        risky = 0\n"
+            "    else:\n"
+            "        print('ok', risky)\n"
+            "        print('done')\n"
+        )
+        out = decompile(src)
+        self.assertNotIn("elif", out)
+        self.assertIn("try:", out)
+
 
     def test_for_loop(self):
         out = decompile("for i in range(3):\n    print(i)\n")

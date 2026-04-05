@@ -8,6 +8,7 @@ import marshal
 import re
 import struct
 import sys
+import tokenize
 import traceback
 import types
 from typing import List, Optional, Any, Dict, Union, Tuple
@@ -87,7 +88,239 @@ _INPLACE_ASSIGN_MAP = {
 }
 
 
-def post_process_source(source: str) -> str:
+def _line_is_in_triple_quoted_string(lines: List[str], line_idx: int) -> bool:
+    """
+    Return True when *line_idx* (0-based) falls inside an open triple-quoted
+    string literal in the source formed by ``lines[:line_idx]``.
+
+    We use ``tokenize.generate_tokens`` so that triple-quote character sequences
+    that happen to appear inside ordinary single-line strings or inside comments
+    are correctly ignored — the naive substring-scan approach would miscount
+    those and flip the open/closed state erroneously.
+
+    The algorithm:
+    1. Join ``lines[:line_idx]`` into a fake source block and run the tokenizer.
+    2. For every STRING token, check whether its ``string_prefix`` is a
+       triple-quote opener (``\"\"\"`` / ``'''``).
+    3. A triple-quoted STRING whose *end row* equals ``line_idx + 1`` (i.e. the
+       token closes on the very line we are testing) still means that line is
+       *inside* the literal.  A token that started before ``line_idx + 1`` but
+       whose end row is *after* ``line_idx + 1`` means the string overruns the
+       current line, so the current line is definitely inside it.
+    4. If the tokenizer raises (e.g. because the source up to ``lines[:line_idx]``
+       ends in the middle of an unterminated triple-quoted string) we catch the
+       ``tokenize.TokenError`` and return True — an unterminated string means we
+       are currently inside one.
+    """
+    if line_idx == 0:
+        return False
+
+    source_fragment = "\n".join(lines[:line_idx]) + "\n"
+    reader = io.StringIO(source_fragment).readline
+    _TRIPLE_PREFIXES = ('"""', "'''", 'r"""', "r'''", 'b"""', "b'''",
+                        'rb"""', "rb'''", 'br"""', "br'''",
+                        'f"""', "f'''", 'rf"""', "rf'''", 'fr"""', "fr'''",
+                        'u"""', "u'''",
+                        'R"""', "R'''", 'B"""', "B'''",
+                        'RB"""', "RB'''", 'BR"""', "BR'''",
+                        'F"""', "F'''", 'RF"""', "RF'''", 'FR"""', "FR'''")
+    try:
+        for tok_type, tok_str, tok_start, tok_end, _ in tokenize.generate_tokens(reader):
+            if tok_type == tokenize.STRING:
+                # tok_str is the full token text, e.g. '"""hello\nworld"""'
+                is_triple = any(tok_str.startswith(p) for p in _TRIPLE_PREFIXES)
+                if is_triple:
+                    # tok_start/tok_end are (row, col), 1-based rows
+                    start_row, _ = tok_start
+                    end_row, _ = tok_end
+                    # The token spans lines [start_row .. end_row] (1-based).
+                    # line_idx is 0-based, so the line we are checking is
+                    # row (line_idx + 1) in 1-based terms.  If that row falls
+                    # within [start_row, end_row] the line is inside the literal.
+                    target_row = line_idx + 1
+                    if start_row <= target_row <= end_row:
+                        return True
+    except tokenize.TokenError:
+        # An unclosed triple-quoted string causes TokenError; treat as in-triple.
+        return True
+    return False
+
+
+def _block_opener_keyword(lines: List[str], tail_idx: int, base_indent_len: int) -> Optional[str]:
+    """Return the leading keyword of the block header whose *closing* line is at
+    ``tail_idx`` (indent == ``base_indent_len``, content ends with ``:``).
+
+    For a single-line header (``if cond:``) the check is immediate.  For a
+    multi-line header (``if (\n    cond\n):``) the function counts unmatched
+    closing brackets going backward until the running total reaches zero; that
+    line is the opener.  Returns ``None`` when the opener cannot be found.
+    """
+    _KW = ("if ", "elif ", "for ", "while ", "with ", "try:", "except", "finally:")
+    tail_stripped = lines[tail_idx].strip()
+    for kw in _KW:
+        if tail_stripped.startswith(kw):
+            return kw.rstrip(" :")
+    # Multi-line: count unmatched closing brackets walking backward.
+    unmatched = 0
+    for p in range(tail_idx, -1, -1):
+        ps = lines[p].strip()
+        if not ps:
+            continue
+        pi = len(lines[p]) - len(lines[p].lstrip())
+        unmatched += ps.count(')') - ps.count('(')
+        unmatched += ps.count(']') - ps.count('[')
+        unmatched += ps.count('}') - ps.count('{')
+        if pi == base_indent_len and unmatched <= 0:
+            for kw in _KW:
+                if ps.startswith(kw):
+                    return kw.rstrip(" :")
+            return None
+    return None
+
+
+def _collect_multiline_header(lines: List[str], start_idx: int, header_indent_len: int):
+    """Return ``(end_idx, condition)`` for the ``if``/``elif`` header starting
+    at ``start_idx``.
+
+    *condition* is the text after the leading keyword (``if ``/``elif ``) up to
+    and **including** the trailing ``:`` — ready to be emitted as
+    ``f"{indent}elif {condition}"``.
+
+    For a single-line header this is a fast no-scan return.  For a multi-line
+    header (e.g. ``if (\n    very_long_cond\n):``) the continuation lines are
+    joined with a single space, producing a valid single-line ``elif`` that is
+    semantically identical.
+    """
+    first_stripped = lines[start_idx].lstrip()
+    kw_len = 3 if first_stripped.startswith("if ") else 5  # "if " vs "elif "
+    if lines[start_idx].rstrip().endswith(':'):
+        return start_idx, first_stripped[kw_len:].rstrip()
+    parts = [first_stripped[kw_len:].rstrip()]
+    for hj in range(start_idx + 1, len(lines)):
+        hs = lines[hj].strip()
+        if not hs:
+            continue
+        hi = len(lines[hj]) - len(lines[hj].lstrip())
+        parts.append(hs)
+        if hi == header_indent_len and hs.endswith(':'):
+            return hj, " ".join(parts)
+    return start_idx, first_stripped[kw_len:].rstrip()
+
+
+def flatten_elif(source: str) -> str:
+    lines = source.split('\n')
+    changed = False
+
+    out_lines = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.lstrip()
+        if stripped == "else:":
+            base_indent_len = len(line) - len(stripped)
+            base_indent = line[:base_indent_len]
+
+            # Guard 1: skip if inside a triple-quoted string.
+            # Use tokenize to inspect the real token stream for lines[:i] so
+            # that triple-quote sequences that appear inside normal single-line
+            # strings or comments do not flip the state incorrectly.
+            in_triple = _line_is_in_triple_quoted_string(lines, i)
+            if in_triple:
+                out_lines.append(line)
+                i += 1
+                continue
+
+            # Guard 2: verify the controlling header above this `else:` is an
+            # `if` or `elif` at exactly base_indent_len (not `for`, `try`, etc.).
+            # Multi-line headers (e.g. `if (\n    cond\n):`) are handled by
+            # _block_opener_keyword which walks back with bracket-depth counting.
+            parent_ok = False
+            for p in range(i - 1, -1, -1):
+                prev_line = lines[p]
+                prev_stripped = prev_line.strip()
+                if not prev_stripped or prev_stripped.startswith('#'):
+                    continue
+                prev_indent_len = len(prev_line) - len(prev_line.lstrip())
+                if prev_indent_len <= base_indent_len:
+                    if prev_indent_len == base_indent_len:
+                        if prev_stripped.startswith("if ") or prev_stripped.startswith("elif "):
+                            parent_ok = True
+                        elif prev_stripped.endswith(':'):
+                            # Closing line of a multi-line header — find the opener.
+                            kw = _block_opener_keyword(lines, p, base_indent_len)
+                            parent_ok = kw in ("if", "elif")
+                    break
+                # Deeper indent — keep scanning upward.
+            if not parent_ok:
+                out_lines.append(line)
+                i += 1
+                continue
+
+
+            j = i + 1
+            while j < len(lines) and not lines[j].strip():
+                j += 1
+
+            if j < len(lines) and lines[j].lstrip().startswith("if "):
+                if_line = lines[j]
+                if_indent_len = len(if_line) - len(if_line.lstrip())
+                if if_indent_len == base_indent_len + 4:
+                    # Collect the full (possibly multi-line) header so that
+                    # conditions like `if (\n    cond\n):` are not truncated.
+                    header_end, condition = _collect_multiline_header(
+                        lines, j, if_indent_len
+                    )
+                    is_only_if = True
+                    k = header_end + 1
+                    while k < len(lines):
+                        next_line = lines[k]
+                        next_stripped = next_line.strip()
+                        if not next_stripped:
+                            k += 1
+                            continue
+
+                        next_indent_len = len(next_line) - len(next_line.lstrip())
+                        if next_indent_len <= base_indent_len:
+                            break
+
+                        if next_indent_len == if_indent_len:
+                            if not (next_stripped.startswith("elif ") or next_stripped.startswith("else:")):
+                                is_only_if = False
+                                break
+                        elif next_indent_len < if_indent_len:
+                            is_only_if = False
+                            break
+
+                        k += 1
+
+                    if is_only_if:
+                        out_lines.append(f"{base_indent}elif {condition}")
+
+                        for idx in range(i + 1, j):
+                            out_lines.append(lines[idx])
+
+                        for idx in range(header_end + 1, k):
+                            if lines[idx].strip():
+                                if lines[idx].startswith(base_indent + "    "):
+                                    out_lines.append(lines[idx][:base_indent_len] + lines[idx][base_indent_len + 4:])
+                                else:
+                                    out_lines.append(lines[idx])
+                            else:
+                                out_lines.append(lines[idx])
+
+                        i = k
+                        changed = True
+                        continue
+        out_lines.append(line)
+        i += 1
+        
+    res = '\n'.join(out_lines)
+    if changed:
+        return flatten_elif(res)
+    return res
+
+
+def post_process_source(source: str, beautification_level: str = 'core') -> str:
     """Clean up decompiled output to be more Pythonic."""
     lines = source.split('\n')
     out_lines = []
@@ -208,6 +441,14 @@ def post_process_source(source: str) -> str:
         ),
         text,
     )
+
+    if beautification_level in ('core', 'aggressive'):
+        text = flatten_elif(text)
+
+    if beautification_level == 'aggressive':
+        # Stub for aggressive beautification - to be implemented in future
+        pass
+
     return text.strip('\r\n') + '\n'
 
 # ---------------------------------------------------------------------------
@@ -337,7 +578,7 @@ def _is_anonymous_func_body(first_line: str) -> bool:
 # ---------------------------------------------------------------------------
 
 class DecompilerBase:
-    def __init__(self, code_obj: types.CodeType, indent_level: int = 0):
+    def __init__(self, code_obj: types.CodeType, indent_level: int = 0, beautification_level: str = 'core'):
         self.code_obj = code_obj
         self.instructions: List[BytecodeInstruction] = []
         self.reconstructed: List[str] = []
@@ -345,6 +586,7 @@ class DecompilerBase:
         self.starts_as_function = (indent_level > 0)
         self.blocks: List[Tuple[int, str]] = []  # stack of (end_offset, type)
         self.pc = 0
+        self.beautification_level = beautification_level
 
     def _disassemble(self):
         """Convert code object bytecode into a list of BytecodeInstruction."""
@@ -461,7 +703,7 @@ class DecompilerGeneric(DecompilerBase):
     def __init_subclass__(cls, **kw):
         super().__init_subclass__(**kw)
 
-    def __init__(self, code_obj: types.CodeType, indent_level: int = 0):
+    def __init__(self, code_obj: types.CodeType, indent_level: int = 0, beautification_level: str = 'core'):
         """
         Initialize the decompiler state for generic Python bytecode reconstruction.
         
@@ -493,7 +735,7 @@ class DecompilerGeneric(DecompilerBase):
             _pending_finally_merge (Optional[int]): Merge offset currently pending emission, if any.
             _nop_to_push_exc (dict): Mapping from try-entry NOP offsets to the following PUSH_EXC_INFO offset (populated by prescan).
         """
-        super().__init__(code_obj, indent_level)
+        super().__init__(code_obj, indent_level, beautification_level)
         self.stack: List[Union[str, Tuple[Any, ...]]] = []
         self.has_doc = False
         # Tracks offsets of while-loop body starts so we can suppress the
@@ -520,6 +762,7 @@ class DecompilerGeneric(DecompilerBase):
         self._pending_finally_merge: Optional[int] = None
         self._nop_to_push_exc: dict = {}
         self._pending_kw_names: Optional[Tuple[str, ...]] = None
+        self._else_starts: dict = {} # map of else_start_offset -> else_end_offset
         self._build_dispatch()
 
     # ------------------------------------------------------------------
@@ -535,7 +778,6 @@ class DecompilerGeneric(DecompilerBase):
         Returns:
             The reconstructed Python source as a single string, post-processed and ending with a single trailing newline.
         """
-        start_indent = self.indent_level
         self._disassemble()
         self.pc = 0
         self.blocks = []
@@ -617,7 +859,7 @@ class DecompilerGeneric(DecompilerBase):
                         self.reconstructed[last_idx] = line[:indent] + "pass"
 
         raw_source = "\n".join(str(s) for s in self.reconstructed).rstrip()
-        return post_process_source(raw_source)
+        return post_process_source(raw_source, beautification_level=self.beautification_level)
 
     def _close_blocks(self, offset: int):
         """
@@ -633,16 +875,35 @@ class DecompilerGeneric(DecompilerBase):
             offset (int): Bytecode offset used to determine which blocks have ended.
         """
 
-
         while self.blocks and offset >= self.blocks[-1][0]:
             block_end, block_type = self.blocks.pop()
+            
+            has_else = False
+            else_end = None
+            if block_type == "for":
+                for ins in self.instructions:
+                    if ins.offset >= block_end: 
+                        break
+                    if "JUMP" in ins.opname:
+                        target = self._get_jump_target(ins)
+                        if target > block_end and not self._is_backward_instruction(ins):
+                            if else_end is None or target > else_end:
+                                else_end = target
+                                has_else = True
+
             if block_type not in _NO_PASS_TYPES:
                 last_idx = len(self.reconstructed) - 1
                 while last_idx >= 0 and not self.reconstructed[last_idx].strip():
                     last_idx -= 1
                 if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
                     self._append_reconstructed("pass")
-            if block_type not in _NO_INDENT_TYPES:
+            
+            if has_else and else_end is not None:
+                self.indent_level -= 1
+                self._append_reconstructed("else:")
+                self.indent_level += 1
+                self.blocks.append((else_end, "else"))
+            elif block_type not in _NO_INDENT_TYPES:
                 self.indent_level -= 1
 
     # ------------------------------------------------------------------
@@ -3089,7 +3350,7 @@ class DecompilerGeneric(DecompilerBase):
                 params.append(varkw_name)
 
             dec_class = _pick_decompiler_class(self)
-            dec = dec_class(inner_code, indent_level=1)
+            dec = dec_class(inner_code, indent_level=1, beautification_level=self.beautification_level)
             body = dec.decompile()
             sig = f"def {inner_code.co_name}({', '.join(params)}):"
             self.stack.append(("func", f"{sig}\n{body}"))
@@ -3530,11 +3791,11 @@ class DecompilerGeneric(DecompilerBase):
         if instr.opname in ("JUMP_FORWARD", "JUMP_ABSOLUTE") and isinstance(jump_target, int) and jump_target > instr.offset:
             matched_while = False
             for b_off, b_type in reversed(self.blocks):
-                if b_type == "while" and jump_target == b_off:
+                if b_type in ("while", "for") and jump_target >= b_off:
                     self._append_reconstructed("break")
                     matched_while = True
                     break
-                if b_type == "while":
+                if b_type in ("while", "for"):
                     break  # only check innermost loop
             
             if matched_while:
@@ -4512,6 +4773,26 @@ class Decompiler39(DecompilerGeneric):
                         if self.instructions[j].offset == end_reraise:
                             break
 
+            if is_except:
+                try_end_idx = next((k for k, x in enumerate(self.instructions) if x.offset == target), -1) - 1
+                if try_end_idx >= 0:
+                    try_jump = self.instructions[try_end_idx]
+                    if try_jump.opname in ("JUMP_FORWARD", "JUMP_ABSOLUTE"):
+                        else_start = getattr(self, "_get_jump_target")(try_jump)
+                        if else_start > target:
+                            post_except_targets = []
+                            for k in range(try_end_idx + 1, len(self.instructions)):
+                                if self.instructions[k].offset >= else_start:
+                                    break
+                                inner_ins = self.instructions[k]
+                                if inner_ins.opname in ("JUMP_FORWARD", "JUMP_ABSOLUTE"):
+                                    jt = getattr(self, "_get_jump_target")(inner_ins)
+                                    if jt > else_start:
+                                        post_except_targets.append(jt)
+                            if post_except_targets:
+                                else_end = min(post_except_targets)
+                                self._else_starts[else_start] = else_end
+
     # clean instruction dispatch for 3.9-specific opcodes
     def _handle_instruction(self, instr: BytecodeInstruction):
         # Suppress exception-path finally bodies
@@ -4539,6 +4820,11 @@ class Decompiler39(DecompilerGeneric):
         # Scoped suppression: clear except-zone state when we exit the handler scope.
         if self._except_end_offsets and instr.offset >= self._except_end_offsets[-1]:
             self._except_end_offsets.pop()
+
+        if hasattr(self, "_else_starts") and instr.offset in self._else_starts:
+            self._append_reconstructed("else:")
+            self.indent_level += 1
+            self.blocks.append((self._else_starts[instr.offset], "else"))
 
         # Binary ops (3.9 uses named opcodes, not BINARY_OP)
         _bin39 = {
@@ -5591,7 +5877,7 @@ def _get_python_version_from_magic(version_id: int) -> Optional[str]:
     if version_id >= 3560: return "3.14+"
     return None
 
-def get_decompiler(filepath: str) -> DecompilerBase:
+def get_decompiler(filepath: str, beautification_level: str = 'core') -> DecompilerBase:
     with open(filepath, "rb") as f:
         all_data = f.read()
 
@@ -5607,7 +5893,7 @@ def get_decompiler(filepath: str) -> DecompilerBase:
     if magic != host_magic and not (3410 <= version_id <= 5000):
         # We don't recognize the magic or it's very old/corrupt
         input_ver = _get_python_version_from_magic(version_id)
-        host_ver = _get_python_version_from_magic(host_magic & 0xFFFF)
+        host_ver = _get_python_version_from_magic(host_version_id)
         
         msg = f"Invalid or unsupported Python magic number: 0x{magic:08x} (version id: {version_id})."
         if input_ver:
@@ -5653,11 +5939,11 @@ def get_decompiler(filepath: str) -> DecompilerBase:
 
     # corrected dispatch table
     if 3410 <= version_id <= 3429:      # 3.9
-        return Decompiler39(code_obj)
+        return Decompiler39(code_obj, beautification_level=beautification_level)
     elif version_id >= 3560:            # 3.14+
-        return Decompiler314(code_obj)
+        return Decompiler314(code_obj, beautification_level=beautification_level)
     elif version_id >= 3430:            # 3.10, 3.11, 3.12, 3.13
-        return Decompiler311Plus(code_obj)
+        return Decompiler311Plus(code_obj, beautification_level=beautification_level)
 
     # Fallback for very old or unrecognised versions
     return DecompilerGeneric(code_obj)
@@ -5676,11 +5962,16 @@ def main():
         "-o", "--output",
         help="Optional filename to save the decompiled output to. If not supplied, prints to screen."
     )
+    parser.add_argument(
+        "--beautification-level",
+        choices=['none', 'core', 'aggressive'], default='core',
+        help="Level of code beautification to apply. 'none' does no beautification. 'core' collapses else-if to elif. 'aggressive' is a stub for future use."
+    )
     
     args = parser.parse_args()
     
     try:
-        decompiler = get_decompiler(args.input)
+        decompiler = get_decompiler(args.input, args.beautification_level)
         output_text = decompiler.decompile()
         
         if args.output:

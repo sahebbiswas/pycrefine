@@ -22,7 +22,32 @@ Or save the output to a file:
 python pycrefine.py path/to/compiled_file.pyc -o decompiled_output.py
 ```
 
+You can optionally enhance output readability by adjusting the formatting with `--beautification-level`. The `core` level (default) gracefully flattens nested `else/if` blocks into single `elif` statements, while the `aggressive` level is reserved as a stub for future styling logic:
+
+```bash
+python pycrefine.py path/to/compiled_file.pyc --beautification-level core
+```
+
 The script is entirely self-contained with no third-party dependencies required. It needs Python 3.9 or later to execute.
+
+### API Usage
+
+You can also import `pycrefine` as a library to programmatically decompile `.pyc` files directly into a string format:
+
+```python
+import pycrefine
+
+# Path to the compiled Python file
+pyc_file = "path/to/compiled_file.pyc"
+
+# Seamlessly load the appropriate decompiler for the given file
+decompiler = pycrefine.get_decompiler(pyc_file)
+
+# Reconstruct the source code into a single string
+source_code = decompiler.decompile(beautification_level="core")
+
+print(source_code)
+```
 
 ### Features
 *   **Automatic Version Navigation:** Reads the magic number from the `.pyc` header and seamlessly routes execution to the appropriate decompiler logic.
@@ -63,13 +88,13 @@ def process(items, threshold=0):
 
 For developers looking to contribute, improve, or maintain `pycrefine`, the project includes dedicated tooling to ensure decompilation accuracy and prevent regressions during architecture upgrades.
 
-### `test_pycrefine.py` (Unit Tests)
+### Modular Unit Test Suite
 
-The core test suite is located at `tests/test_pycrefine.py`. It uses `pytest` and contains comprehensive unit tests ranging from basic statements to complex control flow scenarios and edge cases.
+The core test suite is located in the `tests/` directory. It uses `pytest` and contains comprehensive unit tests partitioned across specific domains (e.g., `test_basic.py`, `test_exceptions.py`, `test_control_flow.py`) covering everything from basic statements to complex edge cases.
 
 To run the full test suite from the project root:
 ```bash
-pytest tests/test_pycrefine.py -v
+pytest tests/ -v
 ```
 
 This test suite strictly verifies the core mechanics of `pycrefine`, asserting its ability to restructure assignments, variables, data structures, exception handling blocks, functions, loops, and conditional chains.
