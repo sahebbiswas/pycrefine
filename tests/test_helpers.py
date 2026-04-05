@@ -16,6 +16,8 @@ sys.path.insert(0, str(_HERE.parent))
 
 from pycrefine import (
     BytecodeInstruction,
+    _line_is_in_triple_quoted_string,
+    flatten_elif,
     get_decompiler,
     post_process_source,
     Decompiler39,
@@ -147,3 +149,140 @@ def _run39_full_impl(instructions):
 
     raw_source = "\n".join(str(s) for s in dec.reconstructed).rstrip()
     return post_process_source(raw_source)
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: tokenize-based triple-quote guard
+# ---------------------------------------------------------------------------
+
+class TestLineIsInTripleQuotedString(unittest.TestCase):
+    """Regression tests for _line_is_in_triple_quoted_string.
+
+    The function must use tokenize (not naive substring search) so that
+    triple-quote characters inside ordinary single-quoted strings or inside
+    comments are correctly ignored.
+    """
+
+    def test_plain_line_not_in_triple(self):
+        """A bare else: after plain assignment is not inside a triple-quoted string."""
+        lines = ["x = 1", "else:"]
+        self.assertFalse(_line_is_in_triple_quoted_string(lines, 1))
+
+    def test_open_triple_detected_via_token_error(self):
+        """Lines[:i] ending mid-triple-string raises TokenError -> returns True."""
+        lines = ['x = """', "hello", "else:"]
+        self.assertTrue(_line_is_in_triple_quoted_string(lines, 2))
+
+    def test_closed_triple_before_target_is_not_in_triple(self):
+        """A triple-quoted string that is closed before line i must not flag line i."""
+        lines = ['x = """close"""', "else:"]
+        self.assertFalse(_line_is_in_triple_quoted_string(lines, 1))
+
+    def test_triple_chars_in_single_quoted_string_ignored(self):
+        """Triple-quote chars embedded in a normal single-quoted string must be
+        ignored — the old substring-scan approach would mis-count these."""
+        lines = ["s = '\"\"\"'", "else:"]
+        self.assertFalse(_line_is_in_triple_quoted_string(lines, 1))
+
+    def test_triple_chars_in_comment_ignored(self):
+        """Triple-quote chars in a comment must not flip the in-string state."""
+        lines = ['# hello """ world', "else:"]
+        self.assertFalse(_line_is_in_triple_quoted_string(lines, 1))
+
+    def test_triple_chars_in_single_quoted_using_single_delim(self):
+        """Triple single-quote chars inside a double-quoted string are ignored."""
+        lines = ["s = \"'''\"", "else:"]
+        self.assertFalse(_line_is_in_triple_quoted_string(lines, 1))
+
+    def test_multiline_open_triple_spans_target_line(self):
+        """A multiline triple-quoted string that started before line i and has not
+        yet closed means line i is inside the literal."""
+        lines = ['x = """first', "second", "else:"]
+        self.assertTrue(_line_is_in_triple_quoted_string(lines, 2))
+
+    def test_triple_closed_on_line_before_target(self):
+        """Triple closed on the line just before i -> target line is outside."""
+        lines = ['x = """', 'closed"""', "else:"]
+        self.assertFalse(_line_is_in_triple_quoted_string(lines, 2))
+
+    def test_line_idx_zero_always_false(self):
+        """line_idx=0 is an optimised early return — there are no preceding lines."""
+        self.assertFalse(_line_is_in_triple_quoted_string(["else:"], 0))
+
+    def test_f_string_triple_prefix_detected(self):
+        """f-string triple-quote prefixes (f\"\"\") must also be recognised."""
+        lines = ['x = f"""', "interpolation", "else:"]
+        self.assertTrue(_line_is_in_triple_quoted_string(lines, 2))
+
+    def test_raw_triple_prefix_detected(self):
+        """r\"\"\" and similar raw-string triple-quote prefixes must be recognised."""
+        lines = ['pat = r"""', "pattern", "else:"]
+        self.assertTrue(_line_is_in_triple_quoted_string(lines, 2))
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: flatten_elif must not transform else: inside triple strings
+# ---------------------------------------------------------------------------
+
+class TestFlattenElifTripleQuoteGuard(unittest.TestCase):
+    """Regression tests ensuring flatten_elif honours the tokenize-based guard.
+
+    The core bug: the old substring scan would miscount triple-quote occurrences
+    that appeared inside single-line strings/comments, causing flatten_elif to
+    incorrectly transform `else:` lines that were actually inside a triple-quoted
+    string body.
+    """
+
+    def test_else_inside_multiline_triple_not_flattened(self):
+        """An else: that appears as literal text inside a triple-quoted string
+        must pass through unchanged — it is not Python syntax at that point."""
+        src = 'x = """\nelse:\n    pass\n"""\n'
+        out = flatten_elif(src)
+        self.assertNotIn("elif", out)
+        # The triple-quoted string content must be preserved verbatim.
+        self.assertIn('"""', out)
+
+    def test_else_inside_triple_single_quote_not_flattened(self):
+        """Same check for ''' triple-quoted strings."""
+        src = "x = '''\nelse:\n    pass\n'''\n"
+        out = flatten_elif(src)
+        self.assertNotIn("elif", out)
+
+    def test_triple_chars_in_single_string_dont_suppress_flatten(self):
+        """If a line contains '\"\"\"' inside a normal single-quoted string,
+        the *following* else:/if block must still be flattened correctly
+        (the false-positive suppression must not be triggered)."""
+        src = (
+            "s = '\"\"\"'\n"      # single-quoted string containing triple-quote chars
+            "if a:\n"
+            "    pass\n"
+            "else:\n"
+            "    if b:\n"
+            "        pass\n"
+        )
+        out = flatten_elif(src)
+        self.assertIn("elif b:", out)
+
+    def test_triple_chars_in_comment_dont_suppress_flatten(self):
+        """Triple-quote chars inside a comment must not prevent flattening."""
+        src = (
+            '# has """ in it\n'
+            "if a:\n"
+            "    pass\n"
+            "else:\n"
+            "    if b:\n"
+            "        pass\n"
+        )
+        out = flatten_elif(src)
+        self.assertIn("elif b:", out)
+
+    def test_normal_if_else_if_still_flattened(self):
+        """Baseline: a plain if/else/if pattern must still be flattened."""
+        src = "if a:\n    pass\nelse:\n    if b:\n        pass\n"
+        out = flatten_elif(src)
+        self.assertIn("elif b:", out)
+        self.assertNotIn("else:", out)
+
+
+if __name__ == "__main__":
+    unittest.main()

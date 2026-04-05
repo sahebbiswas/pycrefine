@@ -8,6 +8,7 @@ import marshal
 import re
 import struct
 import sys
+import tokenize
 import traceback
 import types
 from typing import List, Optional, Any, Dict, Union, Tuple
@@ -87,6 +88,64 @@ _INPLACE_ASSIGN_MAP = {
 }
 
 
+def _line_is_in_triple_quoted_string(lines: List[str], line_idx: int) -> bool:
+    """
+    Return True when *line_idx* (0-based) falls inside an open triple-quoted
+    string literal in the source formed by ``lines[:line_idx]``.
+
+    We use ``tokenize.generate_tokens`` so that triple-quote character sequences
+    that happen to appear inside ordinary single-line strings or inside comments
+    are correctly ignored — the naive substring-scan approach would miscount
+    those and flip the open/closed state erroneously.
+
+    The algorithm:
+    1. Join ``lines[:line_idx]`` into a fake source block and run the tokenizer.
+    2. For every STRING token, check whether its ``string_prefix`` is a
+       triple-quote opener (``\"\"\"`` / ``'''``).
+    3. A triple-quoted STRING whose *end row* equals ``line_idx + 1`` (i.e. the
+       token closes on the very line we are testing) still means that line is
+       *inside* the literal.  A token that started before ``line_idx + 1`` but
+       whose end row is *after* ``line_idx + 1`` means the string overruns the
+       current line, so the current line is definitely inside it.
+    4. If the tokenizer raises (e.g. because the source up to ``lines[:line_idx]``
+       ends in the middle of an unterminated triple-quoted string) we catch the
+       ``tokenize.TokenError`` and return True — an unterminated string means we
+       are currently inside one.
+    """
+    if line_idx == 0:
+        return False
+
+    source_fragment = "\n".join(lines[:line_idx]) + "\n"
+    reader = io.StringIO(source_fragment).readline
+    _TRIPLE_PREFIXES = ('"""', "'''", 'r"""', "r'''", 'b"""', "b'''",
+                        'rb"""', "rb'''", 'br"""', "br'''",
+                        'f"""', "f'''", 'rf"""', "rf'''", 'fr"""', "fr'''",
+                        'u"""', "u'''",
+                        'R"""', "R'''", 'B"""', "B'''",
+                        'RB"""', "RB'''", 'BR"""', "BR'''",
+                        'F"""', "F'''", 'RF"""', "RF'''", 'FR"""', "FR'''")
+    try:
+        for tok_type, tok_str, tok_start, tok_end, _ in tokenize.generate_tokens(reader):
+            if tok_type == tokenize.STRING:
+                # tok_str is the full token text, e.g. '"""hello\nworld"""'
+                is_triple = any(tok_str.startswith(p) for p in _TRIPLE_PREFIXES)
+                if is_triple:
+                    # tok_start/tok_end are (row, col), 1-based rows
+                    start_row, _ = tok_start
+                    end_row, _ = tok_end
+                    # The token spans lines [start_row .. end_row] (1-based).
+                    # line_idx is 0-based, so the line we are checking is
+                    # row (line_idx + 1) in 1-based terms.  If that row falls
+                    # within [start_row, end_row] the line is inside the literal.
+                    target_row = line_idx + 1
+                    if start_row <= target_row <= end_row:
+                        return True
+    except tokenize.TokenError:
+        # An unclosed triple-quoted string causes TokenError; treat as in-triple.
+        return True
+    return False
+
+
 def flatten_elif(source: str) -> str:
     lines = source.split('\n')
     changed = False
@@ -101,23 +160,10 @@ def flatten_elif(source: str) -> str:
             base_indent = line[:base_indent_len]
 
             # Guard 1: skip if inside a triple-quoted string.
-            # Walk all processed lines and track open/close triple-quote state.
-            in_triple = False
-            tq_state = None  # '"""' or "'''"
-            for prev in lines[:i]:
-                for delim in ('"""', "'''"):
-                    idx_d = 0
-                    while True:
-                        pos = prev.find(delim, idx_d)
-                        if pos == -1:
-                            break
-                        idx_d = pos + 3
-                        if tq_state is None:
-                            tq_state = delim
-                            in_triple = True
-                        elif tq_state == delim:
-                            tq_state = None
-                            in_triple = False
+            # Use tokenize to inspect the real token stream for lines[:i] so
+            # that triple-quote sequences that appear inside normal single-line
+            # strings or comments do not flip the state incorrectly.
+            in_triple = _line_is_in_triple_quoted_string(lines, i)
             if in_triple:
                 out_lines.append(line)
                 i += 1
