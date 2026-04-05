@@ -762,6 +762,7 @@ class DecompilerGeneric(DecompilerBase):
         self._pending_finally_merge: Optional[int] = None
         self._nop_to_push_exc: dict = {}
         self._pending_kw_names: Optional[Tuple[str, ...]] = None
+        self._else_starts: dict = {} # map of else_start_offset -> else_end_offset
         self._build_dispatch()
 
     # ------------------------------------------------------------------
@@ -874,16 +875,34 @@ class DecompilerGeneric(DecompilerBase):
             offset (int): Bytecode offset used to determine which blocks have ended.
         """
 
-
         while self.blocks and offset >= self.blocks[-1][0]:
             block_end, block_type = self.blocks.pop()
+            
+            has_else = False
+            else_end = None
+            if block_type == "for":
+                for ins in self.instructions:
+                    if ins.offset >= block_end: break
+                    if "JUMP" in ins.opname:
+                        target = self._get_jump_target(ins)
+                        if target > block_end and not self._is_backward_instruction(ins):
+                            if else_end is None or target > else_end:
+                                else_end = target
+                                has_else = True
+
             if block_type not in _NO_PASS_TYPES:
                 last_idx = len(self.reconstructed) - 1
                 while last_idx >= 0 and not self.reconstructed[last_idx].strip():
                     last_idx -= 1
                 if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
                     self._append_reconstructed("pass")
-            if block_type not in _NO_INDENT_TYPES:
+            
+            if has_else and else_end is not None:
+                self.indent_level -= 1
+                self._append_reconstructed("else:")
+                self.indent_level += 1
+                self.blocks.append((else_end, "else"))
+            elif block_type not in _NO_INDENT_TYPES:
                 self.indent_level -= 1
 
     # ------------------------------------------------------------------
@@ -3771,11 +3790,11 @@ class DecompilerGeneric(DecompilerBase):
         if instr.opname in ("JUMP_FORWARD", "JUMP_ABSOLUTE") and isinstance(jump_target, int) and jump_target > instr.offset:
             matched_while = False
             for b_off, b_type in reversed(self.blocks):
-                if b_type == "while" and jump_target == b_off:
+                if b_type in ("while", "for") and jump_target >= b_off:
                     self._append_reconstructed("break")
                     matched_while = True
                     break
-                if b_type == "while":
+                if b_type in ("while", "for"):
                     break  # only check innermost loop
             
             if matched_while:
