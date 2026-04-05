@@ -34,7 +34,12 @@ class TestControlFlow(unittest.TestCase):
         self.assertNotRegex(out, r"else:\s*\n\s*if") 
 
     def test_for_else_no_flattening(self):
-        """for...else: the beautifier must never inject an `elif` keyword."""
+        """for...else: the beautifier must never inject an `elif` keyword.
+
+        Note: the decompiler may not emit `else:` for for...else on all Python
+        versions (known limitation), so we only verify the negative constraint
+        that `elif` is absent and the `for` is present.
+        """
         src = (
             "def f(items):\n"
             "    for x in items:\n"
@@ -48,8 +53,14 @@ class TestControlFlow(unittest.TestCase):
         self.assertNotIn("elif", out)
         self.assertIn("for", out)
 
+
     def test_try_else_no_flattening(self):
-        """try...else: the beautifier must never inject an `elif` keyword."""
+        """try...else: the beautifier must never inject an `elif` keyword.
+
+        Note: the decompiler may not emit `else:` for try...else on all Python
+        versions (known limitation), so we only verify the negative constraint
+        that `elif` is absent and `try:` is present.
+        """
         src = (
             "def f():\n"
             "    try:\n"
@@ -63,6 +74,7 @@ class TestControlFlow(unittest.TestCase):
         out = decompile(src)
         self.assertNotIn("elif", out)
         self.assertIn("try:", out)
+
 
     def test_for_loop(self):
         out = decompile("for i in range(3):\n    print(i)\n")

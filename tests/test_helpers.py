@@ -417,3 +417,67 @@ class TestFlattenElifMultilineHeaders(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# Integration tests: post_process_source beautification_level gate
+# ---------------------------------------------------------------------------
+
+class TestFlattenElifBeautificationGating(unittest.TestCase):
+    """Verify that flatten_elif only runs when beautification_level permits.
+
+    Calls post_process_source directly (the same path used in production) so CI
+    exercises the gating logic, not just flatten_elif in isolation.
+    """
+
+    # A canonical flattening candidate: else: containing a lone if.
+    _SRC = "if a:\n    pass\nelse:\n    if b:\n        pass\n"
+
+    def test_disabled_level_preserves_else(self):
+        """beautification_level='none' must leave the else:/if structure intact."""
+        out = post_process_source(self._SRC, beautification_level='none')
+        self.assertIn("else:", out)
+        self.assertNotIn("elif", out)
+
+    def test_core_level_flattens_to_elif(self):
+        """beautification_level='core' must transform else:/if into elif."""
+        out = post_process_source(self._SRC, beautification_level='core')
+        self.assertIn("elif b:", out)
+        self.assertNotIn("else:", out)
+
+    def test_core_level_output_is_valid_python(self):
+        """Flattened output under 'core' must remain syntactically valid."""
+        import ast
+        out = post_process_source(self._SRC, beautification_level='core')
+        try:
+            ast.parse(out)
+        except SyntaxError as exc:
+            self.fail(f"post_process_source('core') produced invalid Python: {exc}\n{out}")
+
+    def test_aggressive_level_flattens_to_elif(self):
+        """beautification_level='aggressive' must also flatten (superset of core)."""
+        out = post_process_source(self._SRC, beautification_level='aggressive')
+        self.assertIn("elif b:", out)
+
+    def test_multiline_nested_if_core_level(self):
+        """Multi-line nested if (\\n    b\\n): flattens correctly under 'core'."""
+        import ast
+        src = "if a:\n    pass\nelse:\n    if (\n        b\n    ):\n        pass\n"
+        out = post_process_source(src, beautification_level='core')
+        self.assertIn("elif", out)
+        self.assertIn("b", out)
+        try:
+            ast.parse(out)
+        except SyntaxError as exc:
+            self.fail(f"post_process_source produced invalid Python: {exc}\n{out}")
+
+    def test_multiline_nested_if_disabled_preserves_else(self):
+        """Multi-line nested if is NOT flattened when beautification is off."""
+        src = "if a:\n    pass\nelse:\n    if (\n        b\n    ):\n        pass\n"
+        out = post_process_source(src, beautification_level='none')
+        self.assertIn("else:", out)
+        self.assertNotIn("elif", out)
+
+
+if __name__ == "__main__":
+    unittest.main()
