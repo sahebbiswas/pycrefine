@@ -1,5 +1,6 @@
 import unittest
 import os
+import sys
 from .test_helpers import decompile, assert_contains
 
 class TestControlFlow(unittest.TestCase):
@@ -50,12 +51,34 @@ class TestControlFlow(unittest.TestCase):
         self.assertIn("else:", out)
 
 
-    def test_try_else_no_flattening(self):
+    @unittest.expectedFailure
+    def test_try_else_strict(self):
+        """try...else: verify `else:` is emitted and `elif` is absent.
+        
+        Currently expected to fail on all versions due to pycrefine architectural limitation
+        where try..else is merged into the execution path without explicit else.
+        """
+        src = (
+            "def f():\n"
+            "    try:\n"
+            "        risky = int('1')\n"
+            "    except ValueError:\n"
+            "        risky = 0\n"
+            "    else:\n"
+            "        print('ok', risky)\n"
+            "        print('done')\n"
+        )
+        out = decompile(src)
+        self.assertNotIn("elif", out)
+        self.assertIn("try:", out)
+        self.assertIn("else:", out)
+
+    def test_try_else_no_flattening_unsupported(self):
         """try...else: the beautifier must never inject an `elif` keyword.
 
-        Note: the decompiler may not emit `else:` for try...else on all Python
-        versions (known limitation), so we only verify the negative constraint
-        that `elif` is absent and `try:` is present.
+        Note: the decompiler may not emit `else:` for try...else on any Python
+        version (known limitation), so we only verify the negative constraint that
+        `elif` is absent and `try:` is present.
         """
         src = (
             "def f():\n"

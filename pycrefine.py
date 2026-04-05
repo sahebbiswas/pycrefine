@@ -882,7 +882,8 @@ class DecompilerGeneric(DecompilerBase):
             else_end = None
             if block_type == "for":
                 for ins in self.instructions:
-                    if ins.offset >= block_end: break
+                    if ins.offset >= block_end: 
+                        break
                     if "JUMP" in ins.opname:
                         target = self._get_jump_target(ins)
                         if target > block_end and not self._is_backward_instruction(ins):

@@ -7,6 +7,8 @@ import sys
 import unittest
 from pathlib import Path
 from typing import Any, List, Tuple, Union
+import ast
+
 
 # ---------------------------------------------------------------------------
 # Path setup
@@ -390,7 +392,6 @@ class TestFlattenElifMultilineHeaders(unittest.TestCase):
         # Condition must include the actual variable, not just an open paren.
         self.assertIn("b", out)
         # Output must be syntactically complete (condition ends with ':')
-        import ast
         try:
             ast.parse(out)
         except SyntaxError as exc:
@@ -414,9 +415,6 @@ class TestFlattenElifMultilineHeaders(unittest.TestCase):
         self.assertIn("elif b:", out)
         self.assertNotIn("else:", out)
 
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 # ---------------------------------------------------------------------------
