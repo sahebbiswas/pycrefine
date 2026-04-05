@@ -153,7 +153,7 @@ class TestComprehensions(unittest.TestCase):
             self.assertIn("yield (x * 2)", out)
             self.assertNotIn("append", out)
         else:
-            self.assertIn("[(x * 2)", out.replace("x*2", "x * 2"))
+            self.assertTrue("[x * 2 for x in items]" in out or "[(x * 2) for x in items]" in out)
 
     def test_dict_comprehension_yield(self):
         src = "def h(items):\n    return {k: v for k, v in items}\n"
@@ -161,7 +161,7 @@ class TestComprehensions(unittest.TestCase):
         if sys.version_info >= (3, 12):
             self.assertTrue("yield k: v" in out or "yield (k: v)" in out)
         else:
-            self.assertIn("{k: v for", out)
+            self.assertIn("{k: v for k, v in items}", out)
 
     def test_set_comprehension_yield(self):
         src = "def g(items):\n    return {x for x in items}\n"
@@ -169,7 +169,7 @@ class TestComprehensions(unittest.TestCase):
         if sys.version_info >= (3, 12):
             self.assertTrue("yield x" in out)
         else:
-            self.assertIn("{x for", out)
+            self.assertIn("{x for x in items}", out)
 
     def test_negative_comprehension_no_yield_in_normal_loop(self):
         # A normal loop calling list.append should NOT emit yield

@@ -1,9 +1,8 @@
-from tests.test_helpers import _run39_full_impl
 import os
 import sys
 import unittest
 
-from .test_helpers import assert_contains, decompile
+from .test_helpers import _run39_full_impl, assert_contains, decompile
 
 
 class TestControlFlow(unittest.TestCase):

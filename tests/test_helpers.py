@@ -398,7 +398,6 @@ class TestFlattenElifMultilineHeaders(unittest.TestCase):
         src = "if (\n    a\n):\n    pass\nelse:\n    if (\n        b\n    ):\n        pass\n"
         out = flatten_elif(src)
         self.assertIn("elif", out)
-        import ast
         try:
             ast.parse(out)
         except SyntaxError as exc:

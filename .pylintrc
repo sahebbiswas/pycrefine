@@ -436,7 +436,7 @@ confidence=HIGH,
 # --enable=similarities". If you want to run only the classes checker, but have
 # no Warning level messages displayed, use "--disable=all --enable=classes
 # --disable=W".
-disable=C0111,C0114,C0115,C0116,R0904,W0105,W0212,C0415,C0301,R0801,W0621,W0404,C0411,C0321,R0914,R0912,R0915,C0103,W0718,W0612
+disable=C0111,C0114,C0115,C0116,R0904,W0105,W0212,C0415,C0301,R0801,W0621,W0404,C0411,C0321,R0914,R0912,R0915,C0103,W0718,W0612,
         bad-inline-option,
         locally-disabled,
         file-ignored,
