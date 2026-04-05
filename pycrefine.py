@@ -146,6 +146,67 @@ def _line_is_in_triple_quoted_string(lines: List[str], line_idx: int) -> bool:
     return False
 
 
+def _block_opener_keyword(lines: List[str], tail_idx: int, base_indent_len: int) -> Optional[str]:
+    """Return the leading keyword of the block header whose *closing* line is at
+    ``tail_idx`` (indent == ``base_indent_len``, content ends with ``:``).
+
+    For a single-line header (``if cond:``) the check is immediate.  For a
+    multi-line header (``if (\n    cond\n):``) the function counts unmatched
+    closing brackets going backward until the running total reaches zero; that
+    line is the opener.  Returns ``None`` when the opener cannot be found.
+    """
+    _KW = ("if ", "elif ", "for ", "while ", "with ", "try:", "except", "finally:")
+    tail_stripped = lines[tail_idx].strip()
+    for kw in _KW:
+        if tail_stripped.startswith(kw):
+            return kw.rstrip(" :")
+    # Multi-line: count unmatched closing brackets walking backward.
+    unmatched = 0
+    for p in range(tail_idx, -1, -1):
+        ps = lines[p].strip()
+        if not ps:
+            continue
+        pi = len(lines[p]) - len(lines[p].lstrip())
+        unmatched += ps.count(')') - ps.count('(')
+        unmatched += ps.count(']') - ps.count('[')
+        unmatched += ps.count('}') - ps.count('{')
+        if pi == base_indent_len and unmatched <= 0:
+            for kw in _KW:
+                if ps.startswith(kw):
+                    return kw.rstrip(" :")
+            return None
+    return None
+
+
+def _collect_multiline_header(lines: List[str], start_idx: int, header_indent_len: int):
+    """Return ``(end_idx, condition)`` for the ``if``/``elif`` header starting
+    at ``start_idx``.
+
+    *condition* is the text after the leading keyword (``if ``/``elif ``) up to
+    and **including** the trailing ``:`` — ready to be emitted as
+    ``f"{indent}elif {condition}"``.
+
+    For a single-line header this is a fast no-scan return.  For a multi-line
+    header (e.g. ``if (\n    very_long_cond\n):``) the continuation lines are
+    joined with a single space, producing a valid single-line ``elif`` that is
+    semantically identical.
+    """
+    first_stripped = lines[start_idx].lstrip()
+    kw_len = 3 if first_stripped.startswith("if ") else 5  # "if " vs "elif "
+    if lines[start_idx].rstrip().endswith(':'):
+        return start_idx, first_stripped[kw_len:].rstrip()
+    parts = [first_stripped[kw_len:].rstrip()]
+    for hj in range(start_idx + 1, len(lines)):
+        hs = lines[hj].strip()
+        if not hs:
+            continue
+        hi = len(lines[hj]) - len(lines[hj].lstrip())
+        parts.append(hs)
+        if hi == header_indent_len and hs.endswith(':'):
+            return hj, " ".join(parts)
+    return start_idx, first_stripped[kw_len:].rstrip()
+
+
 def flatten_elif(source: str) -> str:
     lines = source.split('\n')
     changed = False
@@ -171,6 +232,8 @@ def flatten_elif(source: str) -> str:
 
             # Guard 2: verify the controlling header above this `else:` is an
             # `if` or `elif` at exactly base_indent_len (not `for`, `try`, etc.).
+            # Multi-line headers (e.g. `if (\n    cond\n):`) are handled by
+            # _block_opener_keyword which walks back with bracket-depth counting.
             parent_ok = False
             for p in range(i - 1, -1, -1):
                 prev_line = lines[p]
@@ -179,39 +242,47 @@ def flatten_elif(source: str) -> str:
                     continue
                 prev_indent_len = len(prev_line) - len(prev_line.lstrip())
                 if prev_indent_len <= base_indent_len:
-                    if prev_indent_len == base_indent_len and (
-                        prev_stripped.startswith("if ") or prev_stripped.startswith("elif ")
-                    ):
-                        parent_ok = True
+                    if prev_indent_len == base_indent_len:
+                        if prev_stripped.startswith("if ") or prev_stripped.startswith("elif "):
+                            parent_ok = True
+                        elif prev_stripped.endswith(':'):
+                            # Closing line of a multi-line header — find the opener.
+                            kw = _block_opener_keyword(lines, p, base_indent_len)
+                            parent_ok = kw in ("if", "elif")
                     break
                 # Deeper indent — keep scanning upward.
             if not parent_ok:
                 out_lines.append(line)
                 i += 1
                 continue
-            
+
 
             j = i + 1
             while j < len(lines) and not lines[j].strip():
                 j += 1
-            
+
             if j < len(lines) and lines[j].lstrip().startswith("if "):
                 if_line = lines[j]
                 if_indent_len = len(if_line) - len(if_line.lstrip())
                 if if_indent_len == base_indent_len + 4:
+                    # Collect the full (possibly multi-line) header so that
+                    # conditions like `if (\n    cond\n):` are not truncated.
+                    header_end, condition = _collect_multiline_header(
+                        lines, j, if_indent_len
+                    )
                     is_only_if = True
-                    k = j + 1
+                    k = header_end + 1
                     while k < len(lines):
                         next_line = lines[k]
                         next_stripped = next_line.strip()
                         if not next_stripped:
                             k += 1
                             continue
-                            
+
                         next_indent_len = len(next_line) - len(next_line.lstrip())
                         if next_indent_len <= base_indent_len:
                             break
-                            
+
                         if next_indent_len == if_indent_len:
                             if not (next_stripped.startswith("elif ") or next_stripped.startswith("else:")):
                                 is_only_if = False
@@ -219,17 +290,16 @@ def flatten_elif(source: str) -> str:
                         elif next_indent_len < if_indent_len:
                             is_only_if = False
                             break
-                            
+
                         k += 1
-                    
+
                     if is_only_if:
-                        condition = if_line.lstrip()[3:]
                         out_lines.append(f"{base_indent}elif {condition}")
-                        
+
                         for idx in range(i + 1, j):
                             out_lines.append(lines[idx])
-                            
-                        for idx in range(j + 1, k):
+
+                        for idx in range(header_end + 1, k):
                             if lines[idx].strip():
                                 if lines[idx].startswith(base_indent + "    "):
                                     out_lines.append(lines[idx][:base_indent_len] + lines[idx][base_indent_len + 4:])
@@ -237,7 +307,7 @@ def flatten_elif(source: str) -> str:
                                     out_lines.append(lines[idx])
                             else:
                                 out_lines.append(lines[idx])
-                        
+
                         i = k
                         changed = True
                         continue

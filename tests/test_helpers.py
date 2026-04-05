@@ -16,6 +16,8 @@ sys.path.insert(0, str(_HERE.parent))
 
 from pycrefine import (
     BytecodeInstruction,
+    _block_opener_keyword,
+    _collect_multiline_header,
     _line_is_in_triple_quoted_string,
     flatten_elif,
     get_decompiler,
@@ -278,6 +280,135 @@ class TestFlattenElifTripleQuoteGuard(unittest.TestCase):
 
     def test_normal_if_else_if_still_flattened(self):
         """Baseline: a plain if/else/if pattern must still be flattened."""
+        src = "if a:\n    pass\nelse:\n    if b:\n        pass\n"
+        out = flatten_elif(src)
+        self.assertIn("elif b:", out)
+        self.assertNotIn("else:", out)
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: _block_opener_keyword
+# ---------------------------------------------------------------------------
+
+class TestBlockOpenerKeyword(unittest.TestCase):
+    """Pins _block_opener_keyword for both single-line and multi-line headers."""
+
+    def test_single_line_if(self):
+        lines = ["if cond:"]
+        self.assertEqual(_block_opener_keyword(lines, 0, 0), "if")
+
+    def test_single_line_elif(self):
+        lines = ["elif cond:"]
+        self.assertEqual(_block_opener_keyword(lines, 0, 0), "elif")
+
+    def test_single_line_for(self):
+        lines = ["for x in y:"]
+        self.assertEqual(_block_opener_keyword(lines, 0, 0), "for")
+
+    def test_multiline_if_at_indent_0(self):
+        """if (\n    cond\n): — tail is '):', opener is 'if'."""
+        lines = ["if (", "    cond", "):"]
+        self.assertEqual(_block_opener_keyword(lines, 2, 0), "if")
+
+    def test_multiline_elif_at_indent_0(self):
+        lines = ["elif (", "    cond", "):"]
+        self.assertEqual(_block_opener_keyword(lines, 2, 0), "elif")
+
+    def test_multiline_if_indented(self):
+        """Same but header is indented 4 spaces."""
+        lines = ["    if (", "        a and b", "    ):"]
+        self.assertEqual(_block_opener_keyword(lines, 2, 4), "if")
+
+    def test_non_if_keyword_returns_correct(self):
+        """A while multi-line header should return 'while', not None."""
+        lines = ["while (", "    cond", "):"]
+        self.assertEqual(_block_opener_keyword(lines, 2, 0), "while")
+
+    def test_unrecognised_tail_returns_none(self):
+        """A closing line with no recognisable opener returns None."""
+        lines = ["):"]
+        self.assertIsNone(_block_opener_keyword(lines, 0, 0))
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: _collect_multiline_header
+# ---------------------------------------------------------------------------
+
+class TestCollectMultilineHeader(unittest.TestCase):
+    """Pins _collect_multiline_header for both single-line and multi-line headers."""
+
+    def test_single_line_if(self):
+        lines = ["    if cond:"]
+        end, cond = _collect_multiline_header(lines, 0, 4)
+        self.assertEqual(end, 0)
+        self.assertEqual(cond, "cond:")
+
+    def test_single_line_elif(self):
+        lines = ["    elif cond:"]
+        end, cond = _collect_multiline_header(lines, 0, 4)
+        self.assertEqual(end, 0)
+        self.assertEqual(cond, "cond:")
+
+    def test_multiline_two_continuation_lines(self):
+        lines = ["    if (", "        cond", "    ):"]
+        end, cond = _collect_multiline_header(lines, 0, 4)
+        self.assertEqual(end, 2)
+        self.assertEqual(cond, "( cond ):")
+
+    def test_multiline_multiple_continuation_lines(self):
+        lines = ["if (", "    a", "    and b", "):"]
+        end, cond = _collect_multiline_header(lines, 0, 0)
+        self.assertEqual(end, 3)
+        self.assertEqual(cond, "( a and b ):")
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: flatten_elif with multi-line headers
+# ---------------------------------------------------------------------------
+
+class TestFlattenElifMultilineHeaders(unittest.TestCase):
+    """Regression tests for the fixed multi-line if/elif header handling.
+
+    Before the fix:
+    * Guard 2 stopped at `):` and never found `if`/`elif` -> transform skipped.
+    * Condition extraction sliced only the first line -> broken `elif (`.
+    """
+
+    def test_multiline_parent_if_is_recognised(self):
+        """Guard 2 must identify `if (\n    a\n):` as an if-parent and allow
+        the transform (was silently skipped before the fix)."""
+        src = "if (\n    a\n):\n    pass\nelse:\n    if b:\n        pass\n"
+        out = flatten_elif(src)
+        self.assertIn("elif b:", out)
+
+    def test_multiline_nested_if_condition_fully_captured(self):
+        """The full multi-line nested `if (\n    b\n):` condition must be
+        joined and emitted correctly (was truncated to `elif (` before the fix)."""
+        src = "if a:\n    pass\nelse:\n    if (\n        b\n    ):\n        pass\n"
+        out = flatten_elif(src)
+        self.assertIn("elif", out)
+        # Condition must include the actual variable, not just an open paren.
+        self.assertIn("b", out)
+        # Output must be syntactically complete (condition ends with ':')
+        import ast
+        try:
+            ast.parse(out)
+        except SyntaxError as exc:
+            self.fail(f"flatten_elif produced invalid Python: {exc}\n{out}")
+
+    def test_both_headers_multiline(self):
+        """Both parent and nested headers span multiple lines."""
+        src = "if (\n    a\n):\n    pass\nelse:\n    if (\n        b\n    ):\n        pass\n"
+        out = flatten_elif(src)
+        self.assertIn("elif", out)
+        import ast
+        try:
+            ast.parse(out)
+        except SyntaxError as exc:
+            self.fail(f"flatten_elif produced invalid Python: {exc}\n{out}")
+
+    def test_single_line_baseline_still_works(self):
+        """Ensure the original single-line fast path is unaffected."""
         src = "if a:\n    pass\nelse:\n    if b:\n        pass\n"
         out = flatten_elif(src)
         self.assertIn("elif b:", out)
