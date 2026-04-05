@@ -159,3 +159,20 @@ def api_23( ):
     print("post %s in input" %
           ('not found' if in_b is None else 'reset'))
     return in_a is not None 
+
+def api_24(in_a, in_b):
+    
+    if 1 <= in_a <= 10:
+        print("a-good")
+    if 5 <= in_b <= 10:
+        print("b-bad")
+    if in_a > in_b:
+        print("a > b")
+    
+    return
+
+def api_25(in_a):
+    return [ s.decode() if isinstance(s, bytes) else s for s in in_a ]
+    
+
+    

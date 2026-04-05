@@ -87,7 +87,79 @@ _INPLACE_ASSIGN_MAP = {
 }
 
 
-def post_process_source(source: str) -> str:
+def flatten_elif(source: str) -> str:
+    lines = source.split('\n')
+    changed = False
+    
+    out_lines = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.lstrip()
+        if stripped == "else:":
+            base_indent_len = len(line) - len(stripped)
+            base_indent = line[:base_indent_len]
+            
+            j = i + 1
+            while j < len(lines) and not lines[j].strip():
+                j += 1
+            
+            if j < len(lines) and lines[j].lstrip().startswith("if "):
+                if_line = lines[j]
+                if_indent_len = len(if_line) - len(if_line.lstrip())
+                if if_indent_len == base_indent_len + 4:
+                    is_only_if = True
+                    k = j + 1
+                    while k < len(lines):
+                        next_line = lines[k]
+                        next_stripped = next_line.strip()
+                        if not next_stripped:
+                            k += 1
+                            continue
+                            
+                        next_indent_len = len(next_line) - len(next_line.lstrip())
+                        if next_indent_len <= base_indent_len:
+                            break
+                            
+                        if next_indent_len == if_indent_len:
+                            if not (next_stripped.startswith("elif ") or next_stripped.startswith("else:")):
+                                is_only_if = False
+                                break
+                        elif next_indent_len < if_indent_len:
+                            is_only_if = False
+                            break
+                            
+                        k += 1
+                    
+                    if is_only_if:
+                        condition = if_line.lstrip()[3:]
+                        out_lines.append(f"{base_indent}elif {condition}")
+                        
+                        for idx in range(i + 1, j):
+                            out_lines.append(lines[idx])
+                            
+                        for idx in range(j + 1, k):
+                            if lines[idx].strip():
+                                if lines[idx].startswith(base_indent + "    "):
+                                    out_lines.append(lines[idx][:base_indent_len] + lines[idx][base_indent_len + 4:])
+                                else:
+                                    out_lines.append(lines[idx])
+                            else:
+                                out_lines.append(lines[idx])
+                        
+                        i = k
+                        changed = True
+                        continue
+        out_lines.append(line)
+        i += 1
+        
+    res = '\n'.join(out_lines)
+    if changed:
+        return flatten_elif(res)
+    return res
+
+
+def post_process_source(source: str, beautification_level: str = 'core') -> str:
     """Clean up decompiled output to be more Pythonic."""
     lines = source.split('\n')
     out_lines = []
@@ -208,6 +280,14 @@ def post_process_source(source: str) -> str:
         ),
         text,
     )
+
+    if beautification_level in ('core', 'aggressive'):
+        text = flatten_elif(text)
+
+    if beautification_level == 'aggressive':
+        # Stub for aggressive beautification - to be implemented in future
+        pass
+
     return text.strip('\r\n') + '\n'
 
 # ---------------------------------------------------------------------------
@@ -360,7 +440,7 @@ class DecompilerBase:
                 argrepr=instr.argrepr,
             ))
 
-    def decompile(self) -> str:
+    def decompile(self, beautification_level: str = 'core') -> str:
         """
         Decompile the stored code object into a human-readable Python source string.
         
@@ -526,7 +606,7 @@ class DecompilerGeneric(DecompilerBase):
     # Main loop
     # ------------------------------------------------------------------
 
-    def decompile(self) -> str:
+    def decompile(self, beautification_level: str = 'core') -> str:
         """
         Decompile the stored code object into a human-readable Python source string.
         
@@ -617,7 +697,7 @@ class DecompilerGeneric(DecompilerBase):
                         self.reconstructed[last_idx] = line[:indent] + "pass"
 
         raw_source = "\n".join(str(s) for s in self.reconstructed).rstrip()
-        return post_process_source(raw_source)
+        return post_process_source(raw_source, beautification_level=beautification_level)
 
     def _close_blocks(self, offset: int):
         """
@@ -5676,12 +5756,17 @@ def main():
         "-o", "--output",
         help="Optional filename to save the decompiled output to. If not supplied, prints to screen."
     )
+    parser.add_argument(
+        "--beautification-level",
+        choices=['core', 'aggressive'], default='core',
+        help="Level of code beautification to apply. 'core' collapses else-if to elif. 'aggressive' is a stub for future use."
+    )
     
     args = parser.parse_args()
     
     try:
         decompiler = get_decompiler(args.input)
-        output_text = decompiler.decompile()
+        output_text = decompiler.decompile(beautification_level=args.beautification_level)
         
         if args.output:
             try:

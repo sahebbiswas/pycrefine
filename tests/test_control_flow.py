@@ -12,7 +12,25 @@ class TestControlFlow(unittest.TestCase):
         self.assertIn("x > 0", out)
         self.assertTrue("y = 1" in out or "1 if" in out)
         self.assertTrue("y = 0" in out or "else 0" in out)
-
+    def test_if_elif_else_flattening(self):
+        src = (
+            "def test_elif(x):\n"
+            "    y = 0\n"
+            "    if x == 1:\n"
+            "        print('a')\n"
+            "        y = 1\n"
+            "    elif x == 2:\n"
+            "        print('b')\n"
+            "        y = 2\n"
+            "    else:\n"
+            "        print('c')\n"
+            "        y = 3\n"
+            "    print('done')\n"
+            "    return y\n"
+        )
+        out = decompile(src)
+        self.assertIn("elif x == 2:", out)
+        self.assertNotIn("else:\n        if", out)
     def test_for_loop(self):
         out = decompile("for i in range(3):\n    print(i)\n")
         assert_contains(out, "for i in range(3):", "print(i)")
