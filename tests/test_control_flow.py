@@ -51,13 +51,9 @@ class TestControlFlow(unittest.TestCase):
         self.assertIn("else:", out)
 
 
-    @unittest.expectedFailure
+    @unittest.skipIf(sys.version_info >= (3, 10), "try..else only implemented for 3.9 so far")
     def test_try_else_strict(self):
-        """try...else: verify `else:` is emitted and `elif` is absent.
-        
-        Currently expected to fail on all versions due to pycrefine architectural limitation
-        where try..else is merged into the execution path without explicit else.
-        """
+        """try...else: verify `else:` is emitted and `elif` is absent."""
         src = (
             "def f():\n"
             "    try:\n"

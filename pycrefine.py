@@ -4773,6 +4773,26 @@ class Decompiler39(DecompilerGeneric):
                         if self.instructions[j].offset == end_reraise:
                             break
 
+            if is_except:
+                try_end_idx = next((k for k, x in enumerate(self.instructions) if x.offset == target), -1) - 1
+                if try_end_idx >= 0:
+                    try_jump = self.instructions[try_end_idx]
+                    if try_jump.opname in ("JUMP_FORWARD", "JUMP_ABSOLUTE"):
+                        else_start = getattr(self, "_get_jump_target")(try_jump)
+                        if else_start > target:
+                            post_except_targets = []
+                            for k in range(try_end_idx + 1, len(self.instructions)):
+                                if self.instructions[k].offset >= else_start:
+                                    break
+                                inner_ins = self.instructions[k]
+                                if inner_ins.opname in ("JUMP_FORWARD", "JUMP_ABSOLUTE"):
+                                    jt = getattr(self, "_get_jump_target")(inner_ins)
+                                    if jt > else_start:
+                                        post_except_targets.append(jt)
+                            if post_except_targets:
+                                else_end = min(post_except_targets)
+                                self._else_starts[else_start] = else_end
+
     # clean instruction dispatch for 3.9-specific opcodes
     def _handle_instruction(self, instr: BytecodeInstruction):
         # Suppress exception-path finally bodies
@@ -4800,6 +4820,11 @@ class Decompiler39(DecompilerGeneric):
         # Scoped suppression: clear except-zone state when we exit the handler scope.
         if self._except_end_offsets and instr.offset >= self._except_end_offsets[-1]:
             self._except_end_offsets.pop()
+
+        if hasattr(self, "_else_starts") and instr.offset in self._else_starts:
+            self._append_reconstructed("else:")
+            self.indent_level += 1
+            self.blocks.append((self._else_starts[instr.offset], "else"))
 
         # Binary ops (3.9 uses named opcodes, not BINARY_OP)
         _bin39 = {
