@@ -683,13 +683,13 @@ class TestChainedExpressions(unittest.TestCase):
         out = decompile(src)
         self.assertIn("a < b", out)
         self.assertIn("c < d", out)
-        self.assertNotIn(" < b < ", out)
+        self.assertNotRegex(out, r'<\s*b\s*<')
 
     def test_chain_negative_mismatched_ops(self):
         src = "def f(a, b, c):\n    if a < b and b + 1 < c:\n        return True\n    return False\n"
         out = decompile(src)
         self.assertIn("and", out)
-        self.assertNotIn(" < b < ", out)
+        self.assertNotRegex(out, r'<\s*b\s*<')
 
 
 if __name__ == "__main__":
