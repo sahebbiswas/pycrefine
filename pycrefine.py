@@ -53,6 +53,7 @@ _COMPOUND_EXPR_OPS = frozenset((
     "UNARY_NOT", "UNARY_NEGATIVE", "UNARY_POSITIVE", "UNARY_INVERT",
     "BUILD_TUPLE", "BUILD_LIST", "BUILD_SET", "BUILD_MAP",
     "TO_BOOL", "FORMAT_VALUE", "FORMAT_SIMPLE", "BUILD_STRING", "BINARY_SUBSCR", "BINARY_SLICE", "BUILD_SLICE",
+    "DUP_TOP", "DUP_TOP_TWO", "ROT_TWO", "ROT_THREE", "ROT_FOUR",
     # Python 3.9 binary opcodes:
     "BINARY_ADD", "BINARY_SUBTRACT", "BINARY_MULTIPLY", "BINARY_TRUE_DIVIDE",
     "BINARY_FLOOR_DIVIDE", "BINARY_MODULO", "BINARY_POWER", "BINARY_LSHIFT",
@@ -1062,7 +1063,8 @@ class DecompilerGeneric(DecompilerBase):
             "BINARY_AND", "BINARY_OR", "BINARY_XOR", "BINARY_LSHIFT",
             "BINARY_RSHIFT", "BINARY_POWER", "BINARY_MATRIX_MULTIPLY",
             "CALL_FUNCTION", "CALL", "CALL_METHOD", "CALL_FUNCTION_KW",
-            "RETURN_VALUE", "RETURN_CONST",
+            "RETURN_VALUE", "RETURN_CONST", "YIELD_VALUE",
+            "LIST_APPEND", "SET_ADD", "MAP_ADD",
         ))
         for idx, ins in enumerate(self.instructions):
             if not self._is_compound_cjump(ins.opname):
@@ -1465,20 +1467,42 @@ class DecompilerGeneric(DecompilerBase):
                 break  # something else → end of group
 
 
+            def get_logical_t(t_val):
+                curr = t_val
+                visited = set()
+                while curr not in visited:
+                    visited.add(curr)
+                    idx = offset_to_idx.get(curr)
+                    if idx is None:
+                        break
+                    ins = instrs[idx]
+                    if ins.opname in getattr(self, "_GENERIC_SKIP_OPS", ("NOP", "RESUME", "CACHE")):
+                        curr = instrs[idx+1].offset
+                        continue
+                    if ins.opname == "POP_TOP":
+                        look = idx + 1
+                        while look < len(instrs) and instrs[look].opname in getattr(self, "_GENERIC_SKIP_OPS", ("NOP", "RESUME", "CACHE")):
+                            look += 1
+                        if look < len(instrs) and instrs[look].opname in ("JUMP_FORWARD", "JUMP_ABSOLUTE"):
+                            curr = self._get_jump_target(instrs[look])
+                            continue
+                    break
+                return curr
+
             valid = False
             while len(group) >= 2:
                 last_jump_idx = group[-1][0]
                 body_target = -1
                 for k in range(last_jump_idx + 1, n):
                     if instrs[k].opname not in _COMPOUND_SKIP:
-                        body_target = instrs[k].offset
+                        body_target = get_logical_t(instrs[k].offset)
                         break
-                end_target = self._get_jump_target(group[-1][1])
-                jump_starts = {g[3] for g in group}
+                end_target = get_logical_t(self._get_jump_target(group[-1][1]))
+                jump_starts = {get_logical_t(g[3]) for g in group}
                 
                 valid = True
                 for (_, jinstr, _, _) in group:
-                    t = self._get_jump_target(jinstr)
+                    t = get_logical_t(self._get_jump_target(jinstr))
                     if t == body_target:
                         pass
                     elif t == end_target or t in jump_starts:
@@ -1500,9 +1524,14 @@ class DecompilerGeneric(DecompilerBase):
             # -----------------------------------------------------------
             parts: list = []  # list of (cond_str, is_or_connector, next_t)
 
+            sub = _pick_decompiler_class(self)(self.code_obj, self.indent_level, self.beautification_level)
+            
             for _, jinstr, expr_instrs, _ in group:
-                raw_expr = self._eval_cond_expr(expr_instrs)
-                t = self._get_jump_target(jinstr)
+                for xi in expr_instrs:
+                    sub._handle_instruction(xi)
+                raw_expr = str(sub.stack.pop()) if sub.stack else "?"
+                
+                t = get_logical_t(self._get_jump_target(jinstr))
                 op = jinstr.opname
                 is_success_type = ("IF_TRUE" in op)
                 
@@ -1531,6 +1560,34 @@ class DecompilerGeneric(DecompilerBase):
             # on jump targets. A jump that targets a point before the current 
             # "final exit" defines the boundary of a local subgroup.
             
+            def _try_chain_exprs(e1: str, e2: str, b_level: str):
+                if b_level not in ('core', 'aggressive'):
+                    return None
+                ops = [' <= ', ' >= ', ' < ', ' > ', ' == ', ' != ', ' in ', ' not in ', ' is ', ' is not ']
+                e2_left = None
+                e2_remainder = None
+                depth = 0
+                for idx, char in enumerate(e2):
+                    if char == '(':
+                        depth += 1
+                    elif char == ')':
+                        depth -= 1
+                    elif depth == 0:
+                        for op in ops:
+                            if e2.startswith(op, idx):
+                                e2_left = e2[:idx]
+                                e2_remainder = e2[idx:]
+                                break
+                        if e2_left is not None:
+                            break
+                if not e2_left:
+                    return None
+                if e1.endswith(e2_left):
+                    e1_prefix = e1[:-len(e2_left)]
+                    if any(e1_prefix.endswith(op) for op in ops):
+                        return e1_prefix + e2_left + e2_remainder
+                return None
+
             def join_flat(s_idx, e_idx):
                 """Linearly joins parts[s_idx:e_idx] without recursion."""
                 comb = parts[s_idx][0]
@@ -1540,7 +1597,16 @@ class DecompilerGeneric(DecompilerBase):
                     if c == "and" and h_or:
                         comb = f"({comb})"
                         h_or = False
-                    comb = f"{comb} {c} {parts[k][0]}"
+                    
+                    next_term = parts[k][0]
+                    chained = None
+                    if c == "and":
+                        chained = _try_chain_exprs(comb, next_term, self.beautification_level)
+                    if chained:
+                        comb = chained
+                    else:
+                        comb = f"{comb} {c} {next_term}"
+                    
                     h_or = h_or or (c == "or")
                 return comb, parts[e_idx-1][1], h_or
 
@@ -1588,7 +1654,13 @@ class DecompilerGeneric(DecompilerBase):
                     if conn == "and" and next_has_or:
                         next_expr = f"({next_expr})"
                     
-                    combined = f"{combined} {conn} {next_expr}"
+                    chained = None
+                    if conn == "and" and not has_or and not next_has_or:
+                        chained = _try_chain_exprs(combined, next_expr, self.beautification_level)
+                    if chained:
+                        combined = chained
+                    else:
+                        combined = f"{combined} {conn} {next_expr}"
                     has_or = has_or or (conn == "or") or next_has_or
                 
                 return combined, subs[-1][1], has_or
@@ -2660,6 +2732,8 @@ class DecompilerGeneric(DecompilerBase):
             "GET_ITER": self._op_no_op, "UNPACK_SEQUENCE": self._op_unpack_sequence,
             "LIST_EXTEND": self._op_list_extend, "DICT_MERGE": self._op_dict_merge,
             "DICT_UPDATE": self._op_dict_merge,
+            "LIST_APPEND": self._op_list_append, "SET_ADD": self._op_set_add,
+            "MAP_ADD": self._op_map_add,
             
             # Secondary loads
             "LOAD_ATTR": self._op_load_attr, "LOAD_METHOD": self._op_load_attr,
@@ -4357,6 +4431,19 @@ class DecompilerGeneric(DecompilerBase):
                 self.stack.append(f"[*{it}]" if it.startswith("(") else f"list({it})")
             else:
                 self.stack.append(f"[*{lst}, *{it}]")
+
+    def _op_list_append(self, instr: BytecodeInstruction):
+        val = self.stack.pop() if self.stack else "None"
+        self._append_reconstructed(f"yield {val}")
+
+    def _op_set_add(self, instr: BytecodeInstruction):
+        val = self.stack.pop() if self.stack else "None"
+        self._append_reconstructed(f"yield {val}")
+
+    def _op_map_add(self, instr: BytecodeInstruction):
+        val = self.stack.pop() if self.stack else "None"
+        key = self.stack.pop() if self.stack else "None"
+        self._append_reconstructed(f"yield {key}: {val}")
 
 
     def _op_dict_merge(self, instr: BytecodeInstruction):
