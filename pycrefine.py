@@ -462,7 +462,7 @@ def _is_anonymous_func_body(first_line: str) -> bool:
 # ---------------------------------------------------------------------------
 
 class DecompilerBase:
-    def __init__(self, code_obj: types.CodeType, indent_level: int = 0):
+    def __init__(self, code_obj: types.CodeType, indent_level: int = 0, beautification_level: str = 'core'):
         self.code_obj = code_obj
         self.instructions: List[BytecodeInstruction] = []
         self.reconstructed: List[str] = []
@@ -470,6 +470,7 @@ class DecompilerBase:
         self.starts_as_function = (indent_level > 0)
         self.blocks: List[Tuple[int, str]] = []  # stack of (end_offset, type)
         self.pc = 0
+        self.beautification_level = beautification_level
 
     def _disassemble(self):
         """Convert code object bytecode into a list of BytecodeInstruction."""
@@ -586,7 +587,7 @@ class DecompilerGeneric(DecompilerBase):
     def __init_subclass__(cls, **kw):
         super().__init_subclass__(**kw)
 
-    def __init__(self, code_obj: types.CodeType, indent_level: int = 0):
+    def __init__(self, code_obj: types.CodeType, indent_level: int = 0, beautification_level: str = 'core'):
         """
         Initialize the decompiler state for generic Python bytecode reconstruction.
         
@@ -618,7 +619,7 @@ class DecompilerGeneric(DecompilerBase):
             _pending_finally_merge (Optional[int]): Merge offset currently pending emission, if any.
             _nop_to_push_exc (dict): Mapping from try-entry NOP offsets to the following PUSH_EXC_INFO offset (populated by prescan).
         """
-        super().__init__(code_obj, indent_level)
+        super().__init__(code_obj, indent_level, beautification_level)
         self.stack: List[Union[str, Tuple[Any, ...]]] = []
         self.has_doc = False
         # Tracks offsets of while-loop body starts so we can suppress the
@@ -651,7 +652,7 @@ class DecompilerGeneric(DecompilerBase):
     # Main loop
     # ------------------------------------------------------------------
 
-    def decompile(self, beautification_level: str = 'core') -> str:
+    def decompile(self) -> str:
         """
         Decompile the stored code object into a human-readable Python source string.
         
@@ -660,7 +661,6 @@ class DecompilerGeneric(DecompilerBase):
         Returns:
             The reconstructed Python source as a single string, post-processed and ending with a single trailing newline.
         """
-        start_indent = self.indent_level
         self._disassemble()
         self.pc = 0
         self.blocks = []
@@ -742,7 +742,7 @@ class DecompilerGeneric(DecompilerBase):
                         self.reconstructed[last_idx] = line[:indent] + "pass"
 
         raw_source = "\n".join(str(s) for s in self.reconstructed).rstrip()
-        return post_process_source(raw_source, beautification_level=beautification_level)
+        return post_process_source(raw_source, beautification_level=self.beautification_level)
 
     def _close_blocks(self, offset: int):
         """
@@ -3214,7 +3214,7 @@ class DecompilerGeneric(DecompilerBase):
                 params.append(varkw_name)
 
             dec_class = _pick_decompiler_class(self)
-            dec = dec_class(inner_code, indent_level=1)
+            dec = dec_class(inner_code, indent_level=1, beautification_level=self.beautification_level)
             body = dec.decompile()
             sig = f"def {inner_code.co_name}({', '.join(params)}):"
             self.stack.append(("func", f"{sig}\n{body}"))
@@ -5716,7 +5716,7 @@ def _get_python_version_from_magic(version_id: int) -> Optional[str]:
     if version_id >= 3560: return "3.14+"
     return None
 
-def get_decompiler(filepath: str) -> DecompilerBase:
+def get_decompiler(filepath: str, beautification_level: str = 'core') -> DecompilerBase:
     with open(filepath, "rb") as f:
         all_data = f.read()
 
@@ -5778,11 +5778,11 @@ def get_decompiler(filepath: str) -> DecompilerBase:
 
     # corrected dispatch table
     if 3410 <= version_id <= 3429:      # 3.9
-        return Decompiler39(code_obj)
+        return Decompiler39(code_obj, beautification_level=beautification_level)
     elif version_id >= 3560:            # 3.14+
-        return Decompiler314(code_obj)
+        return Decompiler314(code_obj, beautification_level=beautification_level)
     elif version_id >= 3430:            # 3.10, 3.11, 3.12, 3.13
-        return Decompiler311Plus(code_obj)
+        return Decompiler311Plus(code_obj, beautification_level=beautification_level)
 
     # Fallback for very old or unrecognised versions
     return DecompilerGeneric(code_obj)
@@ -5803,15 +5803,15 @@ def main():
     )
     parser.add_argument(
         "--beautification-level",
-        choices=['core', 'aggressive'], default='core',
-        help="Level of code beautification to apply. 'core' collapses else-if to elif. 'aggressive' is a stub for future use."
+        choices=['none', 'core', 'aggressive'], default='core',
+        help="Level of code beautification to apply. 'none' does no beautification. 'core' collapses else-if to elif. 'aggressive' is a stub for future use."
     )
     
     args = parser.parse_args()
     
     try:
-        decompiler = get_decompiler(args.input)
-        output_text = decompiler.decompile(beautification_level=args.beautification_level)
+        decompiler = get_decompiler(args.input, args.beautification_level)
+        output_text = decompiler.decompile()
         
         if args.output:
             try:
