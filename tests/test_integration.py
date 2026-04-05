@@ -1,8 +1,9 @@
-import unittest
 import os
-import sys
 import tempfile
-from .test_helpers import decompile, assert_contains, _run39_full_impl
+import unittest
+
+from .test_helpers import _run39_full_impl, assert_contains, decompile
+
 
 class TestEdgeCases(unittest.TestCase):
     def test_empty_module(self):
@@ -84,6 +85,7 @@ class TestEdgeCases(unittest.TestCase):
         out = decompile(src)
         assert_contains(out, "def outer(", "def middle(", "def inner(")
 
+
 class TestErrorHandling(unittest.TestCase):
     def test_nonexistent_file_raises(self):
         with self.assertRaises((FileNotFoundError, OSError)):
@@ -91,7 +93,6 @@ class TestErrorHandling(unittest.TestCase):
             get_decompiler("/nonexistent/path/file.pyc")
 
     def test_too_short_file_raises(self):
-        import struct
         with tempfile.NamedTemporaryFile(suffix=".pyc", delete=False) as f:
             f.write(b"\x00" * 4)
             path = f.name
@@ -118,13 +119,14 @@ class TestErrorHandling(unittest.TestCase):
 
     def test_invalid_magic_inferred_version_in_error(self):
         """ValueError for a version-valid but host-incompatible magic number includes the version name."""
-        import struct, importlib.util
+        import importlib.util
+        import struct
         with tempfile.NamedTemporaryFile(suffix=".pyc", delete=False) as f:
             # 3310 is Python 3.4. This is unsupported.
-            f.write(struct.pack("<I", 3310)) 
+            f.write(struct.pack("<I", 3310))
             f.write(b"\x00" * 12)
             path = f.name
-        
+
         host_magic = int.from_bytes(importlib.util.MAGIC_NUMBER, "little")
         if (host_magic & 0xFFFF) != 3310:
             try:
@@ -140,7 +142,7 @@ class TestErrorHandling(unittest.TestCase):
         """ValueError for corrupted marshal data includes the inferred version name."""
         import struct
         with tempfile.NamedTemporaryFile(suffix=".pyc", delete=False) as f:
-            f.write(struct.pack("<I", 3495)) 
+            f.write(struct.pack("<I", 3495))
             f.write(b"\x00" * 12)
             f.write(b"GARBAGE")
             path = f.name
@@ -170,7 +172,7 @@ class TestErrorHandling(unittest.TestCase):
             "    try:\n"
             "        for item in items:\n"
             "            if item:\n"
-                "                print(item)\n"
+            "                print(item)\n"
             "    except Exception:\n"
             "        pass\n"
         )
@@ -179,22 +181,24 @@ class TestErrorHandling(unittest.TestCase):
 
     def test_empty_decompiler_output_emits_warning(self):
         """If decompile() returns an empty string, main() prints a warning to stderr."""
-        from unittest.mock import patch, MagicMock
-        from pycrefine import main
         import io
-        
+        from unittest.mock import MagicMock, patch
+
+        from pycrefine import main
+
         mock_dec = MagicMock()
-        mock_dec.decompile.return_value = "" 
-        
+        mock_dec.decompile.return_value = ""
+
         with patch("pycrefine.get_decompiler", return_value=mock_dec), \
-             patch("sys.argv", ["pycrefine", "dummy.pyc"]), \
-             patch("sys.stderr", new_callable=io.StringIO) as mock_stderr, \
-             patch("sys.exit") as mock_exit:
-            
+                patch("sys.argv", ["pycrefine", "dummy.pyc"]), \
+                patch("sys.stderr", new_callable=io.StringIO) as mock_stderr, \
+                patch("sys.exit") as mock_exit:
+
             main()
-            
+
             self.assertIn("Warning: Decompiler returned no source code", mock_stderr.getvalue())
             mock_exit.assert_called_with(1)
+
 
 class TestVerifyScenesBugs(unittest.TestCase):
     def test_interrupted_if_combination(self):
@@ -277,7 +281,7 @@ class TestVerifyScenesBugs(unittest.TestCase):
             I(0, "LOAD_CONST",       1, 'value:',   2,  None, False),
             I(0, "LOAD_FAST",        0, "in_a",     4,  None, False),
             I(0, "COMPARE_OP",       7, "not in",   6,  None, False),
-            I(0, "POP_JUMP_IF_FALSE",0, 18,         8,  None, False),
+            I(0, "POP_JUMP_IF_FALSE", 0, 18,         8,  None, False),
             I(0, "LOAD_FAST",        0, "in_a",    10,  None, False),
             I(0, "JUMP_FORWARD",     0, 28,        12,  None, False),
             I(0, "LOAD_FAST",        0, "in_a",    18,  None, True),
@@ -328,6 +332,7 @@ class TestVerifyScenesBugs(unittest.TestCase):
         self.assertIn("in_a, in_b = api_21(None)", out)
         self.assertIn("'not found' if in_b is None else 'reset'", out)
 
+
 class TestFindingsRefinement(unittest.TestCase):
     def test_blank_separator_nested_logic(self):
         src = "def outer(x):\n    if x > 0:\n        print(x)\ndef another():\n    pass\n"
@@ -357,6 +362,7 @@ class TestFindingsRefinement(unittest.TestCase):
         src = "(a, b), c = [[1, 2], 3]\n"
         out = decompile(src)
         self.assertIn("(a, b), c =", out)
+
 
 if __name__ == "__main__":
     unittest.main()

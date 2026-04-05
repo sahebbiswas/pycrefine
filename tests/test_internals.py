@@ -1,20 +1,15 @@
-import unittest
+import io
+import marshal
 import os
 import struct
 import tempfile
-import io
-import marshal
 import types
-from pycrefine import (
-    MarshalParser,
-    Decompiler39,
-    BytecodeInstruction,
-    get_decompiler,
-    DecompilerGeneric,
-    Decompiler311Plus,
-)
-from .test_helpers import _compile, decompile, _run39_full_impl
+import unittest
 
+from pycrefine import (BytecodeInstruction, Decompiler39, Decompiler311Plus,
+                       DecompilerGeneric, MarshalParser, get_decompiler)
+
+from .test_helpers import _compile, _run39_full_impl, decompile
 
 
 class TestDecompilerDispatch(unittest.TestCase):
@@ -101,6 +96,7 @@ class TestDecompilerDispatch(unittest.TestCase):
         """Python 3.14 magic range -> Decompiler314."""
         self._check_version_dispatch(3560, "Decompiler314")
 
+
 class TestMarshalParser(unittest.TestCase):
     """Unit tests for the custom marshal reader (cross-version .pyc support)."""
 
@@ -176,6 +172,7 @@ class TestMarshalParser(unittest.TestCase):
         self.assertIsNone(first)
         self.assertIsNone(second)
 
+
 class TestMarshalParserCodeType(unittest.TestCase):
     """
     Verify that MarshalParser._load_code uses the correct CodeType constructor
@@ -220,11 +217,13 @@ class TestMarshalParserCodeType(unittest.TestCase):
 
     def test_roundtrip_is_dis_able(self):
         """Code objects must be accepted by dis.dis()."""
-        import dis, io
+        import dis
+        import io
         code = self._roundtrip("x = 1\ny = x + 2\n")
         buf = io.StringIO()
         dis.dis(code, file=buf)
         self.assertGreater(len(buf.getvalue()), 0)
+
 
 class TestDecompiler39Python39Fixes(unittest.TestCase):
     def _run39_full(self, instructions):
@@ -440,48 +439,61 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
             Instr(0, "RETURN_VALUE", None, None, 30, None, False),
         ])
         for line in out.splitlines():
-            if "x = 0" in line: self.assertTrue(line.startswith("    "))
+            if "x = 0" in line:
+                self.assertTrue(line.startswith("    "))
 
     def test_dup_top_not_exception_match_falls_through(self):
         Instr = BytecodeInstruction
         code = compile("pass", "<test>", "exec")
         dec = Decompiler39(code)
-        dec.instructions = [Instr(0, "LOAD_CONST", 0, 42, 0, None, False), Instr(0, "DUP_TOP", None, None, 2, None, False)]
+        dec.instructions = [Instr(0, "LOAD_CONST", 0, 42, 0, None, False),
+                            Instr(0, "DUP_TOP", None, None, 2, None, False)]
         dec.stack = [42]
         dec._handle_instruction(dec.instructions[1])
         self.assertEqual(len(dec.stack), 2)
 
     def test_inplace_sub_emits_augassign(self):
         Instr = BytecodeInstruction
-        out = self._run39([Instr(0, "LOAD_NAME", 0, "x", 0, None, False), Instr(0, "LOAD_CONST", 0, 1, 2, None, False), Instr(0, "INPLACE_SUBTRACT", None, None, 4, None, False), Instr(0, "STORE_NAME", 0, "x", 6, None, False), Instr(0, "RETURN_VALUE", None, None, 8, None, False)])
+        out = self._run39([Instr(0, "LOAD_NAME", 0, "x", 0, None, False), Instr(0, "LOAD_CONST", 0, 1, 2, None, False), Instr(
+            0, "INPLACE_SUBTRACT", None, None, 4, None, False), Instr(0, "STORE_NAME", 0, "x", 6, None, False), Instr(0, "RETURN_VALUE", None, None, 8, None, False)])
         self.assertIn("x -= 1", out)
 
     def test_inplace_mul_emits_augassign(self):
         Instr = BytecodeInstruction
-        out = self._run39([Instr(0, "LOAD_NAME", 0, "x", 0, None, False), Instr(0, "LOAD_CONST", 0, 2, 2, None, False), Instr(0, "INPLACE_MULTIPLY", None, None, 4, None, False), Instr(0, "STORE_NAME", 0, "x", 6, None, False), Instr(0, "RETURN_VALUE", None, None, 8, None, False)])
+        out = self._run39([Instr(0, "LOAD_NAME", 0, "x", 0, None, False), Instr(0, "LOAD_CONST", 0, 2, 2, None, False), Instr(
+            0, "INPLACE_MULTIPLY", None, None, 4, None, False), Instr(0, "STORE_NAME", 0, "x", 6, None, False), Instr(0, "RETURN_VALUE", None, None, 8, None, False)])
         self.assertIn("x *= 2", out)
 
     def test_inplace_xor_emits_augassign(self):
         Instr = BytecodeInstruction
-        out = self._run39([Instr(0, "LOAD_NAME", 0, "x", 0, None, False), Instr(0, "LOAD_CONST", 0, 5, 2, None, False), Instr(0, "INPLACE_XOR", None, None, 4, None, False), Instr(0, "STORE_NAME", 0, "x", 6, None, False), Instr(0, "RETURN_VALUE", None, None, 8, None, False)])
+        out = self._run39([Instr(0, "LOAD_NAME", 0, "x", 0, None, False), Instr(0, "LOAD_CONST", 0, 5, 2, None, False), Instr(
+            0, "INPLACE_XOR", None, None, 4, None, False), Instr(0, "STORE_NAME", 0, "x", 6, None, False), Instr(0, "RETURN_VALUE", None, None, 8, None, False)])
         self.assertIn("x ^= 5", out)
 
     def test_inplace_without_matching_store_falls_back(self):
         Instr = BytecodeInstruction
         dec = Decompiler39(compile("pass", "<test>", "exec"))
-        dec.stack = ["x", 1]; dec.instructions = [Instr(0,"L",0,"x",0,None,False), Instr(0,"C",0,1,2,None,False), Instr(0,"INPLACE_ADD",None,None,4,None,False), Instr(0,"STORE_NAME",1,"y",6,None,False)]
+        dec.stack = ["x", 1]
+        dec.instructions = [Instr(0, "L", 0, "x", 0, None, False), Instr(0, "C", 0, 1, 2, None, False), Instr(
+            0, "INPLACE_ADD", None, None, 4, None, False), Instr(0, "STORE_NAME", 1, "y", 6, None, False)]
         dec._handle_instruction(dec.instructions[2])
-        self.assertEqual(len(dec.stack), 1); self.assertIsInstance(dec.stack[-1], str)
+        self.assertEqual(len(dec.stack), 1)
+        self.assertIsInstance(dec.stack[-1], str)
 
     def test_complete_while_with_augassign(self):
         Instr = BytecodeInstruction
-        out = self._run39([Instr(0, "LOAD_CONST", 0, 0, 0, None, False), Instr(0, "STORE_NAME", 0, "n", 2, None, False), Instr(0, "LOAD_NAME", 0, "n", 4, None, False), Instr(0, "LOAD_CONST", 1, 3, 6, None, False), Instr(0, "COMPARE_OP", 0, "<", 8, None, False), Instr(0, "POP_JUMP_IF_FALSE", 22, 22, 10, None, False), Instr(0, "LOAD_NAME", 0, "n", 12, None, False), Instr(0, "LOAD_CONST", 2, 1, 14, None, False), Instr(0, "INPLACE_ADD", None, None, 16, None, False), Instr(0, "STORE_NAME", 0, "n", 18, None, False), Instr(0, "JUMP_ABSOLUTE", 4, 4, 20, None, False), Instr(0, "RETURN_VALUE", None, None, 22, None, True)])
-        self.assertIn("while", out); self.assertIn("n += 1", out)
+        out = self._run39([Instr(0, "LOAD_CONST", 0, 0, 0, None, False), Instr(0, "STORE_NAME", 0, "n", 2, None, False), Instr(0, "LOAD_NAME", 0, "n", 4, None, False), Instr(0, "LOAD_CONST", 1, 3, 6, None, False), Instr(0, "COMPARE_OP", 0, "<", 8, None, False), Instr(0, "POP_JUMP_IF_FALSE", 22, 22, 10, None, False), Instr(
+            0, "LOAD_NAME", 0, "n", 12, None, False), Instr(0, "LOAD_CONST", 2, 1, 14, None, False), Instr(0, "INPLACE_ADD", None, None, 16, None, False), Instr(0, "STORE_NAME", 0, "n", 18, None, False), Instr(0, "JUMP_ABSOLUTE", 4, 4, 20, None, False), Instr(0, "RETURN_VALUE", None, None, 22, None, True)])
+        self.assertIn("while", out)
+        self.assertIn("n += 1", out)
 
     def test_complete_try_except_with_store(self):
         Instr = BytecodeInstruction
-        out = self._run39([Instr(0, "SETUP_FINALLY", None, 14, 0, None, False), Instr(0, "LOAD_CONST", 0, 42, 2, None, False), Instr(0, "STORE_NAME", 0, "x", 4, None, False), Instr(0, "POP_BLOCK", None, None, 6, None, False), Instr(0, "JUMP_FORWARD", None, 30, 8, None, False), Instr(0, "DUP_TOP", None, None, 14, None, True), Instr(0, "LOAD_NAME", 1, "ValueError", 16, None, False), Instr(0, "COMPARE_OP", 10, "exception match", 18, None, False), Instr(0, "POP_JUMP_IF_FALSE", 28, 28, 20, None, False), Instr(0, "POP_TOP", None, None, 22, None, False), Instr(0, "POP_TOP", None, None, 24, None, False), Instr(0, "LOAD_CONST", 2, 0, 26, None, False), Instr(0, "STORE_NAME", 0, "x", 28, None, False), Instr(0, "POP_EXCEPT", None, None, 30, None, False), Instr(0, "RETURN_VALUE", None, None, 32, None, False)])
-        self.assertIn("try:", out); self.assertIn("except ValueError:", out)
+        out = self._run39([Instr(0, "SETUP_FINALLY", None, 14, 0, None, False), Instr(0, "LOAD_CONST", 0, 42, 2, None, False), Instr(0, "STORE_NAME", 0, "x", 4, None, False), Instr(0, "POP_BLOCK", None, None, 6, None, False), Instr(0, "JUMP_FORWARD", None, 30, 8, None, False), Instr(0, "DUP_TOP", None, None, 14, None, True), Instr(0, "LOAD_NAME", 1, "ValueError", 16, None, False), Instr(
+            0, "COMPARE_OP", 10, "exception match", 18, None, False), Instr(0, "POP_JUMP_IF_FALSE", 28, 28, 20, None, False), Instr(0, "POP_TOP", None, None, 22, None, False), Instr(0, "POP_TOP", None, None, 24, None, False), Instr(0, "LOAD_CONST", 2, 0, 26, None, False), Instr(0, "STORE_NAME", 0, "x", 28, None, False), Instr(0, "POP_EXCEPT", None, None, 30, None, False), Instr(0, "RETURN_VALUE", None, None, 32, None, False)])
+        self.assertIn("try:", out)
+        self.assertIn("except ValueError:", out)
+
 
 class TestDecompiler39ExcCleanupIndent(unittest.TestCase):
     def _run39_full(self, instructions):
@@ -489,12 +501,13 @@ class TestDecompiler39ExcCleanupIndent(unittest.TestCase):
 
     def test_exc_cleanup_setup_finally_no_indent_change(self):
         from pycrefine import BytecodeInstruction as Instr
+
         # Full layout as per monolithic instructions
         out = self._run39_full([
             Instr(0, "SETUP_FINALLY",         None, 14,  0, None, False),
             Instr(0, "POP_BLOCK",             None, None, 2, None, False),
             Instr(0, "JUMP_FORWARD",          None, 50,  4, None, False),
-            Instr(0, "DUP_TOP",               None, None,14, None, True),
+            Instr(0, "DUP_TOP",               None, None, 14, None, True),
             Instr(0, "LOAD_GLOBAL",           0, "socket", 16, None, False),
             Instr(0, "LOAD_ATTR",             1, "error",  18, None, False),
             Instr(0, "JUMP_IF_NOT_EXC_MATCH", None, 48,    20, None, False),
@@ -555,13 +568,13 @@ class TestDecompiler39ExcCleanupIndent(unittest.TestCase):
             Instr(0, "SETUP_FINALLY",      None, 14,  4, None, False),
             Instr(0, "POP_BLOCK",          None, None, 6, None, False),
             Instr(0, "JUMP_ABSOLUTE",      None, 20,   8, None, False),
-            Instr(0, "POP_BLOCK",          None, None,10, None, False),
+            Instr(0, "POP_BLOCK",          None, None, 10, None, False),
             Instr(0, "JUMP_ABSOLUTE",      None, 0,   12, None, False),
-            Instr(0, "DUP_TOP",            None, None,14, None, True),
-            Instr(0, "POP_TOP",            None, None,16, None, False),
-            Instr(0, "POP_TOP",            None, None,18, None, False),
+            Instr(0, "DUP_TOP",            None, None, 14, None, True),
+            Instr(0, "POP_TOP",            None, None, 16, None, False),
+            Instr(0, "POP_TOP",            None, None, 18, None, False),
             Instr(0, "LOAD_CONST",         0, None,   20, None, True),
-            Instr(0, "RETURN_VALUE",        None, None,22, None, False),
+            Instr(0, "RETURN_VALUE",        None, None, 22, None, False),
         ])
         self.assertIn("break", out)
 
@@ -572,16 +585,17 @@ class TestDecompiler39ExcCleanupIndent(unittest.TestCase):
             Instr(0, "JUMP_ABSOLUTE",      None, 20,  2, None, False),
             Instr(0, "POP_BLOCK",          None, None, 4, None, False),
             Instr(0, "JUMP_ABSOLUTE",      None, 0,    6, None, False),
-            Instr(0, "DUP_TOP",            None, None,14, None, True),
-            Instr(0, "POP_TOP",            None, None,16, None, False),
-            Instr(0, "POP_TOP",            None, None,18, None, False),
+            Instr(0, "DUP_TOP",            None, None, 14, None, True),
+            Instr(0, "POP_TOP",            None, None, 16, None, False),
+            Instr(0, "POP_TOP",            None, None, 18, None, False),
             Instr(0, "LOAD_CONST",         0, None,   20, None, True),
-            Instr(0, "RETURN_VALUE",        None, None,22, None, False),
+            Instr(0, "RETURN_VALUE",        None, None, 22, None, False),
         ])
         for line in out.splitlines():
             if "break" in line:
                 self.assertTrue(line.startswith("        "),
-                    f"Break inside try should be indented twice (8 spaces), got: {line!r}")
+                                f"Break inside try should be indented twice (8 spaces), got: {line!r}")
+
 
 class TestStoreDerefDispatch(unittest.TestCase):
     def test_store_deref_closure_assignment_roundtrip(self):
@@ -603,7 +617,8 @@ class TestStoreDerefDispatch(unittest.TestCase):
         dec = Decompiler39(code)
         dec.stack = ["'hello'"]
         dec.indent_level = 0
-        store_deref = Instr(opcode=125, opname="STORE_DEREF", arg=0, argval="myvar", offset=0, starts_line=None, is_jump_target=False)
+        store_deref = Instr(opcode=125, opname="STORE_DEREF", arg=0, argval="myvar",
+                            offset=0, starts_line=None, is_jump_target=False)
         dec._handle_instruction(store_deref)
         out = "\n".join(dec.reconstructed)
         self.assertIn("myvar", out)
@@ -613,9 +628,11 @@ class TestStoreDerefDispatch(unittest.TestCase):
         dec = Decompiler39(code)
         self.assertIn("STORE_DEREF", dec._dispatch)
 
+
 class TestChainedComparisons(unittest.TestCase):
     def test_positive_chaining(self):
         from pycrefine import collapse_chained_comparisons
+
         # Basic case
         self.assertEqual(
             collapse_chained_comparisons("1 <= in_a", "in_a <= 10", "core"),
@@ -639,6 +656,7 @@ class TestChainedComparisons(unittest.TestCase):
 
     def test_negative_chaining(self):
         from pycrefine import collapse_chained_comparisons
+
         # Variable name substring overlap (should NOT match)
         self.assertIsNone(
             collapse_chained_comparisons("1 <= in_a", "a <= 10", "core")
@@ -652,6 +670,6 @@ class TestChainedComparisons(unittest.TestCase):
             collapse_chained_comparisons("1 <= in_a", "in_a <= 10", "none")
         )
 
+
 if __name__ == "__main__":
     unittest.main()
-

@@ -1,7 +1,8 @@
-import unittest
-import os
 import sys
-from .test_helpers import decompile, assert_contains
+import unittest
+
+from .test_helpers import assert_contains, decompile
+
 
 class TestBasicStatements(unittest.TestCase):
     def test_simple_assignment(self):
@@ -65,6 +66,7 @@ class TestBasicStatements(unittest.TestCase):
         out = decompile(src)
         self.assertGreater(len(out.strip()), 0)
 
+
 class TestAugmentedAssignment(unittest.TestCase):
     def _check_op(self, op: str, sym: str) -> None:
         src = f"x = 4\nx {op} 2\n"
@@ -92,6 +94,7 @@ class TestAugmentedAssignment(unittest.TestCase):
     def test_augassign_sequence(self):
         out = decompile("x = 5\nx += 3\nx -= 1\nx ^= 2\n")
         assert_contains(out, "x += 3", "x -= 1", "x ^= 2")
+
 
 class TestOperators(unittest.TestCase):
     def _check_binary(self, expr: str, expected: str) -> None:
@@ -138,6 +141,7 @@ class TestOperators(unittest.TestCase):
         out = decompile("x = 1\ny = x is not None\n")
         self.assertIn("is not", out)
 
+
 class TestComprehensions(unittest.TestCase):
     """Verifies that comprehensions decompile as expected using the yield representation
     for LIST_APPEND, SET_ADD, MAP_ADD inside inline comprehensions."""
@@ -173,6 +177,7 @@ class TestComprehensions(unittest.TestCase):
         out = decompile(src)
         self.assertNotIn("yield", out)
         self.assertIn("append", out)
+
 
 if __name__ == "__main__":
     unittest.main()
