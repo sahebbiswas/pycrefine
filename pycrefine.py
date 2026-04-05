@@ -90,7 +90,7 @@ _INPLACE_ASSIGN_MAP = {
 def flatten_elif(source: str) -> str:
     lines = source.split('\n')
     changed = False
-    
+
     out_lines = []
     i = 0
     while i < len(lines):
@@ -99,7 +99,52 @@ def flatten_elif(source: str) -> str:
         if stripped == "else:":
             base_indent_len = len(line) - len(stripped)
             base_indent = line[:base_indent_len]
+
+            # Guard 1: skip if inside a triple-quoted string.
+            # Walk all processed lines and track open/close triple-quote state.
+            in_triple = False
+            tq_state = None  # '"""' or "'''"
+            for prev in lines[:i]:
+                for delim in ('"""', "'''"):
+                    idx_d = 0
+                    while True:
+                        pos = prev.find(delim, idx_d)
+                        if pos == -1:
+                            break
+                        idx_d = pos + 3
+                        if tq_state is None:
+                            tq_state = delim
+                            in_triple = True
+                        elif tq_state == delim:
+                            tq_state = None
+                            in_triple = False
+            if in_triple:
+                out_lines.append(line)
+                i += 1
+                continue
+
+            # Guard 2: verify the controlling header above this `else:` is an
+            # `if` or `elif` at exactly base_indent_len (not `for`, `try`, etc.).
+            parent_ok = False
+            for p in range(i - 1, -1, -1):
+                prev_line = lines[p]
+                prev_stripped = prev_line.strip()
+                if not prev_stripped or prev_stripped.startswith('#'):
+                    continue
+                prev_indent_len = len(prev_line) - len(prev_line.lstrip())
+                if prev_indent_len <= base_indent_len:
+                    if prev_indent_len == base_indent_len and (
+                        prev_stripped.startswith("if ") or prev_stripped.startswith("elif ")
+                    ):
+                        parent_ok = True
+                    break
+                # Deeper indent — keep scanning upward.
+            if not parent_ok:
+                out_lines.append(line)
+                i += 1
+                continue
             
+
             j = i + 1
             while j < len(lines) and not lines[j].strip():
                 j += 1

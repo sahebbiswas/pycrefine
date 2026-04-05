@@ -31,6 +31,38 @@ class TestControlFlow(unittest.TestCase):
         out = decompile(src)
         self.assertIn("elif x == 2:", out)
         self.assertNotIn("else:\n        if", out)
+
+    def test_for_else_no_flattening(self):
+        """for...else: the beautifier must never inject an `elif` keyword."""
+        src = (
+            "def f(items):\n"
+            "    for x in items:\n"
+            "        if x:\n"
+            "            break\n"
+            "    else:\n"
+            "        print('not found')\n"
+            "        print('done')\n"
+        )
+        out = decompile(src)
+        self.assertNotIn("elif", out)
+        self.assertIn("for", out)
+
+    def test_try_else_no_flattening(self):
+        """try...else: the beautifier must never inject an `elif` keyword."""
+        src = (
+            "def f():\n"
+            "    try:\n"
+            "        risky = int('1')\n"
+            "    except ValueError:\n"
+            "        risky = 0\n"
+            "    else:\n"
+            "        print('ok', risky)\n"
+            "        print('done')\n"
+        )
+        out = decompile(src)
+        self.assertNotIn("elif", out)
+        self.assertIn("try:", out)
+
     def test_for_loop(self):
         out = decompile("for i in range(3):\n    print(i)\n")
         assert_contains(out, "for i in range(3):", "print(i)")
