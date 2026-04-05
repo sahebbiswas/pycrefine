@@ -31,7 +31,7 @@ class TestControlFlow(unittest.TestCase):
         )
         out = decompile(src)
         self.assertIn("elif x == 2:", out)
-        self.assertNotIn("else:\n        if", out)
+        self.assertNotRegex(out, r"else:\s*\n\s*if") 
 
     def test_for_else_no_flattening(self):
         """for...else: the beautifier must never inject an `elif` keyword."""

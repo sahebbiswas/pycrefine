@@ -486,7 +486,7 @@ class DecompilerBase:
                 argrepr=instr.argrepr,
             ))
 
-    def decompile(self, beautification_level: str = 'core') -> str:
+    def decompile(self) -> str:
         """
         Decompile the stored code object into a human-readable Python source string.
         
@@ -5732,7 +5732,7 @@ def get_decompiler(filepath: str, beautification_level: str = 'core') -> Decompi
     if magic != host_magic and not (3410 <= version_id <= 5000):
         # We don't recognize the magic or it's very old/corrupt
         input_ver = _get_python_version_from_magic(version_id)
-        host_ver = _get_python_version_from_magic(host_magic & 0xFFFF)
+        host_ver = _get_python_version_from_magic(host_version_id)
         
         msg = f"Invalid or unsupported Python magic number: 0x{magic:08x} (version id: {version_id})."
         if input_ver:
