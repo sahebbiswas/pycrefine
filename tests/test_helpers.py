@@ -1,14 +1,16 @@
 from __future__ import annotations
+from pycrefine import (BytecodeInstruction, Decompiler39,
+                       _block_opener_keyword, _collect_multiline_header,
+                       _line_is_in_triple_quoted_string, flatten_elif,
+                       get_decompiler, post_process_source)
 
+import ast
 import os
 import py_compile
-import tempfile
 import sys
+import tempfile
 import unittest
 from pathlib import Path
-from typing import Any, List, Tuple, Union
-import ast
-
 
 # ---------------------------------------------------------------------------
 # Path setup
@@ -16,16 +18,6 @@ import ast
 _HERE = Path(__file__).parent
 sys.path.insert(0, str(_HERE.parent))
 
-from pycrefine import (
-    BytecodeInstruction,
-    _block_opener_keyword,
-    _collect_multiline_header,
-    _line_is_in_triple_quoted_string,
-    flatten_elif,
-    get_decompiler,
-    post_process_source,
-    Decompiler39,
-)
 
 def _compile(src: str) -> str:
     """Compile *src* to a temp .pyc and return its path.  Caller must delete."""
@@ -39,6 +31,7 @@ def _compile(src: str) -> str:
     os.unlink(py_path)
     return pyc_path
 
+
 def decompile(src: str) -> str:
     """Compile *src* and decompile it; cleans up the .pyc automatically."""
     pyc = _compile(src)
@@ -48,6 +41,7 @@ def decompile(src: str) -> str:
         if os.path.exists(pyc):
             os.unlink(pyc)
 
+
 def assert_contains(output: str, *fragments: str) -> None:
     """Assert that every fragment appears somewhere in *output*."""
     for frag in fragments:
@@ -55,12 +49,14 @@ def assert_contains(output: str, *fragments: str) -> None:
             f"Expected fragment {frag!r} not found in decompiled output:\n{output}"
         )
 
+
 def assert_not_contains(output: str, *fragments: str) -> None:
     """Assert that none of the fragments appear in *output*."""
     for frag in fragments:
         assert frag not in output, (
             f"Unexpected fragment {frag!r} found in decompiled output:\n{output}"
         )
+
 
 def _run39_full_impl(instructions):
     """Shared helper to run Decompiler39 with all prescans on a synthetic instruction list."""
@@ -132,19 +128,19 @@ def _run39_full_impl(instructions):
         last_idx = len(dec.reconstructed) - 1
         while last_idx >= 0 and not dec.reconstructed[last_idx].strip():
             last_idx -= 1
-        
+
         if last_idx >= 0 and dec.reconstructed[last_idx].strip() == "return None":
             line = dec.reconstructed[last_idx]
             if not (line.startswith(" ") or line.startswith("\t")):
                 has_others = False
                 for i in range(last_idx):
-                     strip_line = dec.reconstructed[i].strip()
-                     if strip_line and not (
-                         strip_line.startswith('"""') or strip_line.startswith("'''")
-                     ):
-                         has_others = True
-                         break
-                
+                    strip_line = dec.reconstructed[i].strip()
+                    if strip_line and not (
+                        strip_line.startswith('"""') or strip_line.startswith("'''")
+                    ):
+                        has_others = True
+                        break
+
                 if has_others or getattr(dec, "has_doc", False):
                     dec.reconstructed.pop(last_idx)
                 else:
@@ -402,7 +398,6 @@ class TestFlattenElifMultilineHeaders(unittest.TestCase):
         src = "if (\n    a\n):\n    pass\nelse:\n    if (\n        b\n    ):\n        pass\n"
         out = flatten_elif(src)
         self.assertIn("elif", out)
-        import ast
         try:
             ast.parse(out)
         except SyntaxError as exc:
@@ -414,7 +409,6 @@ class TestFlattenElifMultilineHeaders(unittest.TestCase):
         out = flatten_elif(src)
         self.assertIn("elif b:", out)
         self.assertNotIn("else:", out)
-
 
 
 # ---------------------------------------------------------------------------

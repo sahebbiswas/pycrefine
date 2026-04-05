@@ -11,8 +11,8 @@ import sys
 import tokenize
 import traceback
 import types
-from typing import List, Optional, Any, Dict, Union, Tuple
 from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 # --- Magic Numbers & Search Windows ---
 _MAX_WITH_EXIT_SEARCH_WINDOW = 200
@@ -53,6 +53,7 @@ _COMPOUND_EXPR_OPS = frozenset((
     "UNARY_NOT", "UNARY_NEGATIVE", "UNARY_POSITIVE", "UNARY_INVERT",
     "BUILD_TUPLE", "BUILD_LIST", "BUILD_SET", "BUILD_MAP",
     "TO_BOOL", "FORMAT_VALUE", "FORMAT_SIMPLE", "BUILD_STRING", "BINARY_SUBSCR", "BINARY_SLICE", "BUILD_SLICE",
+    "DUP_TOP", "DUP_TOP_TWO", "ROT_TWO", "ROT_THREE", "ROT_FOUR",
     # Python 3.9 binary opcodes:
     "BINARY_ADD", "BINARY_SUBTRACT", "BINARY_MULTIPLY", "BINARY_TRUE_DIVIDE",
     "BINARY_FLOOR_DIVIDE", "BINARY_MODULO", "BINARY_POWER", "BINARY_LSHIFT",
@@ -62,12 +63,15 @@ _COMPOUND_EXPR_OPS = frozenset((
 
 _WHILE_TRIVIAL_OPS = frozenset({"NOP", "RESUME", "NOT_TAKEN", "CACHE", "COPY_FREE_VARS"})
 _TRY_SKIP_NOP = frozenset({"RESUME", "CACHE", "NOT_TAKEN"})
-_TRY_LOAD_OPS = frozenset({"LOAD_NAME", "LOAD_GLOBAL", "LOAD_FAST", "LOAD_DEREF", "LOAD_SMALL_INT", "LOAD_GLOBAL_MODULE"})
+_TRY_LOAD_OPS = frozenset({"LOAD_NAME", "LOAD_GLOBAL", "LOAD_FAST",
+                          "LOAD_DEREF", "LOAD_SMALL_INT", "LOAD_GLOBAL_MODULE"})
 _TRY_LOOP_HEADS = frozenset({"FOR_ITER", "GET_ITER", "GET_ANEXT", "GET_AWAITABLE"})
-_TRY_HANDLER_EXIT_OPS = frozenset({"POP_EXCEPT", "DELETE_FAST", "DELETE_NAME", "DELETE_GLOBAL", "STORE_FAST", "STORE_NAME"})
+_TRY_HANDLER_EXIT_OPS = frozenset({"POP_EXCEPT", "DELETE_FAST", "DELETE_NAME",
+                                  "DELETE_GLOBAL", "STORE_FAST", "STORE_NAME"})
 
 _IS_COMP_GEN_SKIP = frozenset({"POP_TOP", "CACHE", "NOP", "RESUME", "COPY", "NOT_TAKEN"})
-_IS_COMP_GEN_STOP = frozenset({"LOAD_CONST", "LOAD_NAME", "LOAD_FAST", "LOAD_GLOBAL", "LOAD_DEREF", "LOAD_SMALL_INT", "LOAD_ATTR", "PUSH_NULL", "RERAISE", "RAISE_VARARGS", "RETURN_CONST", "RETURN_VALUE", "JUMP_FORWARD"})
+_IS_COMP_GEN_STOP = frozenset({"LOAD_CONST", "LOAD_NAME", "LOAD_FAST", "LOAD_GLOBAL", "LOAD_DEREF", "LOAD_SMALL_INT",
+                              "LOAD_ATTR", "PUSH_NULL", "RERAISE", "RAISE_VARARGS", "RETURN_CONST", "RETURN_VALUE", "JUMP_FORWARD"})
 
 _GENERIC_SKIP_OPS = frozenset({"RESUME", "CACHE", "NOP", "NOT_TAKEN", "COPY_FREE_VARS", "EXTENDED_ARG"})
 
@@ -155,7 +159,7 @@ def _block_opener_keyword(lines: List[str], tail_idx: int, base_indent_len: int)
     closing brackets going backward until the running total reaches zero; that
     line is the opener.  Returns ``None`` when the opener cannot be found.
     """
-    _KW = ("if ", "elif ", "for ", "while ", "with ", "try:", "except", "finally:")
+    _KW = "if ", "elif ", "for ", "while ", "with ", "try:", "except", "finally:"
     tail_stripped = lines[tail_idx].strip()
     for kw in _KW:
         if tail_stripped.startswith(kw):
@@ -207,6 +211,39 @@ def _collect_multiline_header(lines: List[str], start_idx: int, header_indent_le
     return start_idx, first_stripped[kw_len:].rstrip()
 
 
+def collapse_chained_comparisons(e1: str, e2: str, b_level: str) -> Optional[str]:
+    """
+    Attempt to collapse implicit chained conditions (e.g. `a < b` and `b < c`)
+    into explicit python shorthand: `a < b < c`.
+    """
+    if b_level not in ('core', 'aggressive'):
+        return None
+    ops = [' <= ', ' >= ', ' < ', ' > ', ' == ', ' != ', ' in ', ' not in ', ' is ', ' is not ']
+    e2_left = None
+    e2_remainder = None
+    depth = 0
+    for idx, char in enumerate(e2):
+        if char == '(':
+            depth += 1
+        elif char == ')':
+            depth -= 1
+        elif depth == 0:
+            for op in ops:
+                if e2.startswith(op, idx):
+                    e2_left = e2[:idx]
+                    e2_remainder = e2[idx:]
+                    break
+            if e2_left is not None:
+                break
+    if not e2_left:
+        return None
+    if e1.endswith(e2_left):
+        e1_prefix = e1[:-len(e2_left)]
+        if any(e1_prefix.endswith(op) for op in ops):
+            return e1_prefix + e2_left + e2_remainder
+    return None
+
+
 def flatten_elif(source: str) -> str:
     lines = source.split('\n')
     changed = False
@@ -255,7 +292,6 @@ def flatten_elif(source: str) -> str:
                 out_lines.append(line)
                 i += 1
                 continue
-
 
             j = i + 1
             while j < len(lines) and not lines[j].strip():
@@ -313,7 +349,7 @@ def flatten_elif(source: str) -> str:
                         continue
         out_lines.append(line)
         i += 1
-        
+
     res = '\n'.join(out_lines)
     if changed:
         return flatten_elif(res)
@@ -324,11 +360,11 @@ def post_process_source(source: str, beautification_level: str = 'core') -> str:
     """Clean up decompiled output to be more Pythonic."""
     lines = source.split('\n')
     out_lines = []
-    
+
     current_imports = []
     current_froms = {}
     current_indent = None
-    
+
     def flush_imports():
         nonlocal current_imports, current_froms, current_indent
         if current_imports:
@@ -339,7 +375,7 @@ def post_process_source(source: str, beautification_level: str = 'core') -> str:
             for m in unique_mods:
                 out_lines.append(f"{current_indent}import {m}")
             current_imports.clear()
-            
+
         for mod, syms in current_froms.items():
             unique_syms = []
             for s in syms:
@@ -368,11 +404,11 @@ def post_process_source(source: str, beautification_level: str = 'core') -> str:
     while_parens_re = re.compile(
         r'^(\s*while\s+)\(' + _NO_KW + r'([^,()]+)\):$'
     )
-    
+
     for line in lines:
         imp_m = re.match(r'^([ \t]*)import\s+(.+)$', line)
         from_m = re.match(r'^([ \t]*)from\s+([A-Za-z0-9_.]+)\s+import\s+(.+)$', line)
-        
+
         handled = False
         if imp_m:
             indent, mods = imp_m.groups()
@@ -384,7 +420,7 @@ def post_process_source(source: str, beautification_level: str = 'core') -> str:
                 current_indent = indent
                 current_imports.extend(mods_list)
                 handled = True
-                
+
         elif from_m:
             indent, mod, syms = from_m.groups()
             sym_list = [s.strip() for s in syms.split(',')]
@@ -395,7 +431,7 @@ def post_process_source(source: str, beautification_level: str = 'core') -> str:
                 current_indent = indent
                 current_froms.setdefault(mod, []).extend(sym_list)
                 handled = True
-                
+
         if not handled:
             flush_imports()
             if imp_m:
@@ -421,11 +457,11 @@ def post_process_source(source: str, beautification_level: str = 'core') -> str:
                     line = return_parens_re.sub(r'\1\2', line)
                     line = if_parens_re.sub(r'\1\2:', line)
                     line = while_parens_re.sub(r'\1\2:', line)
-                
+
                 out_lines.append(line)
-                
+
     flush_imports()
-    
+
     text = '\n'.join(out_lines)
     text = re.sub(r'\n{3,}', '\n\n', text)
 
@@ -455,6 +491,7 @@ def post_process_source(source: str, beautification_level: str = 'core') -> str:
 # Data model
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class BytecodeInstruction:
     opcode: int
@@ -465,7 +502,6 @@ class BytecodeInstruction:
     starts_line: Optional[int]
     is_jump_target: bool
     argrepr: str = ""
-
 
 
 def _render_func_tuple(body_text: str, args: List[str]) -> str:
@@ -487,7 +523,7 @@ def _render_func_tuple(body_text: str, args: List[str]) -> str:
         return f"<func>({', '.join(args)})"
 
     # ── Case 1: comprehensions (genexpr / listcomp / setcomp / dictcomp) ───────
-    _comp_names = ("<genexpr>", "<listcomp>", "<setcomp>", "<dictcomp>")
+    _comp_names = "<genexpr>", "<listcomp>", "<setcomp>", "<dictcomp>"
     if any(name in lines[0] for name in _comp_names):
         # Choose the correct bracket style for each comprehension type.
         if "<listcomp>" in lines[0]:
@@ -498,7 +534,7 @@ def _render_func_tuple(body_text: str, args: List[str]) -> str:
             wrapper_open, wrapper_close = "(", ")"
 
         for_clause = None
-        if_clause  = None
+        if_clause = None
         yield_expr = None
 
         for line in lines[1:]:
@@ -577,13 +613,14 @@ def _is_anonymous_func_body(first_line: str) -> bool:
 # Base
 # ---------------------------------------------------------------------------
 
+
 class DecompilerBase:
     def __init__(self, code_obj: types.CodeType, indent_level: int = 0, beautification_level: str = 'core'):
         self.code_obj = code_obj
         self.instructions: List[BytecodeInstruction] = []
         self.reconstructed: List[str] = []
         self.indent_level = indent_level
-        self.starts_as_function = (indent_level > 0)
+        self.starts_as_function = indent_level > 0
         self.blocks: List[Tuple[int, str]] = []  # stack of (end_offset, type)
         self.pc = 0
         self.beautification_level = beautification_level
@@ -605,7 +642,7 @@ class DecompilerBase:
     def decompile(self) -> str:
         """
         Decompile the stored code object into a human-readable Python source string.
-        
+
         Returns:
             source (str): Reconstructed Python source for the decompiled code object.
         """
@@ -614,7 +651,7 @@ class DecompilerBase:
     def _get_jump_target(self, instr: BytecodeInstruction) -> int:
         """
         Determine the absolute jump target offset for the given instruction.
-        
+
         @param instr: The disassembled instruction whose jump target should be resolved.
         @returns: The target bytecode offset as an integer; returns 0 when no target is available.
         """
@@ -625,9 +662,9 @@ class DecompilerBase:
     def is_effectively_last(self) -> bool:
         """
         Determine whether the remaining instructions from the current program counter are only epilogue/handler or otherwise ignorable operations.
-        
+
         Scans instructions starting at self.pc and treats common epilogue/exception-handler/filler opcodes and trailing `return None` patterns as non-meaningful; returns False if any remaining instruction is considered meaningful.
-        
+
         Returns:
             True if no meaningful instructions remain after the current program counter, False otherwise.
         """
@@ -638,8 +675,8 @@ class DecompilerBase:
             # Skip re-raise epilogue, filler, and terminal stack-clearing instructions
             # common in modern Python (3.11-3.14) exception handlers and epilogues.
             if op in (
-                "COPY", "POP_EXCEPT", "RERAISE", "CACHE", "RESUME", "PUSH_EXC_INFO", 
-                "POP_TOP", "LOAD_CONST", "EXTENDED_ARG", "CHECK_EXC_MATCH", 
+                "COPY", "POP_EXCEPT", "RERAISE", "CACHE", "RESUME", "PUSH_EXC_INFO",
+                "POP_TOP", "LOAD_CONST", "EXTENDED_ARG", "CHECK_EXC_MATCH",
                 "NOT_TAKEN", "TO_BOOL", "POP_JUMP_IF_TRUE", "POP_JUMP_IF_FALSE",
                 "JUMP_BACKWARD", "JUMP_BACKWARD_NO_INTERRUPT", "NOP"
             ):
@@ -656,12 +693,12 @@ class DecompilerBase:
     def is_compiler_generated_return(self, instr_index: int) -> bool:
         """
         Determine whether the RETURN at the given instruction index is the implicit compiler-inserted `return None`.
-        
+
         Performs conservative checks: the instruction must be effectively the final unbranched exit, must not reside inside user-level control-flow blocks (e.g., `if`, `for`, `while`, `try`, `except`, `finally`, `with`), and — when available — must not lie inside an exception-table protected range (Python 3.11+). These checks aim to distinguish a compiler-generated trailing `return None` from an explicit return written in source.
-        
+
         Parameters:
             instr_index (int): Index into `self.instructions` identifying the RETURN instruction to evaluate.
-        
+
         Returns:
             `true` if the RETURN is likely the compiler-inserted implicit `return None`, `false` otherwise.
         """
@@ -675,7 +712,7 @@ class DecompilerBase:
         if not effectively_last:
             return False
 
-        # If we're inside any user-facing control flow block, it's likely 
+        # If we're inside any user-facing control flow block, it's likely
         # an explicit return in the source.
         user_blocks = {"if", "else", "for", "while", "try_body", "except", "finally_body", "with", "with_body"}
         blocks = getattr(self, "blocks", [])
@@ -683,8 +720,8 @@ class DecompilerBase:
             if btype in user_blocks:
                 return False
 
-        # Robust check for Python 3.11+: if the return is within a protected 
-        # range in the exception table, it's explicit. Compiler-generated 
+        # Robust check for Python 3.11+: if the return is within a protected
+        # range in the exception table, it's explicit. Compiler-generated
         # returns for with/try blocks are always outside the protected range.
         try:
             for e in getattr(dis.Bytecode(self.code_obj), "exception_entries", []):
@@ -699,6 +736,7 @@ class DecompilerBase:
 # Generic decompiler (3.10–3.13 primary path)
 # ---------------------------------------------------------------------------
 
+
 class DecompilerGeneric(DecompilerBase):
     def __init_subclass__(cls, **kw):
         super().__init_subclass__(**kw)
@@ -706,10 +744,10 @@ class DecompilerGeneric(DecompilerBase):
     def __init__(self, code_obj: types.CodeType, indent_level: int = 0, beautification_level: str = 'core'):
         """
         Initialize the decompiler state for generic Python bytecode reconstruction.
-        
+
         Sets up expression stack, docstring tracking, loop and exception bookkeeping, and containers
         that _prescan_try_structure populates during decompilation.
-        
+
         Attributes:
             stack: LIFO of partial expression strings or tuples used by the stack-driven renderer.
             has_doc (bool): True after emitting a module/function docstring.
@@ -762,7 +800,7 @@ class DecompilerGeneric(DecompilerBase):
         self._pending_finally_merge: Optional[int] = None
         self._nop_to_push_exc: dict = {}
         self._pending_kw_names: Optional[Tuple[str, ...]] = None
-        self._else_starts: dict = {} # map of else_start_offset -> else_end_offset
+        self._else_starts: dict = {}  # map of else_start_offset -> else_end_offset
         self._build_dispatch()
 
     # ------------------------------------------------------------------
@@ -772,9 +810,9 @@ class DecompilerGeneric(DecompilerBase):
     def decompile(self) -> str:
         """
         Decompile the stored code object into a human-readable Python source string.
-        
+
         Performs bytecode disassembly, structural prescans (loops, ternaries, compound conditions, try/except/finally), reconstructs source lines (including a module docstring when present), closes open blocks, suppresses redundant module-level trailing `return None` when appropriate, and runs post-processing to normalize imports, parentheses, and spacing.
-        
+
         Returns:
             The reconstructed Python source as a single string, post-processed and ending with a single trailing newline.
         """
@@ -835,23 +873,22 @@ class DecompilerGeneric(DecompilerBase):
             last_idx = len(self.reconstructed) - 1
             while last_idx >= 0 and not self.reconstructed[last_idx].strip():
                 last_idx -= 1
-            
+
             if last_idx >= 0 and self.reconstructed[last_idx].strip() == "return None":
                 line = self.reconstructed[last_idx]
                 # FIX: Only suppress root-level 'return None'. Indented ones (inside if/with/etc)
                 # are likely explicit and should be preserved.
                 if not (line.startswith(" ") or line.startswith("\t")):
-                    # Found a trailing return None at root level. 
+                    # Found a trailing return None at root level.
                     # We can safely remove it if there's other code.
                     has_others = False
                     for i in range(last_idx):
-                         strip_line = self.reconstructed[i].strip()
-                         if strip_line and not (
-                             strip_line.startswith('"""') or strip_line.startswith("'''")
-                         ):
-                             has_others = True
-                             break
-                    
+                        strip_line = self.reconstructed[i].strip()
+                        if strip_line and not strip_line.startswith('"""') or strip_line.startswith("'''"
+                        ):
+                            has_others = True
+                            break
+
                     if has_others or getattr(self, "has_doc", False):
                         self.reconstructed.pop(last_idx)
                     else:
@@ -864,25 +901,25 @@ class DecompilerGeneric(DecompilerBase):
     def _close_blocks(self, offset: int):
         """
         Close code blocks whose end offset is at or before the given bytecode offset.
-        
+
         For each closed block this may append a minimal body line (`pass`) when the last
         non-blank reconstructed line is a block header (ends with ':') unless the block
         type suppresses that emission. The function also decreases the current
         indentation level for closed blocks except for block types that prevent
         indentation changes.
-        
+
         Parameters:
             offset (int): Bytecode offset used to determine which blocks have ended.
         """
 
         while self.blocks and offset >= self.blocks[-1][0]:
             block_end, block_type = self.blocks.pop()
-            
+
             has_else = False
             else_end = None
             if block_type == "for":
                 for ins in self.instructions:
-                    if ins.offset >= block_end: 
+                    if ins.offset >= block_end:
                         break
                     if "JUMP" in ins.opname:
                         target = self._get_jump_target(ins)
@@ -897,7 +934,7 @@ class DecompilerGeneric(DecompilerBase):
                     last_idx -= 1
                 if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
                     self._append_reconstructed("pass")
-            
+
             if has_else and else_end is not None:
                 self.indent_level -= 1
                 self._append_reconstructed("else:")
@@ -913,9 +950,9 @@ class DecompilerGeneric(DecompilerBase):
     def _append_reconstructed(self, line: str, indent_multiline: bool = False):
         """
         Append a reconstructed source line or block to the decompiler's output buffer with proper indentation and optional multi-line indentation.
-        
+
         This method updates self.reconstructed in place. If `line` is empty it is ignored. When `line` begins a major top-level block header (starts with `def `, `class `, `if `, `for `, `while `, or `try:`) a blank line is inserted before it if the previous output line is not already blank. If `line` contains embedded newlines it is split on `\n`; when `indent_multiline` is True every produced line is prefixed with the current indentation, otherwise only the first line is indented. Empty lines are preserved.
-        
+
         Parameters:
             line (str): Source text to append; may contain embedded newlines. An empty string is ignored.
             indent_multiline (bool): If True, apply indentation to every line produced by splitting `line`; if False, only the first line is indented.
@@ -949,21 +986,21 @@ class DecompilerGeneric(DecompilerBase):
         # Format slice objects as proper Python slice notation (e.g. slice(6, None, None) → '6:')
         """
         Format a constant value for insertion into reconstructed source.
-        
+
         Converts values into a Python-syntax-friendly string: slices become Python slice notation like
         'start:stop' or 'start:stop:step' (omitting parts that are None), multiline strings are wrapped
         in triple quotes using the alternate quote style if the content contains triple double-quotes,
         and all other values are represented using their `repr()`.
-        
+
         Parameters:
             val: The constant value to format (e.g., slice, str, number, None, etc.).
-        
+
         Returns:
             A string containing the value rendered in a form suitable for emitted Python source.
         """
         if isinstance(val, slice):
             start = '' if val.start is None else repr(val.start)
-            stop  = '' if val.stop  is None else repr(val.stop)
+            stop = '' if val.stop is None else repr(val.stop)
             if val.step is None:
                 return f'{start}:{stop}'
             step = '' if val.step is None else repr(val.step)
@@ -1020,11 +1057,10 @@ class DecompilerGeneric(DecompilerBase):
                 return self._get_jump_target(ins)
         return -1
 
-
     def _prescan_ternaries(self) -> None:
         """
         Detect ternary (conditional) expressions encoded in the function bytecode and record them for later reconstruction.
-        
+
         Populates two attributes used by the decompiler:
         - _ternary_jumps: dict mapping the offset of a conditional POP_JUMP_IF_* instruction to a tuple
           (store_name, then_instrs, else_instrs, is_true_jump, aug_op):
@@ -1037,7 +1073,7 @@ class DecompilerGeneric(DecompilerBase):
               part of an augmented-assignment pattern; otherwise None.
         - _ternary_suppress: set of instruction offsets that should be skipped during normal
           instruction processing because they belong to a recognized ternary pattern.
-        
+
         Only high-level, reconstructible ternary patterns are recorded; instructions not matched remain unchanged.
         """
 
@@ -1062,7 +1098,8 @@ class DecompilerGeneric(DecompilerBase):
             "BINARY_AND", "BINARY_OR", "BINARY_XOR", "BINARY_LSHIFT",
             "BINARY_RSHIFT", "BINARY_POWER", "BINARY_MATRIX_MULTIPLY",
             "CALL_FUNCTION", "CALL", "CALL_METHOD", "CALL_FUNCTION_KW",
-            "RETURN_VALUE", "RETURN_CONST",
+            "RETURN_VALUE", "RETURN_CONST", "YIELD_VALUE",
+            "LIST_APPEND", "SET_ADD", "MAP_ADD",
         ))
         for idx, ins in enumerate(self.instructions):
             if not self._is_compound_cjump(ins.opname):
@@ -1073,7 +1110,7 @@ class DecompilerGeneric(DecompilerBase):
                 continue  # backward jump
 
             # ── Collect then-branch instructions ─────────────────────────
-            then_raw = self.instructions[idx + 1 : t_idx]
+            then_raw = self.instructions[idx + 1: t_idx]
             then_sig = [x for x in then_raw if x.opname not in _TERNARY_SKIP]
 
             if not then_sig:
@@ -1084,7 +1121,7 @@ class DecompilerGeneric(DecompilerBase):
             # On 3.12 this is JUMP_FORWARD; on 3.14 it may be a different opcode
             # (e.g. JUMP_FORWARD still, but with a different encoding).  Match any
             # opcode whose name contains "FORWARD" or "JUMP" (but not backward/IF).
-            _FWD_JUMP = lambda op: (
+            def _FWD_JUMP(op): return (
                 "FORWARD" in op
                 or (op == "JUMP" and "BACKWARD" not in op and "IF" not in op)
             )
@@ -1146,7 +1183,7 @@ class DecompilerGeneric(DecompilerBase):
                     if any(x.opname == "POP_TOP" or "POP_JUMP_IF" in x.opname
                            for x in actual_then_expr):
                         continue
-                    else_raw    = self.instructions[t_idx : st_idx]
+                    else_raw = self.instructions[t_idx: st_idx]
                     else_instrs = [x for x in else_raw if x.opname not in _TERNARY_SKIP]
                     if any(x.opname == "POP_TOP" or "POP_JUMP_IF" in x.opname
                            for x in else_instrs):
@@ -1154,8 +1191,8 @@ class DecompilerGeneric(DecompilerBase):
                     if not all(x.opname in _TERNARY_PURE for x in else_instrs):
                         continue
                     store_name = str(store_instr.argval)
-                    is_true    = "IF_TRUE" in ins.opname
-                    
+                    is_true = "IF_TRUE" in ins.opname
+
                     # ── Augmented assignment detection (B2) ───────────────
                     aug_op = None
                     if actual_then_expr and else_instrs:
@@ -1169,9 +1206,7 @@ class DecompilerGeneric(DecompilerBase):
                             actual_then_expr.pop()
                             else_instrs.pop()
 
-                    self._ternary_jumps[ins.offset] = (
-                        store_name, actual_then_expr, else_instrs, is_true, aug_op
-                    )
+                    self._ternary_jumps[ins.offset] = store_name, actual_then_expr, else_instrs, is_true, aug_op
                     for x in then_raw:
                         self._ternary_suppress.add(x.offset)
                     for x in else_instrs:
@@ -1191,13 +1226,13 @@ class DecompilerGeneric(DecompilerBase):
 
                 if st_idx is not None:
                     # Check the instruction AT st_idx or immediately BEFORE it.
-                    # Some bytecode patterns land on the INPLACE op, others land 
-                    # directly on the STORE (meaning the INPLACE op is the last 
+                    # Some bytecode patterns land on the INPLACE op, others land
+                    # directly on the STORE (meaning the INPLACE op is the last
                     # instruction of the else branch).
                     check_idxs = [st_idx]
                     if st_idx > 0:
                         check_idxs.insert(0, st_idx - 1)
-                    
+
                     for c_idx in check_idxs:
                         op = self.instructions[c_idx]
                         if "INPLACE_" in op.opname:
@@ -1224,8 +1259,8 @@ class DecompilerGeneric(DecompilerBase):
                             and self.instructions[st_idx].opname in _STACKSINK_OPS):
                         is_stacksink = True
                         # else_raw = from t_idx up to (but NOT including) the join op
-                        else_end_ss  = st_idx
-                        else_raw_ss  = self.instructions[t_idx : else_end_ss]
+                        else_end_ss = st_idx
+                        else_raw_ss = self.instructions[t_idx: else_end_ss]
                         else_instrs_ss = [x for x in else_raw_ss
                                           if x.opname not in _TERNARY_SKIP]
                         # Validate: no control-flow ops in else branch
@@ -1237,9 +1272,7 @@ class DecompilerGeneric(DecompilerBase):
                         if is_stacksink:
                             is_true_ss = "IF_TRUE" in ins.opname
                             # store_name="" signals a stacksink (push to stack, no explicit store)
-                            self._ternary_jumps[ins.offset] = (
-                                "", before_jf, else_instrs_ss, is_true_ss, None
-                            )
+                            self._ternary_jumps[ins.offset] = "", before_jf, else_instrs_ss, is_true_ss, None
                             for x in then_raw:
                                 self._ternary_suppress.add(x.offset)
                             for x in else_instrs_ss:
@@ -1259,7 +1292,7 @@ class DecompilerGeneric(DecompilerBase):
                     continue
 
                 else_end = st_idx - 1 if is_inplace else st_idx
-                else_raw    = self.instructions[t_idx : else_end]
+                else_raw = self.instructions[t_idx: else_end]
                 else_instrs = [x for x in else_raw if x.opname not in _TERNARY_SKIP]
                 if any(x.opname == "POP_TOP" or "POP_JUMP_IF" in x.opname
                        for x in else_instrs):
@@ -1274,7 +1307,7 @@ class DecompilerGeneric(DecompilerBase):
                     continue
 
                 store_name = str(store_instr.argval)
-                is_true    = "IF_TRUE" in ins.opname
+                is_true = "IF_TRUE" in ins.opname
 
                 # ── Augmented assignment detection (B1) ───────────────
                 aug_op = None
@@ -1289,9 +1322,7 @@ class DecompilerGeneric(DecompilerBase):
                         before_jf.pop()
                         else_instrs.pop()
 
-                self._ternary_jumps[ins.offset] = (
-                    store_name, before_jf, else_instrs, is_true, aug_op
-                )
+                self._ternary_jumps[ins.offset] = store_name, before_jf, else_instrs, is_true, aug_op
                 for x in then_raw:
                     self._ternary_suppress.add(x.offset)
                 for x in else_instrs:
@@ -1302,7 +1333,7 @@ class DecompilerGeneric(DecompilerBase):
             store_idxs = [i for i, x in enumerate(then_sig) if x.opname in _TERNARY_STORES]
             if len(store_idxs) != 1:
                 continue
-            store_pos  = store_idxs[0]
+            store_pos = store_idxs[0]
             then_store = then_sig[store_pos]
             before_store = then_sig[:store_pos]
 
@@ -1327,7 +1358,7 @@ class DecompilerGeneric(DecompilerBase):
                 continue
 
             es_idx = offset_to_idx[else_store.offset]
-            else_raw = self.instructions[t_idx : es_idx]
+            else_raw = self.instructions[t_idx: es_idx]
             else_instrs = [x for x in else_raw if x.opname not in _TERNARY_SKIP]
             if any(x.opname == "POP_TOP" for x in else_instrs):
                 continue
@@ -1335,7 +1366,7 @@ class DecompilerGeneric(DecompilerBase):
                 continue
 
             store_name = str(then_store.argval)
-            is_true    = "IF_TRUE" in ins.opname
+            is_true = "IF_TRUE" in ins.opname
 
             # ── Augmented assignment detection (Pattern A) ───────────────
             aug_op = None
@@ -1350,9 +1381,7 @@ class DecompilerGeneric(DecompilerBase):
                     before_store.pop()
                     else_instrs.pop()
 
-            self._ternary_jumps[ins.offset] = (
-                store_name, before_store, else_instrs, is_true, aug_op
-            )
+            self._ternary_jumps[ins.offset] = store_name, before_store, else_instrs, is_true, aug_op
             for x in then_raw:
                 self._ternary_suppress.add(x.offset)
             for x in else_instrs:
@@ -1392,7 +1421,7 @@ class DecompilerGeneric(DecompilerBase):
         """
 
         self._compound_cond_map: dict = {}   # controlling_offset -> combined_cond_str
-        self._compound_suppress: set = set() # instruction offsets to skip
+        self._compound_suppress: set = set()  # instruction offsets to skip
 
         instrs = self.instructions
         n = len(instrs)
@@ -1464,6 +1493,27 @@ class DecompilerGeneric(DecompilerBase):
                     continue
                 break  # something else → end of group
 
+            def get_logical_t(t_val):
+                curr = t_val
+                visited = set()
+                while curr not in visited:
+                    visited.add(curr)
+                    idx = offset_to_idx.get(curr)
+                    if idx is None:
+                        break
+                    ins = instrs[idx]
+                    if ins.opname in getattr(self, "_GENERIC_SKIP_OPS", ("NOP", "RESUME", "CACHE")):
+                        curr = instrs[idx+1].offset
+                        continue
+                    if ins.opname == "POP_TOP":
+                        look = idx + 1
+                        while look < len(instrs) and instrs[look].opname in getattr(self, "_GENERIC_SKIP_OPS", ("NOP", "RESUME", "CACHE")):
+                            look += 1
+                        if look < len(instrs) and instrs[look].opname in ("JUMP_FORWARD", "JUMP_ABSOLUTE"):
+                            curr = self._get_jump_target(instrs[look])
+                            continue
+                    break
+                return curr
 
             valid = False
             while len(group) >= 2:
@@ -1471,14 +1521,14 @@ class DecompilerGeneric(DecompilerBase):
                 body_target = -1
                 for k in range(last_jump_idx + 1, n):
                     if instrs[k].opname not in _COMPOUND_SKIP:
-                        body_target = instrs[k].offset
+                        body_target = get_logical_t(instrs[k].offset)
                         break
-                end_target = self._get_jump_target(group[-1][1])
-                jump_starts = {g[3] for g in group}
-                
+                end_target = get_logical_t(self._get_jump_target(group[-1][1]))
+                jump_starts = {get_logical_t(g[3]) for g in group}
+
                 valid = True
                 for (_, jinstr, _, _) in group:
-                    t = self._get_jump_target(jinstr)
+                    t = get_logical_t(self._get_jump_target(jinstr))
                     if t == body_target:
                         pass
                     elif t == end_target or t in jump_starts:
@@ -1500,12 +1550,17 @@ class DecompilerGeneric(DecompilerBase):
             # -----------------------------------------------------------
             parts: list = []  # list of (cond_str, is_or_connector, next_t)
 
+            sub = _pick_decompiler_class(self)(self.code_obj, self.indent_level, self.beautification_level)
+
             for _, jinstr, expr_instrs, _ in group:
-                raw_expr = self._eval_cond_expr(expr_instrs)
-                t = self._get_jump_target(jinstr)
+                for xi in expr_instrs:
+                    sub._handle_instruction(xi)
+                raw_expr = str(sub.stack.pop()) if sub.stack else "?"
+
+                t = get_logical_t(self._get_jump_target(jinstr))
                 op = jinstr.opname
-                is_success_type = ("IF_TRUE" in op)
-                
+                is_success_type = "IF_TRUE" in op
+
                 if t == body_target:
                     is_or_jump = True
                 elif t == end_target:
@@ -1521,16 +1576,16 @@ class DecompilerGeneric(DecompilerBase):
                     cond_str = raw_expr if is_or_jump else f"not {raw_expr}"
                 else:
                     cond_str = f"not {raw_expr}" if is_or_jump else raw_expr
-                
+
                 parts.append((cond_str, is_or_jump, t))
 
             # Assemble with precedence and parentheses.
             # -------------------------------------------
             # Precedence: and > or.
-            # We use a recursive builder that identifies subgroups based 
-            # on jump targets. A jump that targets a point before the current 
+            # We use a recursive builder that identifies subgroups based
+            # on jump targets. A jump that targets a point before the current
             # "final exit" defines the boundary of a local subgroup.
-            
+
             def join_flat(s_idx, e_idx):
                 """Linearly joins parts[s_idx:e_idx] without recursion."""
                 comb = parts[s_idx][0]
@@ -1540,7 +1595,16 @@ class DecompilerGeneric(DecompilerBase):
                     if c == "and" and h_or:
                         comb = f"({comb})"
                         h_or = False
-                    comb = f"{comb} {c} {parts[k][0]}"
+
+                    next_term = parts[k][0]
+                    chained = None
+                    if c == "and":
+                        chained = collapse_chained_comparisons(comb, next_term, self.beautification_level)
+                    if chained:
+                        comb = chained
+                    else:
+                        comb = f"{comb} {c} {next_term}"
+
                     h_or = h_or or (c == "or")
                 return comb, parts[e_idx-1][1], h_or
 
@@ -1548,13 +1612,13 @@ class DecompilerGeneric(DecompilerBase):
                 """Assemble parts[start_idx:end_idx]. Returns (expr, next_conn_is_or, has_top_level_or)."""
                 if start_idx + 1 == end_idx:
                     return parts[start_idx][0], parts[start_idx][1], False
-                
-                subs: list = [] # list of (expr, unit_is_or, has_or)
+
+                subs: list = []  # list of (expr, unit_is_or, has_or)
                 i = start_idx
                 while i < end_idx:
                     curr_expr, curr_is_or, curr_target = parts[i]
                     j = i + 1
-                    
+
                     if curr_target < context_exit:
                         # Deeper nesting detected.
                         while j < end_idx and group[j][3] < curr_target:
@@ -1576,21 +1640,27 @@ class DecompilerGeneric(DecompilerBase):
 
                 combined = subs[0][0]
                 has_or = subs[0][2]
-                
+
                 for k in range(1, len(subs)):
                     next_expr, next_is_or, next_has_or = subs[k]
                     conn = "or" if subs[k-1][1] else "and"
-                    
+
                     if conn == "and" and has_or:
                         combined = f"({combined})"
                         has_or = False
-                    
+
                     if conn == "and" and next_has_or:
                         next_expr = f"({next_expr})"
-                    
-                    combined = f"{combined} {conn} {next_expr}"
+
+                    chained = None
+                    if conn == "and" and not has_or and not next_has_or:
+                        chained = collapse_chained_comparisons(combined, next_expr, self.beautification_level)
+                    if chained:
+                        combined = chained
+                    else:
+                        combined = f"{combined} {conn} {next_expr}"
                     has_or = has_or or (conn == "or") or next_has_or
-                
+
                 return combined, subs[-1][1], has_or
 
             combined, _, _ = assemble(0, len(parts), end_target)
@@ -1608,12 +1678,12 @@ class DecompilerGeneric(DecompilerBase):
     def _is_compound_cjump(self, opname: str) -> bool:
         """
         Identify conditional POP_JUMP_* opcode names that participate in compound boolean expressions.
-        
+
         Parameters:
-        	opname (str): The opcode name to test (e.g., "POP_JUMP_IF_FALSE").
-        
+                opname (str): The opcode name to test (e.g., "POP_JUMP_IF_FALSE").
+
         Returns:
-        	True if `opname` is a POP_JUMP_* variant used for compound boolean conditions (`IF_FALSE`, `IF_TRUE`, `IF_NONE`, or `IF_NOT_NONE`), False otherwise.
+                True if `opname` is a POP_JUMP_* variant used for compound boolean conditions (`IF_FALSE`, `IF_TRUE`, `IF_NONE`, or `IF_NOT_NONE`), False otherwise.
         """
         return "POP_JUMP" in opname and (
             "IF_FALSE" in opname
@@ -1625,27 +1695,26 @@ class DecompilerGeneric(DecompilerBase):
     def _eval_cond_expr(self, instrs: list) -> str:
         """
         Constructs a boolean expression string from a sequence of bytecode instructions.
-        
+
         Takes a list of bytecode instructions that form a pure boolean sub‑expression and reconstructs the equivalent Python condition as a single expression string.
-        
+
         Parameters:
             instrs (list): Sequence of instruction objects (bytecode slice) that comprise the boolean sub-expression.
-        
+
         Returns:
             str: The reconstructed boolean expression, or "?" if the expression cannot be determined.
         """
         return self._eval_ternary_branch(instrs)
 
-
     def _eval_ternary_branch(self, instrs: list) -> str:
         """
         Reconstructs a Python expression from a sequence of pure-expression bytecode instructions.
-        
+
         Parameters:
-        	instrs (list): Disassembled instruction objects for a ternary branch; expected to contain only expression-building opcodes.
-        
+                instrs (list): Disassembled instruction objects for a ternary branch; expected to contain only expression-building opcodes.
+
         Returns:
-        	expr (str): The reconstructed expression as source text, or "?" if an expression could not be determined.
+                expr (str): The reconstructed expression as source text, or "?" if an expression could not be determined.
         """
         mini_stack: list = []
         for ins in instrs:
@@ -1697,8 +1766,8 @@ class DecompilerGeneric(DecompilerBase):
             elif op == "BINARY_OP":
                 if len(mini_stack) >= 2:
                     right, left = mini_stack.pop(), mini_stack.pop()
-                    op_map = {0:"+", 1:"&", 2:"//", 3:"<<", 4:"@", 5:"*",
-                              6:"%", 7:"|", 8:"**", 9:">>", 10:"-", 11:"/", 12:"^",
+                    op_map = {0: "+", 1: "&", 2: "//", 3: "<<", 4: "@", 5: "*",
+                              6: "%", 7: "|", 8: "**", 9: ">>", 10: "-", 11: "/", 12: "^",
                               26: "[]"}
                     sym = op_map.get(int(ins.arg) if ins.arg is not None else -1, "?")
                     if sym == "[]":
@@ -1728,7 +1797,7 @@ class DecompilerGeneric(DecompilerBase):
                 stop = str(mini_stack.pop()) if mini_stack else 'None'
                 start = str(mini_stack.pop()) if mini_stack else 'None'
                 s = '' if start == 'None' else start
-                e = '' if stop  == 'None' else stop
+                e = '' if stop == 'None' else stop
                 if step is None or step == 'None':
                     mini_stack.append(f'{s}:{e}')
                 else:
@@ -1771,10 +1840,11 @@ class DecompilerGeneric(DecompilerBase):
                     r_s = str(right)
                     # Add parens only when the left operand is a compound expression
                     # (has spaces and is not already a parenthesised atom or string literal)
+
                     def _needs_parens(s: str) -> bool:
                         if not s or s[0] in ("'", '"', "(", "[", "{"):
                             return False  # string literal or already wrapped
-                        return " " in s and not (s.startswith("(") and s.endswith(")"))
+                        return " " in s and not s.startswith("(") and s.endswith(")")
                     if _needs_parens(l_s):
                         l_s = f"({l_s})"
                     mini_stack.append(f"{l_s} {sym} {r_s}")
@@ -1848,7 +1918,6 @@ class DecompilerGeneric(DecompilerBase):
             # and the loop body_start without meaning the guard is not a real
             # while-guard (e.g. NOT_TAKEN hint, NOP, RESUME, etc.).
 
-
             guard_offset = -1
             guard_dist = float('inf')   # distance from body_start
             for ins in self.instructions:
@@ -1868,7 +1937,7 @@ class DecompilerGeneric(DecompilerBase):
                     arg = ins.arg if ins.arg is not None else 0
                     # Fallback for unresolved target (e.g. 3.14+ relative jumps)
                     t = ins.offset + 2 + (arg * 2)
-                
+
                 # Target must exit the loop (land at or beyond jb)
                 if t < jb.offset:
                     continue
@@ -1911,7 +1980,7 @@ class DecompilerGeneric(DecompilerBase):
     def _find_jump_backward_end(self) -> int:
         """
         Find the offset immediately after the final backward-jump instruction in the instruction list.
-        
+
         Returns:
             int: The offset one past the last backward-jump instruction, or -1 if no backward jump is present.
         """
@@ -1926,7 +1995,7 @@ class DecompilerGeneric(DecompilerBase):
     def _prescan_try_structure(self) -> None:
         """
         Pre-scan the function's bytecode and classify exception-handling and with-block structure for later reconstruction.
-        
+
         Populates the following attributes used by the instruction dispatcher:
             _try_nop_offsets (set[int]):
                 Offsets of NOP instructions that mark try-block entries.
@@ -1954,12 +2023,11 @@ class DecompilerGeneric(DecompilerBase):
                 Maps try-entry NOP offsets to the `PUSH_EXC_INFO` offset that handles their try body.
             _pending_finally_merge (Optional[int]):
                 Internal placeholder used while building deferred-finally mappings.
-        
+
         The routine uses available exception-table data when present and falls back to heuristics on older hosts to identify these regions.
         """
         instrs = self.instructions
         n = len(instrs)
-
 
         # ── 0. Try to get exception table coverage from dis ─────────────
         # exception_entries available on Python 3.11+ (same versions that use
@@ -1970,7 +2038,7 @@ class DecompilerGeneric(DecompilerBase):
             # Include ALL depths (depth=0 for module-level try, depth=1+ for nested).
             _try_covered_starts = {e.start for e in _exc_entries}
             # Build a set of ALL targets that are real except-entries (depth 1)
-            # and whose handler starts with CHECK_EXC_MATCH → real except:
+            # and whose handler starts with CHECK_EXC_MATCH → real except Exception:
             _except_entry_targets = set()
             _reraise_wrapper_targets = set()
             push_exc_offs = {ins.offset for ins in instrs if ins.opname == "PUSH_EXC_INFO"}
@@ -2162,7 +2230,7 @@ class DecompilerGeneric(DecompilerBase):
         self._finally_body_suppress: set = set()     # inlined finally code to suppress
         self._deferred_finally_lines: dict = {}      # merge_offset → rendered finally lines
         self._deferred_except_lines: dict = {}       # merge_offset → rendered handler lines
-        self._handler_section_suppress: set = set() # except handler instructions to suppress
+        self._handler_section_suppress: set = set()  # except handler instructions to suppress
         self._wrapper_body_suppress: set = set()     # re-raise/with-exit wrapper instructions
         self._pending_finally_merge: Optional[int] = None
 
@@ -2341,10 +2409,10 @@ class DecompilerGeneric(DecompilerBase):
     def _render_finally_body(self, sub_instrs: list) -> list:
         """
         Render a sequence of bytecode instructions into a list of Python source lines suitable for a deferred `finally` body.
-        
+
         Parameters:
             sub_instrs (list): Sequence of BytecodeInstruction objects (a contiguous slice of disassembled instructions) representing the finally-body to render.
-        
+
         Returns:
             list: Ordered lines of Python source (strings) representing the rendered body. Unknown or complex operations are emitted as commented disassembly lines.
         """
@@ -2467,9 +2535,9 @@ class DecompilerGeneric(DecompilerBase):
     def _emit_deferred_finally(self, merge_offset: int, header_indent: int = -1) -> None:
         """
         Emit any pre-rendered except handlers followed by the deferred `finally:` block for a given finally-merge label.
-        
+
         This writes lines into the decompiler's reconstructed output (via _append_reconstructed) and temporarily adjusts self.indent_level while emitting. It first emits any stored except-handler lines for the merge label, then emits a `finally:` header and its stored body lines if present. If no deferred handlers or finally body exist for the given merge label, nothing is emitted for that section.
-        
+
         Parameters:
             merge_offset (int): The merge-label offset used as the key into the precomputed
                 `_deferred_except_lines` and `_deferred_finally_lines` mappings.
@@ -2481,7 +2549,7 @@ class DecompilerGeneric(DecompilerBase):
         # fall back to _except_header_indents if set; last resort: current level.
         if header_indent < 0:
             header_indent = self._except_header_indents[-1] if self._except_header_indents \
-                            else self.indent_level
+                else self.indent_level
 
         # Emit pre-decompiled except handler lines first
         except_lines = getattr(self, "_deferred_except_lines", {}).get(merge_offset)
@@ -2505,13 +2573,13 @@ class DecompilerGeneric(DecompilerBase):
     def _render_handler_section(self, handler_instrs: list, merge_offset: int) -> list:
         """
         Render an exception-handler instruction sequence into decompiled source lines.
-        
+
         Runs a lightweight sub-decompiler (same backend class) with indent_level=0 over handler_instrs so the caller can replay the returned lines at the desired indentation.
-        
+
         Parameters:
             handler_instrs (list): A list of disassembled instructions that form the handler body.
             merge_offset (int): Merge-label offset associated with this handler (used by callers to correlate deferred emission).
-        
+
         Returns:
             list: Decompiled source lines (each element is a string); may be empty.
         """
@@ -2576,7 +2644,7 @@ class DecompilerGeneric(DecompilerBase):
     def _build_dispatch(self):
         """
         Initialize the opcode dispatch table used to route bytecode instructions to handler methods.
-        
+
         Populates self._dispatch with a mapping from opcode name strings to the corresponding
         instance methods that implement their decompilation behavior (loads, stores, imports,
         calls, control-flow, exception handling, collection builders, stack manipulation, and
@@ -2588,22 +2656,22 @@ class DecompilerGeneric(DecompilerBase):
             # Loads
             "LOAD_CONST": self._op_load, "LOAD_NAME": self._op_load, "LOAD_FAST": self._op_load,
             "LOAD_GLOBAL": self._op_load, "LOAD_SMALL_INT": self._op_load, "LOAD_FAST_BORROW": self._op_load,
-            "LOAD_CONST_BORROW": self._op_load, "LOAD_DEREF": self._op_load, 
+            "LOAD_CONST_BORROW": self._op_load, "LOAD_DEREF": self._op_load,
             "LOAD_FAST_BORROW_LOAD_FAST_BORROW": self._op_load, "LOAD_GLOBAL_MODULE": self._op_load,
-            
+
             # Stores
             "STORE_NAME": self._op_store, "STORE_FAST": self._op_store, "STORE_GLOBAL": self._op_store,
             "STORE_DEREF": self._op_store,  # closure variable assignment (issue_2, Python 3.9 closures)
             "STORE_ATTR": self._op_store_attr, "STORE_SUBSCR": self._op_store_subscr,
-            
+
             # Imports
             "IMPORT_NAME": self._op_import_name, "IMPORT_FROM": self._op_import_from,
-            
+
             # Subscripts
             "BINARY_SLICE": self._op_binary_slice,
             "BINARY_OP": self._op_binary,
             "BINARY_SUBSCR": self._op_binary_subscr,
-            
+
             # Exceptions
             "RAISE_VARARGS": self._op_raise_varargs, "PUSH_EXC_INFO": self._op_push_exc_info,
             "CHECK_EXC_MATCH": self._op_check_exc_match, "POP_EXCEPT": self._op_cleanup,
@@ -2611,33 +2679,33 @@ class DecompilerGeneric(DecompilerBase):
             "SETUP_FINALLY": self._op_setup_finally, "SETUP_EXCEPT": self._op_setup_finally,
             "SETUP_WITH": self._op_setup_with, "BEFORE_WITH": self._op_before_with,
             "WITH_EXCEPT_START": self._op_with_except_start, "BEGIN_FINALLY": self._op_with_except_start,
-            
+
             # Functions
             "MAKE_FUNCTION": self._op_make_function, "SET_FUNCTION_ATTRIBUTE": self._op_set_function_attribute,
-            
+
             # Returns
             "RETURN_VALUE": self._op_return_value, "RETURN_CONST": self._op_return_const,
-            
+
             # Functions
             "CALL": self._op_call, "CALL_FUNCTION": self._op_call,
             "CALL_FUNCTION_KW": self._op_call, "CALL_FUNCTION_EX": self._op_call,
             "CALL_METHOD": self._op_call,
             "KW_NAMES": self._op_kw_names,
-            
+
             # Pops
             "POP_TOP": self._op_pop_top,
-            
+
             # Load build class
             "LOAD_BUILD_CLASS": self._op_load_build_class,
-            
+
             # Stack manip
             "ROT_TWO": self._op_stack_manip, "ROT_THREE": self._op_stack_manip, "ROT_FOUR": self._op_stack_manip,
             "DUP_TOP": self._op_dup_top, "DUP_TOP_TWO": self._op_dup_top,
-            
+
             # Strings
             "FORMAT_VALUE": self._op_fstring, "FORMAT_SIMPLE": self._op_fstring,
             "BUILD_STRING": self._op_build_string,
-            
+
             # Jumps
             "JUMP_FORWARD": self._op_jump, "JUMP_BACKWARD": self._op_jump,
             "JUMP_ABSOLUTE": self._op_jump,
@@ -2648,10 +2716,10 @@ class DecompilerGeneric(DecompilerBase):
             "POP_JUMP_IF_NONE": self._op_conditional_jump,
             "POP_JUMP_IF_NOT_NONE": self._op_conditional_jump,
             "JUMP_IF_NOT_EXC_MATCH": self._op_jump_if_not_exc_match,
-            
+
             # Iteration
             "FOR_ITER": self._op_for_iter,
-            
+
             # Collections
             "BUILD_TUPLE": self._op_build_collection, "BUILD_LIST": self._op_build_collection,
             "BUILD_SET": self._op_build_collection, "BUILD_MAP": self._op_build_map,
@@ -2660,31 +2728,34 @@ class DecompilerGeneric(DecompilerBase):
             "GET_ITER": self._op_no_op, "UNPACK_SEQUENCE": self._op_unpack_sequence,
             "LIST_EXTEND": self._op_list_extend, "DICT_MERGE": self._op_dict_merge,
             "DICT_UPDATE": self._op_dict_merge,
-            
+            "LIST_APPEND": self._op_list_append, "SET_ADD": self._op_set_add,
+            "MAP_ADD": self._op_map_add,
+
             # Secondary loads
             "LOAD_ATTR": self._op_load_attr, "LOAD_METHOD": self._op_load_attr,
             "LOAD_SUPER_ATTR": self._op_load_super_attr,
             "LOAD_FROM_DICT_OR_GLOBALS": self._op_load_from_dict_or_globals,
-            
+
             # Coroutines
             "YIELD_VALUE": self._op_yield_value,
-            
+
             # Deletes
             "DELETE_NAME": self._op_delete, "DELETE_FAST": self._op_delete, "DELETE_GLOBAL": self._op_delete,
-            
+
             # Error
             "LOAD_ASSERTION_ERROR": self._op_load_assertion_error,
-            
+
             # Nops
             "PUSH_NULL": self._op_no_op, "RESUME": self._op_no_op, "PRECALL": self._op_no_op, "CACHE": self._op_no_op,
             "COPY_FREE_VARS": self._op_no_op, "NOT_TAKEN": self._op_no_op, "MAKE_CELL": self._op_no_op,
             "END_FOR": self._op_no_op, "POP_ITER": self._op_no_op, "YIELD_FROM": self._op_no_op,
             "NOP": self._op_nop,
         }
+
     def _handle_instruction(self, instr: BytecodeInstruction):  # noqa: C901
         """
         Process a single disassembled bytecode instruction, update the decompiler's internal state, and emit reconstructed source lines when appropriate.
-        
+
         Parameters:
             instr (BytecodeInstruction): The instruction to handle; this method may mutate the decompiler's expression stack, block/indentation state, program counter, and reconstructed output buffer.
         """
@@ -2797,7 +2868,7 @@ class DecompilerGeneric(DecompilerBase):
             # This covers both the normal-exit path AND the re-raise path.
             cleanup = getattr(self, "_exc_cleanup_name", None)
             bound = getattr(self, "_exc_bound_names", set())
-            if (cleanup and name == cleanup and str(val) == "None") or                    (name in bound and str(val) == "None"):
+            if (cleanup and name == cleanup and str(val) == "None") or (name in bound and str(val) == "None"):
                 return
             if name in (
                 "__module__", "__qualname__", "__firstlineno__",
@@ -2828,7 +2899,6 @@ class DecompilerGeneric(DecompilerBase):
             else:
                 self._append_reconstructed(f"{name} = {val}", indent_multiline=False)
 
-
     def _op_store_attr(self, instr: BytecodeInstruction):
         opname = instr.opname
         if len(self.stack) >= 2:
@@ -2855,13 +2925,12 @@ class DecompilerGeneric(DecompilerBase):
             level = self.stack.pop()
             self.stack.append(("import", instr.argval, fromlist, level))
 
-
     def _op_import_from(self, instr: BytecodeInstruction):
         """
         Emit a `from <module> import <name>` statement when pairing an IMPORT_FROM with a prior IMPORT_NAME tuple on the stack.
-        
+
         If the top-of-stack is the import sentinel tuple produced by IMPORT_NAME (("import", module, fromlist, level)), this emits a corresponding `from ... import <name>` line (respecting relative import `level`) and pushes a sentinel `("_from_import_done", name)` so a subsequent STORE_* does not re-emit the symbol. Otherwise, pushes the import name value from `instr.argval` onto the expression stack for later use.
-        
+
         Parameters:
             instr (BytecodeInstruction): The IMPORT_FROM instruction being processed; `instr.argval` is the imported symbol name.
         """
@@ -2916,7 +2985,7 @@ class DecompilerGeneric(DecompilerBase):
             return None, cur
 
         targets, next_pc = _peek_targets(self.pc, n)
-        
+
         if targets is not None and self.stack:
             expr = str(self.stack.pop())
             lhs = ", ".join(targets)
@@ -2941,9 +3010,9 @@ class DecompilerGeneric(DecompilerBase):
     def _op_binary_subscr(self, instr: BytecodeInstruction):
         """
         Constructs a subscription expression from the top two stack entries and pushes the resulting string back onto the expression stack.
-        
+
         Pops the subscript expression and the container expression (if available), formats them as "container[subscript]", and appends that string to self.stack. If there are fewer than two items on the stack, no change is made.
-        
+
         Parameters:
             instr (BytecodeInstruction): The bytecode instruction being handled; provided for context but not otherwise inspected by this handler.
         """
@@ -3015,7 +3084,6 @@ class DecompilerGeneric(DecompilerBase):
         self._append_reconstructed("except:")
         self.indent_level += 1
 
-
     def _op_check_exc_match(self, instr: BytecodeInstruction):
         opname = instr.opname
         exc_type = self.stack.pop() if self.stack else "Exception"
@@ -3055,7 +3123,6 @@ class DecompilerGeneric(DecompilerBase):
         #  4. Stop (no binding) at: any LOAD_*, RERAISE, RETURN_*, JUMP_*,
         #     or a jump-target boundary (entered a new block)
         #  5. Cap at 8 steps
-
 
         as_name = None
         look = self.pc
@@ -3101,7 +3168,6 @@ class DecompilerGeneric(DecompilerBase):
         # opening a spurious nested 'if' block
         self.stack.append("_exc_match")
 
-
     def _op_cleanup(self, instr: BytecodeInstruction):
         opname = instr.opname
         # POP_EXCEPT for try/except cleanup
@@ -3114,7 +3180,6 @@ class DecompilerGeneric(DecompilerBase):
             self.indent_level = self._except_header_indents.pop()
         pass  # cleanup suppression (_exc_cleanup_name) stays active until DELETE_NAME fires
 
-
     def _op_setup_finally(self, instr: BytecodeInstruction):
         opname = instr.opname
         # Legacy 3.9/3.10 try/except via SETUP_* opcodes
@@ -3122,7 +3187,6 @@ class DecompilerGeneric(DecompilerBase):
         self.indent_level += 1
         jump_target = self._get_jump_target(instr)
         self.blocks.append((jump_target, "try_body"))
-
 
     def _op_setup_with(self, instr: BytecodeInstruction):
         opname = instr.opname
@@ -3184,7 +3248,6 @@ class DecompilerGeneric(DecompilerBase):
                     _fb.add(self.instructions[k].offset)
                 self._finally_body_suppress = _fb
 
-
     def _op_before_with(self, instr: BytecodeInstruction):
         opname = instr.opname
         # BEFORE_WITH — Python 3.11+ context-manager entry opcode.
@@ -3228,10 +3291,8 @@ class DecompilerGeneric(DecompilerBase):
         # Also record the indent level so finally: de-indents correctly
         self._except_header_indents.append(self.indent_level - 1)
 
-
     def _op_with_except_start(self, instr: BytecodeInstruction):
         opname = instr.opname
-        pass
 
         # ── functions ──────────────────────────────────────────────────
 
@@ -3261,10 +3322,10 @@ class DecompilerGeneric(DecompilerBase):
         #    (in CPython they are pushed in order: defaults, kw_defaults,
         #     annotations, closure — so TOS after code removal is closure
         #     if 0x08 set, then annotations if 0x04, etc.)
-        closure  = str(self.stack.pop()) if (flags & 0x08) and self.stack else None
-        annots   = str(self.stack.pop()) if (flags & 0x04) and self.stack else None
-        kw_defs  = str(self.stack.pop()) if (flags & 0x02) and self.stack else None
-        defaults = self.stack.pop()      if (flags & 0x01) and self.stack else None
+        closure = str(self.stack.pop()) if (flags & 0x08) and self.stack else None
+        annots = str(self.stack.pop()) if (flags & 0x04) and self.stack else None
+        kw_defs = str(self.stack.pop()) if (flags & 0x02) and self.stack else None
+        defaults = self.stack.pop() if (flags & 0x01) and self.stack else None
 
         if code_obj_val is not None and isinstance(code_obj_val, tuple) and code_obj_val[0] == "code":
             inner_code = code_obj_val[1]
@@ -3275,10 +3336,10 @@ class DecompilerGeneric(DecompilerBase):
             _CO_VARARGS = 0x04
             _CO_VARKEYWORDS = 0x08
             has_varargs = bool(inner_code.co_flags & _CO_VARARGS)
-            has_varkw   = bool(inner_code.co_flags & _CO_VARKEYWORDS)
+            has_varkw = bool(inner_code.co_flags & _CO_VARKEYWORDS)
             # Index of *args and **kwargs names in co_varnames:
-            varargs_idx  = inner_code.co_argcount + inner_code.co_kwonlyargcount
-            varkw_idx    = inner_code.co_argcount + inner_code.co_kwonlyargcount + int(has_varargs)
+            varargs_idx = inner_code.co_argcount + inner_code.co_kwonlyargcount
+            varkw_idx = inner_code.co_argcount + inner_code.co_kwonlyargcount + int(has_varargs)
             varargs_name = (
                 "*" + inner_code.co_varnames[varargs_idx]
                 if has_varargs and varargs_idx < len(inner_code.co_varnames)
@@ -3317,7 +3378,7 @@ class DecompilerGeneric(DecompilerBase):
                 kwonly_start = inner_code.co_argcount
                 kwonly_end = inner_code.co_argcount + inner_code.co_kwonlyargcount
                 kwonly_names = list(inner_code.co_varnames[kwonly_start:kwonly_end])
-                
+
                 # Attach defaults if kw_defs is available
                 if kw_defs:
                     # kw_defs is usually a string repr of a dict like "{'x': 1, 'y': 'hi'}"
@@ -3332,7 +3393,7 @@ class DecompilerGeneric(DecompilerBase):
 
             # Combine positional, keyword-only, *args, and **kwargs
             params = positional.copy()
-            
+
             # Position-only arguments marker (/)
             # inner_code.co_posonlyargcount exists in Python 3.8+
             posonly_count = getattr(inner_code, "co_posonlyargcount", 0)
@@ -3412,17 +3473,14 @@ class DecompilerGeneric(DecompilerBase):
             val = self.stack.pop()
             val_str = str(val)
             # Use the new predicate for smarter suppression
-            is_compiler_gen = (val_str == "None" and self.is_compiler_generated_return(self.pc - 1))
-            
+            is_compiler_gen = val_str == "None" and self.is_compiler_generated_return(self.pc - 1)
+
             if is_compiler_gen:
                 pass
             elif "__class__" in val_str or "__classdict__" in val_str:
                 pass
             else:
                 self._append_reconstructed(f"return {val}")
-        return
-
-
     def _op_return_const(self, instr: BytecodeInstruction):
         opname = instr.opname
         # RETURN_CONST None has two meanings:
@@ -3467,7 +3525,7 @@ class DecompilerGeneric(DecompilerBase):
         if len(self.stack) >= 2:
             right = self.stack.pop()
             left = self.stack.pop()
-            
+
             # Python 3.11+ BINARY_OP handles all binary ops via arg
             if opname == "BINARY_OP":
                 nb_ops = [
@@ -3489,7 +3547,7 @@ class DecompilerGeneric(DecompilerBase):
                     "BINARY_MATRIX_MULTIPLY": "@",
                 }
                 op = op_map.get(opname, "?")
-            
+
             l_str = str(left)
             r_str = str(right)
             if " " in l_str and not (l_str.startswith("(") and l_str.endswith(")")):
@@ -3498,19 +3556,18 @@ class DecompilerGeneric(DecompilerBase):
                 r_str = f"({r_str})"
             self.stack.append(f"{l_str} {op} {r_str}")
 
-
     def _op_binary_slice(self, instr: BytecodeInstruction):
         # Python 3.11+ BINARY_SLICE pops: stop, start, container
         if len(self.stack) >= 3:
             stop = self.stack.pop()
             start = self.stack.pop()
             container = self.stack.pop()
-            
+
             if str(start) == "None":
                 start = ""
             if str(stop) == "None":
                 stop = ""
-                
+
             self.stack.append(f"{container}[{start}:{stop}]")
 
         # INPLACE_* → augmented assignment
@@ -3548,18 +3605,18 @@ class DecompilerGeneric(DecompilerBase):
     def _op_call(self, instr: BytecodeInstruction):
         """
         Reconstruct a function or method call from the bytecode instruction and push the resulting expression or special placeholder onto the decompiler stack.
-        
+
         Handles positional and keyword argument collection for CALL/CALL_KW/CALL_FUNCTION_* variants, reconstructs call argument lists, and consumes the callable and arguments from self.stack. Recognizes and transforms several high-level patterns instead of emitting a plain call:
         - Decorator application: when a freshly-made function object is immediately called by a CALL following MAKE_FUNCTION, it packages a decorated function tuple ("func", "<decorated def...>") and pushes it back on the stack.
         - Immediate anonymous-function invocation: converts called anonymous function tuples into an inline expression via _render_func_tuple and pushes the rendered result.
         - Class construction via __build_class__: detects the class-builder pattern and pushes a ("class", "<class ...>") tuple with reconstructed class header and body.
         - super(): when called with no arguments emits "super()".
         - Normal calls: pushes a string "callable(arg1, arg2, kw=val, ...)" when no special pattern applies.
-        
+
         Side effects:
         - Pops argument and callable values from self.stack and pushes the reconstructed call or special tuple/string back onto self.stack.
         - May modify intermediate argument formatting (e.g., strip NULL sentinels).
-        
+
         Parameters:
             instr (BytecodeInstruction): The CALL-family bytecode instruction being processed; its opname and arg determine the number and kind of arguments to consume.
         """
@@ -3574,9 +3631,9 @@ class DecompilerGeneric(DecompilerBase):
             kwargs_dict = None
             if flags & 1:
                 kwargs_dict = self.stack.pop() if self.stack else "{}"
-            
+
             args_tuple = self.stack.pop() if self.stack else "()"
-            
+
             # Form final_args as strings
             final_args.append(f"*{self._normalize_val(args_tuple)}")
             if kwargs_dict:
@@ -3624,14 +3681,14 @@ class DecompilerGeneric(DecompilerBase):
                 final_args = [self._normalize_val(v) for v in raw_args]
 
         func_val = self.stack.pop() if self.stack else "unknown_func"
-        
+
         # Handle NULL sentinels (e.g. from PUSH_NULL in Python 3.11+).
         if str(func_val) == "None" and self.stack:
             func_val = self.stack.pop()
-        
+
         orig_func_val = func_val
         func = self._normalize_val(func_val)
-        
+
         # ── Decorator pattern detection ───────────────────────────────
         # Pattern A (3.11+): decorator pushed, then MAKE_FUNCTION pushes func, then CALL
         #   Stack: [..., decorator, ('func', body)] ; CALL 1
@@ -3639,7 +3696,7 @@ class DecompilerGeneric(DecompilerBase):
         # Pattern B (3.9): LOAD decorator, MAKE_FUNCTION pushes ('func', body), then CALL 1
         #   Stack: [..., decorator, ('func', body)] ; CALL 1
         #   func_val = decorator, raw_args = [('func', body)]
-        
+
         # Pattern A (3.11+ / Generic fallback)
         if isinstance(orig_func_val, tuple) and orig_func_val[0] == "func":
             body_text = str(orig_func_val[1])
@@ -3654,8 +3711,8 @@ class DecompilerGeneric(DecompilerBase):
             return
 
         # Pattern B (3.9 specialisation incorporated here)
-        if (len(raw_args) == 1 
-                and isinstance(raw_args[0], tuple) 
+        if (len(raw_args) == 1
+                and isinstance(raw_args[0], tuple)
                 and raw_args[0][0] == "func"):
             body_val = raw_args[0]
             body_text = str(body_val[1])
@@ -3676,7 +3733,7 @@ class DecompilerGeneric(DecompilerBase):
                 body_text = str(body_val[1])
             else:
                 body_text = str(body_val)
-            
+
             cls_name = str(self._normalize_val(raw_args[1])).strip("'\"")
             bases = [self._normalize_val(b) for b in raw_args[2:]]
             bases_str = f"({', '.join(bases)})" if bases else ""
@@ -3692,7 +3749,6 @@ class DecompilerGeneric(DecompilerBase):
             self.stack.append("super()")
         else:
             self.stack.append(f"{func}({', '.join(final_args)})")
-
 
     def _op_load_build_class(self, instr: BytecodeInstruction):
         opname = instr.opname
@@ -3715,7 +3771,6 @@ class DecompilerGeneric(DecompilerBase):
             else:
                 self.stack.append(f"{left} {op} {right}")
 
-
     def _op_contains(self, instr: BytecodeInstruction):
         opname = instr.opname
         if len(self.stack) >= 2:
@@ -3724,7 +3779,6 @@ class DecompilerGeneric(DecompilerBase):
             op = "not in" if bool(instr.arg) else "in"
             self.stack.append(f"{item} {op} {container}")
 
-
     def _op_is(self, instr: BytecodeInstruction):
         opname = instr.opname
         if len(self.stack) >= 2:
@@ -3732,7 +3786,6 @@ class DecompilerGeneric(DecompilerBase):
             left = self.stack.pop()
             op = "is not" if bool(instr.arg) else "is"
             self.stack.append(f"{left} {op} {right}")
-
 
     def _op_stack_manip(self, instr: BytecodeInstruction):
         opname = instr.opname
@@ -3751,7 +3804,6 @@ class DecompilerGeneric(DecompilerBase):
             d = self.stack.pop()
             self.stack.extend([a, d, c, b])
 
-
     def _op_dup_top(self, instr: BytecodeInstruction):
         opname = instr.opname
         if opname == "DUP_TOP" and self.stack:
@@ -3766,7 +3818,6 @@ class DecompilerGeneric(DecompilerBase):
         if self.stack:
             val = self.stack.pop()
             self.stack.append(f"{{{val}}}")
-
 
     def _op_build_string(self, instr: BytecodeInstruction):
         opname = instr.opname
@@ -3797,10 +3848,10 @@ class DecompilerGeneric(DecompilerBase):
                     break
                 if b_type in ("while", "for"):
                     break  # only check innermost loop
-            
+
             if matched_while:
                 return
-                
+
             # Non-break forward jump -> reconstruct as else-branch only when a
             # prior if-block whose target matches jump_target is actually open.
             # (Exception-handler jumps are always excluded.)
@@ -3811,11 +3862,11 @@ class DecompilerGeneric(DecompilerBase):
                     if b_type == "if":
                         prior_if_target = b_off
                         break
-                
+
                 next_offset = -1
                 if self.pc < len(self.instructions):
                     next_offset = self.instructions[self.pc].offset
-                    
+
                 # Emit else: when the next instruction is the target of the if block
                 if prior_if_target is not None and prior_if_target == next_offset:
                     self.indent_level -= 1
@@ -3897,14 +3948,12 @@ class DecompilerGeneric(DecompilerBase):
                             self.reconstructed[idx] = self.reconstructed[idx].replace(
                                 "if ", "while ", 1
                             )
-                            self.blocks[bi] = (boff, "while")
+                            self.blocks[bi] = boff, "while"
                             self._while_true_ends.discard(boff)
                             break
                     break
 
             return  # never treat JUMP_BACKWARD as else-opener
-
-
 
         # ── no-ops ─────────────────────────────────────────────────────
 
@@ -4002,11 +4051,10 @@ class DecompilerGeneric(DecompilerBase):
                     self.blocks.append((end_offset, "while"))
                     self._while_true_ends.add(end_offset)
 
-
     def _op_conditional_jump(self, instr: BytecodeInstruction):
         """
         Handle a conditional jump instruction, emitting reconstructed `if`, `while`, or ternary code and updating decompiler state.
-        
+
         This method detects compiler patterns and mutates the decompiler's stack, reconstructed output, indentation, block stack, and program counter as appropriate:
         - If the jump was pre-identified as a ternary, evaluates both branches and either emits an augmented-assignment form or pushes a ternary expression onto the stack; advances the PC past the else-branch instructions that were speculatively evaluated.
         - Suppresses duplicate condition values produced for `while` guards and exception-match checks.
@@ -4014,7 +4062,7 @@ class DecompilerGeneric(DecompilerBase):
         - Emits combined `and`/`or` compound conditions when a compound condition was precomputed by prescan.
         - Emits `while` headers for backward-jump guards detected by prescan.
         - Emits `if` headers for forward conditional jumps, adjusts indentation, and records block end offsets for later closing; recognizes certain immediate jump targets (returns, breaks, raises) to influence block handling.
-        
+
         Parameters:
             instr (BytecodeInstruction): The conditional jump instruction to handle; its `opname`, `offset`, and argument fields are used to determine emitted source and control-flow updates.
         """
@@ -4040,7 +4088,7 @@ class DecompilerGeneric(DecompilerBase):
             else_expr = self._eval_ternary_branch(else_instrs)
 
             ternary = f"{then_expr} if {'not ' if is_true else ''}{cond_expr} else {else_expr}"
-            
+
             if aug_op:
                 # Augmented ternary: the target variable was loaded onto the stack
                 # before the jump. Pop it now so we can emit the assignment statement.
@@ -4145,13 +4193,14 @@ class DecompilerGeneric(DecompilerBase):
                     return
 
             self.blocks.append((jump_target, "if"))
+
     def _op_jump_if_not_exc_match(self, instr: BytecodeInstruction):
         # 3.9 / 3.10: JUMP_IF_NOT_EXC_MATCH(target)
         # Pops the exception type to match against and the exception instance.
         if len(self.stack) >= 2:
             exc_type = self.stack.pop()
             exc_instance = self.stack.pop()
-            
+
             # Heuristic for `except Exception as e`:
             # Modern Python (3.11+) often has a DUP_TOP, STORE_* sequence
             # following the match. We scan ahead for a STORE instruction
@@ -4161,7 +4210,7 @@ class DecompilerGeneric(DecompilerBase):
             # Skip trivial ops
             while peek_pc < len(self.instructions) and self.instructions[peek_pc].opname in ("COPY", "PUSH_NULL", "RESUME", "CACHE"):
                 peek_pc += 1
-            
+
             if peek_pc < len(self.instructions):
                 next_instr = self.instructions[peek_pc]
                 if "STORE" in next_instr.opname:
@@ -4202,7 +4251,6 @@ class DecompilerGeneric(DecompilerBase):
         # We simulate the taken-branch state by default for the stack,
         # but if this is part of a complex boolean chain, the pre-scan
         # handles the reconstruction.
-        pass
 
     def _op_jump_if_false_or_pop(self, instr: BytecodeInstruction):
         """
@@ -4223,8 +4271,6 @@ class DecompilerGeneric(DecompilerBase):
 
         # Semantics: if condition is false, KEEP it on stack and jump;
         # if true, POP it and continue.
-        pass
-
 
     # ── for loop ───────────────────────────────────────────────────
 
@@ -4240,7 +4286,7 @@ class DecompilerGeneric(DecompilerBase):
             if self.pc < len(self.instructions):
                 peek_pc = self.pc
                 while (peek_pc < len(self.instructions)
-                           and self.instructions[peek_pc].opname in _GENERIC_SKIP_OPS):
+                       and self.instructions[peek_pc].opname in _GENERIC_SKIP_OPS):
                     peek_pc += 1
                 if peek_pc < len(self.instructions):
                     next_instr = self.instructions[peek_pc]
@@ -4275,7 +4321,7 @@ class DecompilerGeneric(DecompilerBase):
         for _ in range(num):
             if self.stack:
                 items.insert(0, str(self.stack.pop()))
-        
+
         if opname == "BUILD_TUPLE":
             self.stack.append(f"({', '.join(items)})")
         elif opname == "BUILD_LIST":
@@ -4295,7 +4341,6 @@ class DecompilerGeneric(DecompilerBase):
             pairs.insert(0, f"{key}: {val}")
         self.stack.append("{" + ", ".join(pairs) + "}")
 
-
     def _op_build_slice(self, instr: BytecodeInstruction):
         argc = instr.arg if instr.arg is not None else 2
         step = str(self.stack.pop()) if argc == 3 else ""
@@ -4307,19 +4352,18 @@ class DecompilerGeneric(DecompilerBase):
             stop = ""
         if step == "None":
             step = ""
-        
+
         slice_str = f"{start}:{stop}"
         if argc == 3:
             slice_str += f":{step}"
         self.stack.append(slice_str)
-
 
     def _op_build_const_key_map(self, instr: BytecodeInstruction):
         # Python 3.6+: BUILD_CONST_KEY_MAP(count)
         # Top of stack is a tuple of keys. Below that are 'count' values.
         count = instr.arg
         keys = self.stack.pop()
-        
+
         values = []
         for _ in range(count):
             if self.stack:
@@ -4330,8 +4374,8 @@ class DecompilerGeneric(DecompilerBase):
                 if getattr(self, 'debug', False):
                     print(f'Warning: stack underflow in BUILD_CONST_KEY_MAP at offset {instr.offset}')
         values.reverse()
-        
-        # keys can be a tuple object (if loaded via LOAD_CONST) 
+
+        # keys can be a tuple object (if loaded via LOAD_CONST)
         # or a string representation (if reconstructed).
         if isinstance(keys, str) and keys.startswith("(") and keys.endswith(")"):
             # Very basic string-tuple parsing for reconstructed keys
@@ -4340,13 +4384,12 @@ class DecompilerGeneric(DecompilerBase):
             k_list = list(keys)
         else:
             k_list = [f"key{i}" for i in range(count)]
-            
+
         items = []
         for k, v in zip(k_list, values):
             k_repr = repr(k) if not isinstance(k, str) else f"'{k}'"
             items.append(f"{k_repr}: {v}")
         self.stack.append("{" + ", ".join(items) + "}")
-
 
     def _op_list_extend(self, instr: BytecodeInstruction):
         opname = instr.opname
@@ -4358,6 +4401,18 @@ class DecompilerGeneric(DecompilerBase):
             else:
                 self.stack.append(f"[*{lst}, *{it}]")
 
+    def _op_list_append(self, instr: BytecodeInstruction):
+        val = self.stack.pop() if self.stack else "None"
+        self._append_reconstructed(f"yield {val}")
+
+    def _op_set_add(self, instr: BytecodeInstruction):
+        val = self.stack.pop() if self.stack else "None"
+        self._append_reconstructed(f"yield {val}")
+
+    def _op_map_add(self, instr: BytecodeInstruction):
+        val = self.stack.pop() if self.stack else "None"
+        key = self.stack.pop() if self.stack else "None"
+        self._append_reconstructed(f"yield {key}: {val}")
 
     def _op_dict_merge(self, instr: BytecodeInstruction):
         opname = instr.opname
@@ -4378,7 +4433,6 @@ class DecompilerGeneric(DecompilerBase):
         else:
             self.stack.append(str(instr.argval))
 
-
     def _op_load_attr(self, instr: BytecodeInstruction):
         opname = instr.opname
         obj = self.stack.pop() if self.stack else "obj"
@@ -4388,7 +4442,6 @@ class DecompilerGeneric(DecompilerBase):
         s_obj = str(obj).strip("'\"") if str(obj) in ("self", "cls") else str(obj)
         self.stack.append(f"{s_obj}.{name}")
 
-
     def _op_load_super_attr(self, instr: BytecodeInstruction):
         opname = instr.opname
         name = str(instr.argval)
@@ -4396,17 +4449,14 @@ class DecompilerGeneric(DecompilerBase):
             name = name.split(" + ")[0]
         self.stack.append(f"super().{name}")
 
-
     def _op_load_from_dict_or_globals(self, instr: BytecodeInstruction):
         opname = instr.opname
         self.stack.append(str(instr.argval))
-
 
     def _op_yield_value(self, instr: BytecodeInstruction):
         opname = instr.opname
         val = self.stack.pop() if self.stack else "None"
         self._append_reconstructed(f"yield {val}")
-
 
     def _op_delete(self, instr: BytecodeInstruction):
         opname = instr.opname
@@ -4423,7 +4473,6 @@ class DecompilerGeneric(DecompilerBase):
     def _op_load_assertion_error(self, instr: BytecodeInstruction):
         opname = instr.opname
         self.stack.append("AssertionError")
-
 
 
 # ---------------------------------------------------------------------------
@@ -4580,7 +4629,7 @@ class Decompiler39(DecompilerGeneric):
     def _disassemble(self):
         """
         Disassembles the contained code object's bytecode (Python 3.9 format) into self.instructions.
-        
+
         Parses co_code into a sequence of BytecodeInstruction entries with resolved argument values (for names, consts, varnames, free/cell vars, comparison operators and jump targets), handles EXTENDED_ARG accumulation, skips padding zero bytes, and then marks instructions that are jump targets by scanning jump opcodes' resolved targets.
         """
         bytecode = self.code_obj.co_code
@@ -4681,9 +4730,9 @@ class Decompiler39(DecompilerGeneric):
     def _prescan_try_structure(self) -> None:
         """
         Pre-scan bytecode to classify SETUP_FINALLY targets and mark finally-body instruction ranges to suppress.
-        
+
         Calls the superclass prescan then records non-exception SETUP_FINALLY targets in self._finally_targets and merges or creates self._finally_body_suppress to include instruction offsets that belong to the exception-path copy of a finally body. The method detects exception-handler entries (typed or bare), with-exit handlers, and tiny cleanup-only handlers (e.g., `LOAD_CONST None` followed by delete + `RERAISE`) and treats those as exception handlers rather than user `finally:` blocks; any SETUP_FINALLY target not classified as an exception handler is treated as a user `finally` and its exception-path copy is added to self._finally_body_suppress.
-        
+
         Side effects:
         - Ensures self._finally_targets is a set of offsets that are finalizer entry targets.
         - Ensures self._finally_body_suppress exists and is extended with offsets to skip when emitting the exception-path copy of finally bodies.
@@ -4764,7 +4813,7 @@ class Decompiler39(DecompilerGeneric):
                         is_finally = True
                         end_reraise = jx.offset
                         break
-                
+
                 if is_finally:
                     self._finally_targets.add(target)
                     # Mark the exception-path copy for suppression
@@ -4798,9 +4847,9 @@ class Decompiler39(DecompilerGeneric):
         # Suppress exception-path finally bodies
         """
         Process a single disassembled instruction and update the decompiler's internal state and reconstructed output accordingly.
-        
+
         This method dispatches on the instruction's opname to mutate the expression stack, emit or suppress reconstructed source lines, open/close control-flow blocks, adjust indentation and block stacks, modify prescan/suppression tables, and advance or adjust the program counter as needed. It implements numerous 3.9-specific and generic bytecode-to-source translations (for example: binary/inplace ops, comparisons, various CALL/CALL_* forms including class and decorator patterns, while-loop guards and while True headers, ternary/compound-condition suppression, unpacking/call/attribute/method patterns, and try/except/finally handler and with/cleanup machinery). The handler delegates to the superclass for opcodes it does not special-case.
-        
+
         Parameters:
             instr (BytecodeInstruction): The instruction to handle; uses fields such as opname, arg, argval, offset, and is_jump_target.
         """
@@ -4814,7 +4863,7 @@ class Decompiler39(DecompilerGeneric):
             return
         if getattr(self, "_finally_body_suppress", set()) and instr.offset in self._finally_body_suppress:
             return
-        
+
         opname = instr.opname
 
         # Scoped suppression: clear except-zone state when we exit the handler scope.
@@ -4876,7 +4925,7 @@ class Decompiler39(DecompilerGeneric):
         # forward.  Emit 'if <cond>:' (the break body is the following JUMP_ABSOLUTE).
         if ("POP_JUMP_IF_FALSE" in opname or "POP_JUMP_IF_TRUE" in opname):
             jump_target = self._get_jump_target(instr)
-            
+
             # --- Assertion detection (Python 3.9) ---
             # Pattern: POP_JUMP_IF_TRUE/FALSE skipping over a RAISE_VARARGS(AssertionError)
             # Find the instruction just BEFORE the jump target
@@ -4889,16 +4938,16 @@ class Decompiler39(DecompilerGeneric):
                     # 3.9 assert pattern: if (not) cond: raise AssertionError(msg)
                     if self.stack:
                         cond = self.stack.pop()
-                        # We'll emit as a generic if for now if we can't be sure, 
+                        # We'll emit as a generic if for now if we can't be sure,
                         # but here we can try to be bold.
                         prefix = "assert " if "FALSE" in opname else "assert not "
                         # Peek for the message
                         msg = None
-                        # This is a bit complex for a single handler, so we'll let 
+                        # This is a bit complex for a single handler, so we'll let
                         # DecompilerGeneric handle it as a block if we return.
                         # Actually, let's keep it simple and just fix the basic emission.
-                        self.stack.append(cond) # Put it back and let super() or generic handle it
-            
+                        self.stack.append(cond)  # Put it back and let super() or generic handle it
+
             if (jump_target <= instr.offset  # backward target → inside while-True
                     and any(b[1] == "while" for b in self.blocks)):
                 # This is the break-guard inside a while-True.
@@ -4917,9 +4966,9 @@ class Decompiler39(DecompilerGeneric):
                         if while_end > instr.offset:
                             self.blocks.append((while_end, "if"))
                 return
-            
+
             # Pattern for 3.9 asserts: if not cond: raise AssertionError
-            # We skip explicit emit here and let DecompilerGeneric._op_pop_jump_if_false handle it 
+            # We skip explicit emit here and let DecompilerGeneric._op_pop_jump_if_false handle it
             # if it's not a while-break. This prevents double-emission or mis-indentation.
             super()._handle_instruction(instr)
             return
@@ -4943,22 +4992,22 @@ class Decompiler39(DecompilerGeneric):
         elif opname in _inplace39:
             if len(self.stack) >= 2:
                 right = self.stack.pop()
-                left  = self.stack.pop()
-                op    = _inplace39[opname]
+                left = self.stack.pop()
+                op = _inplace39[opname]
                 # Peek ahead: if next instruction is a STORE back to the same
                 # name, emit `left op= right` directly and consume the STORE.
                 next_pc = self.pc
                 while (next_pc < len(self.instructions)
                        and self.instructions[next_pc].opname in (
                            "CACHE", "RESUME", "NOP", "NOT_TAKEN"
-                       )):
+                )):
                     next_pc += 1
                 if (next_pc < len(self.instructions)
                         and self.instructions[next_pc].opname in (
                             "STORE_NAME", "STORE_FAST", "STORE_GLOBAL",
-                        )):
+                )):
                     store_name = str(self.instructions[next_pc].argval)
-                    left_name  = str(left).split(".")[-1]
+                    left_name = str(left).split(".")[-1]
                     if store_name == left_name or str(left) == store_name or str(left).endswith("." + store_name):
                         self._append_reconstructed(f"{left} {op} {right}")
                         self.pc = next_pc + 1  # consume the STORE
@@ -5034,16 +5083,16 @@ class Decompiler39(DecompilerGeneric):
                 _finally_ts = getattr(self, "_finally_targets", set())
                 if _finally_ts and finally_target in _finally_ts:
                     is_finally_pop = True
-                
+
                 # Check for 3.9 implicit finally (SETUP_FINALLY target reachable after POP_BLOCK fallthrough)
                 if not is_finally_pop:
                     look = self.pc
                     while look < len(self.instructions) and self.instructions[look].opname in ("NOP", "RESUME", "CACHE"):
                         look += 1
                     if look < len(self.instructions) and self.instructions[look].offset == finally_target:
-                         is_finally_pop = True
-                
-                _closing_exc_cleanup = (self.blocks[-1][1] == "exc_cleanup")
+                        is_finally_pop = True
+
+                _closing_exc_cleanup = self.blocks[-1][1] == "exc_cleanup"
                 self.blocks.pop()
                 if not _closing_exc_cleanup:
                     self.indent_level -= 1
@@ -5068,7 +5117,7 @@ class Decompiler39(DecompilerGeneric):
                 # establish the correct indent for finally: header
                 if self._except_header_indents:
                     self.indent_level = self._except_header_indents[-1]
-                
+
                 self._append_reconstructed("finally:")
                 self.indent_level += 1
                 self.blocks.append((finally_target, "finally_body"))
@@ -5144,7 +5193,7 @@ class Decompiler39(DecompilerGeneric):
                     and self.instructions[look].opname in (
                         "LOAD_NAME", "LOAD_GLOBAL", "LOAD_FAST",
                         "LOAD_DEREF", "LOAD_ATTR",
-                    )):
+            )):
                 exc_type = str(self.instructions[look].argval)
                 look += 1
                 # Follow any LOAD_ATTR chain for dotted exception names like socket.error
@@ -5182,7 +5231,7 @@ class Decompiler39(DecompilerGeneric):
                         if (nxt < len(self.instructions)
                                 and self.instructions[nxt].opname in (
                                     "STORE_NAME", "STORE_FAST"
-                                )):
+                        )):
                             look += 1  # skip this POP_TOP
                             break      # next iteration: handle STORE_NAME below
                         look += 1  # skip POP_TOP with no binding after it
@@ -5190,7 +5239,7 @@ class Decompiler39(DecompilerGeneric):
                     if (look < len(self.instructions)
                             and self.instructions[look].opname in (
                                 "STORE_NAME", "STORE_FAST"
-                            )):
+                    )):
                         as_name = str(self.instructions[look].argval)
                         self._exc_as_store_offset = self.instructions[look].offset
                         self._exc_cleanup_name = as_name
@@ -5361,7 +5410,6 @@ class Decompiler39(DecompilerGeneric):
             super()._handle_instruction(instr)
 
 
-
 # ---------------------------------------------------------------------------
 # Python 3.11+ specialisation  (3.11, 3.12, 3.13)
 # ---------------------------------------------------------------------------
@@ -5372,17 +5420,17 @@ class Decompiler311Plus(DecompilerGeneric):
         # Suppress then-branch instructions of detected ternary expressions
         """
         Handle a single bytecode instruction, reconstructing binary and in-place operations and delegating other opcodes.
-        
+
         If the instruction offset is recorded in ternary or compound-suppression sets it is ignored. For BINARY_OP instructions this method:
         - Emits subscript expressions when the op index maps to subscript semantics.
         - Builds binary-expression strings for known binary operator indices and pushes them onto the expression stack.
         - Detects in-place operator indices and, when the following instruction stores back to the same target, emits an augmented-assignment statement and advances the program counter past the store; otherwise it pushes a parenthesized in-place expression onto the stack.
         - Falls back to a placeholder expression for unknown operator indices.
-        
+
         For non-BINARY_OP/RESUME opcodes, handling is delegated to the superclass implementation.
-        
+
         Parameters:
-        	instr (BytecodeInstruction): The disassembled instruction to process. This method may mutate the decompiler's `stack`, `pc`, and reconstructed output.
+                instr (BytecodeInstruction): The disassembled instruction to process. This method may mutate the decompiler's `stack`, `pc`, and reconstructed output.
         """
         if instr.offset in getattr(self, "_ternary_suppress", ()):
             return
@@ -5433,7 +5481,7 @@ class Decompiler311Plus(DecompilerGeneric):
                     if (next_pc < len(self.instructions) and
                             self.instructions[next_pc].opname in (
                                 "STORE_NAME", "STORE_FAST", "STORE_GLOBAL", "STORE_ATTR"
-                            )):
+                    )):
                         store_name = str(self.instructions[next_pc].argval)
                         left_name = str(left).split(".")[-1]  # handle attr access
                         if store_name == left_name or str(left).endswith(store_name):
@@ -5477,10 +5525,11 @@ class Decompiler314(Decompiler311Plus):
     Python 3.14+ specific decompiler logic.
     Handles the new LOAD_SPECIAL opcodes and structure for with statements.
     """
+
     def _handle_instruction(self, instr: BytecodeInstruction):
         """
         Dispatch a single bytecode instruction to the decompiler, handling Python 3.14-specific with-statement preambles and cleanup suppression before delegating to the generic handler.
-        
+
         This method:
         - Recognizes and suppresses instruction offsets reserved by prescans (ternary/compound-condition suppression and recorded with-exit cleanup offsets).
         - Detects Python 3.14 with-statement preambles (COPY 1 + LOAD_SPECIAL/CALL sequence), emits a corresponding `with <ctx>[ as name]:` header, increases indentation, pushes an internal with sentinel on the expression stack, and records/opens a with-body block based on exception-table-derived boundaries.
@@ -5489,10 +5538,10 @@ class Decompiler314(Decompiler311Plus):
         - Ensures any internal with-sentinel (`("_with_info", ...)`) is removed from the expression stack before emitting a return while preserving the actual return value.
         - Handles Python 3.14 combined-store `STORE_FAST_STORE_FAST` by emitting tuple-unpacking assignment text when possible.
         - Delegates all remaining or non-specialized opcodes to the superclass implementation for normal reconstruction.
-        
+
         Parameters:
             instr (BytecodeInstruction): The disassembled instruction to process; its opname, opcode, arg, argval, and offset are used to match patterns and drive stack/block changes.
-        
+
         Side effects:
             May mutate self.pc, self.stack, self.blocks, self.indent_level, self.reconstructed, and may create or update self._with_exit_suppress. Delegates further emission and handling to super()._handle_instruction when appropriate.
         """
@@ -5506,9 +5555,9 @@ class Decompiler314(Decompiler311Plus):
             return
 
         opname = instr.opname
-        
+
         # Suppress normal-path __exit__ body calls (identified by range scan)
-        if getattr(self, "_with_exit_suppress", set()) and instr.offset in self._with_exit_suppress:
+        if getattr(self, "_with_exit_suppress", set()) and instr.offset in getattr(self, "_with_exit_suppress"):
             return
 
         # Handle Python 3.14 LOAD_SPECIAL (opcode 95)
@@ -5520,14 +5569,14 @@ class Decompiler314(Decompiler311Plus):
         # Python 3.14 with preamble starting at COPY 1
         if opname == "COPY" and instr.arg == 1:
             if self.pc + 4 < len(self.instructions):
-                seq = self.instructions[self.pc : self.pc + 5]
+                seq = self.instructions[self.pc: self.pc + 5]
                 # Pattern: LOAD_SPECIAL 1 (__exit__), SWAP 2, SWAP 3, LOAD_SPECIAL 0 (__enter__), CALL 0
                 if (seq[0].opcode == 95 and seq[0].arg == 1 and
                     seq[1].opname == "SWAP" and seq[1].arg == 2 and
                     seq[2].opname == "SWAP" and seq[2].arg == 3 and
                     seq[3].opcode == 95 and seq[3].arg == 0 and
-                    seq[4].opname == "CALL" and seq[4].arg == 0):
-                    
+                        seq[4].opname == "CALL" and seq[4].arg == 0):
+
                     ctx_mgr = str(self.stack.pop()) if self.stack else "unknown_ctx"
                     # Push internal sentinel representing EX and CM that stay on stack
                     self.stack.append(("_with_info", ctx_mgr))
@@ -5540,32 +5589,34 @@ class Decompiler314(Decompiler311Plus):
                         self.pc += 1
                     elif next_instr and next_instr.opname == "POP_TOP":
                         self.pc += 1
-                        
+
                     self._append_reconstructed(f"with {ctx_mgr}{as_name}:")
                     self.indent_level += 1
-                    
+
                     try_end = None
                     exit_body_start = None
                     try:
-                        curr_offset = self.instructions[self.pc].offset if self.pc < len(self.instructions) else getattr(instr, "offset", 0)
+                        curr_offset = self.instructions[self.pc].offset if self.pc < len(
+                            self.instructions) else getattr(instr, "offset", 0)
                         # We use the host Python's dis.Bytecode if it supports exception_entries (3.11+)
                         if hasattr(dis, "Bytecode"):
                             entries = dis.Bytecode(self.code_obj).exception_entries
                             handler_target = None
                             for e in entries:
-                                # Re-sync with exception table: the protected range 
+                                # Re-sync with exception table: the protected range
                                 # usually starts at the first real instruction after CALL.
                                 if e.start >= instr.offset and e.start <= instr.offset + 20:
                                     handler_target = e.target
                                     break
                             if handler_target is not None:
                                 try_end = handler_target
-                                normal_ends = [e.end for e in entries if e.target == handler_target and e.end < handler_target]
+                                normal_ends = [e.end for e in entries if e.target ==
+                                               handler_target and e.end < handler_target]
                                 if normal_ends:
                                     exit_body_start = max(normal_ends)
                     except (AttributeError, IndexError, TypeError, ValueError):
                         pass
-                        
+
                     if try_end is not None:
                         self.blocks.append((try_end, "with_body"))
                     if exit_body_start is not None:
@@ -5591,12 +5642,12 @@ class Decompiler314(Decompiler311Plus):
         elif opname == "LOAD_CONST" and instr.argval is None:
             # Check if this is the start of a 3x None sequence
             if self.pc + 3 < len(self.instructions):
-                seq = self.instructions[self.pc : self.pc + 4]
+                seq = self.instructions[self.pc: self.pc + 4]
                 if (seq[0].opname == "LOAD_CONST" and seq[0].argval is None and
                     seq[1].opname == "LOAD_CONST" and seq[1].argval is None and
                     seq[2].opname == "CALL" and seq[2].arg == 3 and
-                    seq[3].opname == "POP_TOP"):
-                    
+                        seq[3].opname == "POP_TOP"):
+
                     # Suppress the sequence
                     self.pc += 4
                     # Pop the sentinel if it's there
@@ -5610,7 +5661,7 @@ class Decompiler314(Decompiler311Plus):
                     return
 
         # Before any return, ensure we've cleared the internal with-sentinel.
-        # Python 3.14 often leaves _with_info on the stack; we must clear it 
+        # Python 3.14 often leaves _with_info on the stack; we must clear it
         # while preserving the actual return value for the parent handler.
         elif opname in ("RETURN_VALUE", "RETURN_CONST"):
             if any(isinstance(s, tuple) and s[0] == "_with_info" for s in self.stack):
@@ -5750,22 +5801,22 @@ class MarshalParser:
 
     # version-aware CodeType constructor
     def _load_code(self) -> types.CodeType:
-        argcount        = self._read_long()
+        argcount = self._read_long()
         posonlyargcount = self._read_long()
-        kwonlyargcount  = self._read_long()
-        nlocals         = self._read_long()
-        stacksize       = self._read_long()
-        flags           = self._read_long()
-        code            = self.load()
-        consts          = self.load()
-        names           = self.load()
-        varnames        = self.load()
-        freevars        = self.load()
-        cellvars        = self.load()
-        filename        = self.load()
-        name            = self.load()
-        firstlineno     = self._read_long()
-        lnotab          = self.load()
+        kwonlyargcount = self._read_long()
+        nlocals = self._read_long()
+        stacksize = self._read_long()
+        flags = self._read_long()
+        code = self.load()
+        consts = self.load()
+        names = self.load()
+        varnames = self.load()
+        freevars = self.load()
+        cellvars = self.load()
+        filename = self.load()
+        name = self.load()
+        firstlineno = self._read_long()
+        lnotab = self.load()
 
         # Python 3.11+ includes exceptiontable after lnotab in the marshal stream
         # For earlier versions, this field doesn't exist in the stream, so we default to b""
@@ -5779,7 +5830,7 @@ class MarshalParser:
                     exceptiontable = bytes(exceptiontable, 'latin1')
                 elif not isinstance(exceptiontable, bytes):
                     exceptiontable = bytes(exceptiontable) if exceptiontable else b""
-            except:
+            except Exception:
                 exceptiontable = b""
 
         def to_tuple_strings(x):
@@ -5797,15 +5848,15 @@ class MarshalParser:
                 return ()
             return tuple(x)
 
-        code     = bytes(code, 'latin1') if isinstance(code, str) else bytes(code)
-        consts   = to_tuple(consts)
-        names    = to_tuple_strings(names)
+        code = bytes(code, 'latin1') if isinstance(code, str) else bytes(code)
+        consts = to_tuple(consts)
+        names = to_tuple_strings(names)
         varnames = to_tuple_strings(varnames)
         freevars = to_tuple_strings(freevars)
         cellvars = to_tuple_strings(cellvars)
-        lnotab   = bytes(lnotab, 'latin1') if isinstance(lnotab, str) else bytes(lnotab)
+        lnotab = bytes(lnotab, 'latin1') if isinstance(lnotab, str) else bytes(lnotab)
         filename = filename.decode("utf-8", "replace") if isinstance(filename, bytes) else str(filename)
-        name     = name.decode("utf-8", "replace") if isinstance(name, bytes) else str(name)
+        name = name.decode("utf-8", "replace") if isinstance(name, bytes) else str(name)
 
         vi = sys.version_info
 
@@ -5815,7 +5866,7 @@ class MarshalParser:
             #        stacksize, flags, codestring, constants, names,
             #        varnames, filename, name, qualname, firstlineno,
             #        linetable, exceptiontable, freevars, cellvars
-            
+
             # Map lnotab to linetable (with appropriate padding if needed)
             # 3.11+ expects an exceptiontable as well.
             return types.CodeType(
@@ -5864,18 +5915,30 @@ class MarshalParser:
 
 def _get_python_version_from_magic(version_id: int) -> Optional[str]:
     """Return a Python version string (e.g., '3.12') corresponding to the given magic number."""
-    if 3310 <= version_id <= 3349: return "3.4"
-    if 3350 <= version_id <= 3378: return "3.5"
-    if 3379 <= version_id <= 3393: return "3.6"
-    if 3394 <= version_id <= 3412: return "3.7"
-    if 3413 <= version_id <= 3413: return "3.8"
-    if 3420 <= version_id <= 3429: return "3.9"
-    if 3430 <= version_id <= 3449: return "3.10"
-    if 3450 <= version_id <= 3494: return "3.11"
-    if 3495 <= version_id <= 3530: return "3.12"
-    if 3531 <= version_id <= 3559: return "3.13"
-    if version_id >= 3560: return "3.14+"
+    if 3310 <= version_id <= 3349:
+        return "3.4"
+    if 3350 <= version_id <= 3378:
+        return "3.5"
+    if 3379 <= version_id <= 3393:
+        return "3.6"
+    if 3394 <= version_id <= 3412:
+        return "3.7"
+    if 3413 <= version_id <= 3413:
+        return "3.8"
+    if 3420 <= version_id <= 3429:
+        return "3.9"
+    if 3430 <= version_id <= 3449:
+        return "3.10"
+    if 3450 <= version_id <= 3494:
+        return "3.11"
+    if 3495 <= version_id <= 3530:
+        return "3.12"
+    if 3531 <= version_id <= 3559:
+        return "3.13"
+    if version_id >= 3560:
+        return "3.14+"
     return None
+
 
 def get_decompiler(filepath: str, beautification_level: str = 'core') -> DecompilerBase:
     with open(filepath, "rb") as f:
@@ -5894,16 +5957,16 @@ def get_decompiler(filepath: str, beautification_level: str = 'core') -> Decompi
         # We don't recognize the magic or it's very old/corrupt
         input_ver = _get_python_version_from_magic(version_id)
         host_ver = _get_python_version_from_magic(host_version_id)
-        
+
         msg = f"Invalid or unsupported Python magic number: 0x{magic:08x} (version id: {version_id})."
         if input_ver:
             msg += f"\n- Input file appears to be from Python {input_ver}."
         else:
             msg += "\n- Input file version is unrecognized or may be corrupt."
-            
+
         if host_ver:
             msg += f"\n- Current interpreter is Python {host_ver} (magic: 0x{host_magic:08x})."
-        
+
         raise ValueError(msg)
 
     host_magic = int.from_bytes(importlib.util.MAGIC_NUMBER, "little")
@@ -5967,13 +6030,13 @@ def main():
         choices=['none', 'core', 'aggressive'], default='core',
         help="Level of code beautification to apply. 'none' does no beautification. 'core' collapses else-if to elif. 'aggressive' is a stub for future use."
     )
-    
+
     args = parser.parse_args()
-    
+
     try:
         decompiler = get_decompiler(args.input, args.beautification_level)
         output_text = decompiler.decompile()
-        
+
         if args.output:
             try:
                 with open(args.output, "w", encoding="utf-8") as f:
@@ -5988,7 +6051,7 @@ def main():
             else:
                 print(f"Warning: Decompiler returned no source code for {args.input}", file=sys.stderr)
                 sys.exit(1)
-            
+
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)

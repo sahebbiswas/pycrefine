@@ -1,6 +1,8 @@
+import sys
 import unittest
-import os
-from .test_helpers import decompile, assert_contains
+
+from .test_helpers import assert_contains, decompile
+
 
 class TestBasicStatements(unittest.TestCase):
     def test_simple_assignment(self):
@@ -64,6 +66,7 @@ class TestBasicStatements(unittest.TestCase):
         out = decompile(src)
         self.assertGreater(len(out.strip()), 0)
 
+
 class TestAugmentedAssignment(unittest.TestCase):
     def _check_op(self, op: str, sym: str) -> None:
         src = f"x = 4\nx {op} 2\n"
@@ -91,6 +94,7 @@ class TestAugmentedAssignment(unittest.TestCase):
     def test_augassign_sequence(self):
         out = decompile("x = 5\nx += 3\nx -= 1\nx ^= 2\n")
         assert_contains(out, "x += 3", "x -= 1", "x ^= 2")
+
 
 class TestOperators(unittest.TestCase):
     def _check_binary(self, expr: str, expected: str) -> None:
@@ -136,6 +140,44 @@ class TestOperators(unittest.TestCase):
     def test_is_not_op(self):
         out = decompile("x = 1\ny = x is not None\n")
         self.assertIn("is not", out)
+
+
+class TestComprehensions(unittest.TestCase):
+    """Verifies that comprehensions decompile as expected using the yield representation
+    for LIST_APPEND, SET_ADD, MAP_ADD inside inline comprehensions."""
+
+    def test_list_comprehension_yield(self):
+        src = "def f(items):\n    return [x * 2 for x in items if x > 0]\n"
+        out = decompile(src)
+        if sys.version_info >= (3, 12):
+            self.assertIn("yield (x * 2)", out)
+            self.assertNotIn("append", out)
+        else:
+            self.assertTrue("[x * 2 for x in items]" in out or "[(x * 2) for x in items]" in out)
+
+    def test_dict_comprehension_yield(self):
+        src = "def h(items):\n    return {k: v for k, v in items}\n"
+        out = decompile(src)
+        if sys.version_info >= (3, 12):
+            self.assertTrue("yield k: v" in out or "yield (k: v)" in out)
+        else:
+            self.assertIn("{k: v for k, v in items}", out)
+
+    def test_set_comprehension_yield(self):
+        src = "def g(items):\n    return {x for x in items}\n"
+        out = decompile(src)
+        if sys.version_info >= (3, 12):
+            self.assertTrue("yield x" in out)
+        else:
+            self.assertIn("{x for x in items}", out)
+
+    def test_negative_comprehension_no_yield_in_normal_loop(self):
+        # A normal loop calling list.append should NOT emit yield
+        src = "def f(items):\n    res = []\n    for x in items:\n        res.append(x * 2)\n    return res\n"
+        out = decompile(src)
+        self.assertNotIn("yield", out)
+        self.assertIn("append", out)
+
 
 if __name__ == "__main__":
     unittest.main()

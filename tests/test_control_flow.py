@@ -1,7 +1,9 @@
-import unittest
 import os
 import sys
-from .test_helpers import decompile, assert_contains
+import unittest
+
+from .test_helpers import _run39_full_impl, assert_contains, decompile
+
 
 class TestControlFlow(unittest.TestCase):
     def test_if_simple(self):
@@ -13,6 +15,7 @@ class TestControlFlow(unittest.TestCase):
         self.assertIn("x > 0", out)
         self.assertTrue("y = 1" in out or "1 if" in out)
         self.assertTrue("y = 0" in out or "else 0" in out)
+
     def test_if_elif_else_flattening(self):
         src = (
             "def test_elif(x):\n"
@@ -32,7 +35,7 @@ class TestControlFlow(unittest.TestCase):
         )
         out = decompile(src)
         self.assertIn("elif x == 2:", out)
-        self.assertNotRegex(out, r"else:\s*\n\s*if") 
+        self.assertNotRegex(out, r"else:\s*\n\s*if")
 
     def test_for_else_no_flattening(self):
         """for...else: the beautifier must never inject an `elif` keyword, and the decompiler must emit `else:`."""
@@ -49,7 +52,6 @@ class TestControlFlow(unittest.TestCase):
         self.assertNotIn("elif", out)
         self.assertIn("for", out)
         self.assertIn("else:", out)
-
 
     @unittest.skipIf(sys.version_info >= (3, 10), "try..else only implemented for 3.9 so far")
     def test_try_else_strict(self):
@@ -89,7 +91,6 @@ class TestControlFlow(unittest.TestCase):
         out = decompile(src)
         self.assertNotIn("elif", out)
         self.assertIn("try:", out)
-
 
     def test_for_loop(self):
         out = decompile("for i in range(3):\n    print(i)\n")
@@ -151,6 +152,7 @@ class TestControlFlow(unittest.TestCase):
         self.assertNotIn("else:", out)
         assert_contains(out, "if x is None:", "if x == 1:", "return False")
 
+
 class TestNoneGuards(unittest.TestCase):
     def test_pjif_none_emits_is_not_none(self):
         out = decompile("x = None\nif x is not None:\n    print(1)\n")
@@ -171,6 +173,7 @@ class TestNoneGuards(unittest.TestCase):
         ]:
             out = decompile(src)
             self.assertGreater(len(out.strip()), 0)
+
 
 class TestTernaryExpression(unittest.TestCase):
     def test_basic_ternary_assign(self):
@@ -228,6 +231,7 @@ class TestTernaryExpression(unittest.TestCase):
         import ast
         ast.parse(out)
 
+
 class TestCompoundConditions(unittest.TestCase):
     def test_compound_and(self):
         src = "def f(a, b):\n    if a == 1 and b == 2:\n        return True\n    return False\n"
@@ -262,7 +266,8 @@ class TestCompoundConditions(unittest.TestCase):
             "    return False\n"
         )
         out = decompile(src)
-        self.assertTrue("x is not None and x > 0 or y is None and z == 1" in out or "(x is not None and x > 0) or (y is None and z == 1)" in out)
+        self.assertTrue(
+            "x is not None and x > 0 or y is None and z == 1" in out or "(x is not None and x > 0) or (y is None and z == 1)" in out)
 
     def test_compound_short_circuit_with_call(self):
         src = "def f(x):\n    if x is not None and len(x) > 0:\n        return x[0]\n    return None\n"
@@ -297,6 +302,7 @@ class TestCompoundConditions(unittest.TestCase):
         )
         out = decompile(src)
         assert_contains(out, "if a is None and b is None and c is None and d is None and e is None:")
+
 
 class TestInfiniteLoops(unittest.TestCase):
     def test_simple_while_true(self):
@@ -402,6 +408,7 @@ class TestInfiniteLoops(unittest.TestCase):
             body_indent = len(body_lines[0]) - len(body_lines[0].lstrip())
             self.assertGreater(body_indent, while_indent)
 
+
 class TestTernaryExpressions(unittest.TestCase):
     def test_ternary_simple_bytes_if_else(self):
         src = (
@@ -483,7 +490,6 @@ class TestTernaryExpressions(unittest.TestCase):
         self.assertIn("1", out)
         self.assertIn("-1", out)
 
-from tests.test_helpers import _run39_full_impl
 
 class TestTernarySuppressionAllSubclasses(unittest.TestCase):
     def _run39_full(self, instructions):
@@ -494,45 +500,46 @@ class TestTernarySuppressionAllSubclasses(unittest.TestCase):
         instructions = [
             Instr(124, "LOAD_FAST",          0,    "iv",          0,  True,  False),
             Instr(100, "LOAD_CONST",         0,    None,          2,  None,  False),
-            Instr( 93, "IS_OP",              0,    None,          4,  None,  False),
+            Instr(93, "IS_OP",              0,    None,          4,  None,  False),
             Instr(114, "POP_JUMP_IF_FALSE",  14,   14,            6,  None,  False),
             Instr(100, "LOAD_CONST",         1,    "\x00" * 16,   8,  None,  False),
             Instr(110, "JUMP_FORWARD",       8,    20,           10,  None,  False),
-            Instr(116, "LOAD_GLOBAL",        0,    "api_1",      14,  None,  True ),
+            Instr(116, "LOAD_GLOBAL",        0,    "api_1",      14,  None,  True),
             Instr(124, "LOAD_FAST",          0,    "iv",         16,  None,  False),
             Instr(131, "CALL_FUNCTION",      1,    1,            18,  None,  False),
-            Instr(125, "STORE_FAST",         0,    "iv",         20,  None,  True ),
+            Instr(125, "STORE_FAST",         0,    "iv",         20,  None,  True),
             Instr(124, "LOAD_FAST",          0,    "iv",         22,  None,  False),
-            Instr( 83, "RETURN_VALUE",       None, None,         24,  None,  False),
+            Instr(83, "RETURN_VALUE",       None, None,         24,  None,  False),
         ]
         out = self._run39_full(instructions)
         self.assertIn("api_1(iv)", out)
         self.assertNotIn("func(", out)
 
     def test_ternary_suppression_set_populated_for_call_else(self):
-        from pycrefine import BytecodeInstruction as Instr, Decompiler39
-        import types
+        from pycrefine import BytecodeInstruction as Instr
+        from pycrefine import Decompiler39
         code = compile("pass", "<test>", "exec")
         dec = Decompiler39(code)
         dec.instructions = [
             Instr(124, "LOAD_FAST",          0,  "iv",    0, True,  False),
             Instr(100, "LOAD_CONST",         0,  None,    2, None,  False),
-            Instr( 93, "IS_OP",              0,  None,    4, None,  False),
+            Instr(93, "IS_OP",              0,  None,    4, None,  False),
             Instr(114, "POP_JUMP_IF_FALSE", 14,  14,      6, None,  False),
             Instr(100, "LOAD_CONST",         1,  "\x00",  8, None,  False),
             Instr(110, "JUMP_FORWARD",       8,  20,     10, None,  False),
-            Instr(116, "LOAD_GLOBAL",        0,  "f",    14, None,  True ),
+            Instr(116, "LOAD_GLOBAL",        0,  "f",    14, None,  True),
             Instr(124, "LOAD_FAST",          0,  "iv",   16, None,  False),
             Instr(131, "CALL_FUNCTION",      1,  1,      18, None,  False),
-            Instr(125, "STORE_FAST",         0,  "iv",   20, None,  True ),
-            Instr( 83, "RETURN_VALUE",      None, None,  22, None,  False),
+            Instr(125, "STORE_FAST",         0,  "iv",   20, None,  True),
+            Instr(83, "RETURN_VALUE",      None, None,  22, None,  False),
         ]
         dec._prescan_ternaries()
         suppress = getattr(dec, "_ternary_suppress", set())
         self.assertIn(18, suppress)
 
     def test_ternary_suppression_does_not_leak_into_next_statement(self):
-        from pycrefine import BytecodeInstruction as Instr, Decompiler39
+        from pycrefine import BytecodeInstruction as Instr
+        from pycrefine import Decompiler39
         code = compile("pass", "<test>", "exec")
         dec = Decompiler39(code)
         dec.instructions = [
@@ -540,10 +547,10 @@ class TestTernarySuppressionAllSubclasses(unittest.TestCase):
             Instr(114, "POP_JUMP_IF_FALSE",  8,  8,     2, None,  False),
             Instr(100, "LOAD_CONST",         1,  1,     4, None,  False),
             Instr(110, "JUMP_FORWARD",       4, 10,     6, None,  False),
-            Instr(100, "LOAD_CONST",         2,  2,     8, None,  True ),
+            Instr(100, "LOAD_CONST",         2,  2,     8, None,  True),
             Instr(125, "STORE_FAST",         0,  "x",  10, None,  False),
-            Instr( 90, "STORE_NAME",         1, "y",   12, None,  False),
-            Instr( 83, "RETURN_VALUE",      None, None, 14, None,  False),
+            Instr(90, "STORE_NAME",         1, "y",   12, None,  False),
+            Instr(83, "RETURN_VALUE",      None, None, 14, None,  False),
         ]
         dec._prescan_ternaries()
         suppress = getattr(dec, "_ternary_suppress", set())
@@ -552,6 +559,7 @@ class TestTernarySuppressionAllSubclasses(unittest.TestCase):
         self.assertIn(8, suppress)
         self.assertNotIn(10, suppress)
         self.assertNotIn(12, suppress)
+
 
 class TestAugAssignTernary(unittest.TestCase):
     def test_augmented_assign_ternary_no_phantom_func(self):
@@ -589,7 +597,8 @@ class TestAugAssignTernary(unittest.TestCase):
         self.assertNotIn("func(", out)
 
     def test_inplace_ops_in_prescan_ternaries(self):
-        from pycrefine import BytecodeInstruction as Instr, Decompiler39
+        from pycrefine import BytecodeInstruction as Instr
+        from pycrefine import Decompiler39
         code = compile("pass", "<test>", "exec")
         dec = Decompiler39(code)
         dec.instructions = [
@@ -598,15 +607,16 @@ class TestAugAssignTernary(unittest.TestCase):
             Instr(114, "POP_JUMP_IF_FALSE", 10, 10,  4, None,  False),
             Instr(100, "LOAD_CONST",     1,  "yes",  6, None,  False),
             Instr(110, "JUMP_FORWARD",   4,  12,     8, None,  False),
-            Instr(100, "LOAD_CONST",     2,  "no",  10, None,  True ),
-            Instr( 23, "INPLACE_ADD",   None, None, 12, None,  True ),
+            Instr(100, "LOAD_CONST",     2,  "no",  10, None,  True),
+            Instr(23, "INPLACE_ADD",   None, None, 12, None,  True),
             Instr(125, "STORE_FAST",     0,  "x",   14, None,  False),
-            Instr( 83, "RETURN_VALUE",  None, None,  16,None,  False),
+            Instr(83, "RETURN_VALUE",  None, None,  16, None,  False),
         ]
         dec._prescan_ternaries()
         suppress = getattr(dec, "_ternary_suppress", set())
         self.assertIn(6, suppress)
         self.assertIn(10, suppress)
+
 
 class TestWhilePrescan(unittest.TestCase):
     def _get_dec(self, src: str):
@@ -650,6 +660,37 @@ class TestWhilePrescan(unittest.TestCase):
         has_if = "if n < 10:" in out
         self.assertTrue(has_while or has_if)
         self.assertEqual(out.count("while n < 10:") + out.count("if n < 10:"), 1)
+
+
+class TestChainedExpressions(unittest.TestCase):
+    def test_basic_chain_2(self):
+        src = "def f(a, b, c):\n    if a < b and b < c:\n        return True\n    return False\n"
+        out = decompile(src)
+        self.assertIn("a < b < c", out)
+
+    def test_basic_chain_3(self):
+        src = "def f(a, b, c, d):\n    if a < b and b < c and c < d:\n        return True\n    return False\n"
+        out = decompile(src)
+        self.assertIn("a < b < c < d", out)
+
+    def test_chain_mixed_ops(self):
+        src = "def f(a, b, c):\n    if a <= b and b != c:\n        return True\n    return False\n"
+        out = decompile(src)
+        self.assertTrue("a <= b != c" in out or "a <= b and b != c" in out)
+
+    def test_chain_negative_mismatched_vars(self):
+        src = "def f(a, b, c, d):\n    if a < b and c < d:\n        return True\n    return False\n"
+        out = decompile(src)
+        self.assertIn("a < b", out)
+        self.assertIn("c < d", out)
+        self.assertNotRegex(out, r'<\s*b\s*<')
+
+    def test_chain_negative_mismatched_ops(self):
+        src = "def f(a, b, c):\n    if a < b and b + 1 < c:\n        return True\n    return False\n"
+        out = decompile(src)
+        self.assertIn("and", out)
+        self.assertNotRegex(out, r'<\s*b\s*<')
+
 
 if __name__ == "__main__":
     unittest.main()

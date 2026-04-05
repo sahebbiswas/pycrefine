@@ -1,9 +1,10 @@
-import unittest
+import importlib
 import os
 import sys
-import importlib
 import tempfile
 import textwrap
+import unittest
+
 
 def _import_check_coherency():
     cc_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "debug")
@@ -15,6 +16,7 @@ def _import_check_coherency():
         if exc.name == "check_coherency":
             return None
         raise
+
 
 class TestTokenHamming(unittest.TestCase):
     """
@@ -83,43 +85,43 @@ class TestTokenHamming(unittest.TestCase):
 
     def test_single_token_substitution(self):
         orig = ["result = compute(x, y)"]
-        dec  = ["result = compute(a, y)"]
-        score, _, total, flips, _ = self.cc._hamming_score_line_aligned(orig, dec)
+        dec = ["result = compute(a, y)"]
+        score, _, _total, flips, _ = self.cc._hamming_score_line_aligned(orig, dec)
         self.assertLess(score, 1.0)
         self.assertGreater(score, 0.5)
         self.assertEqual(flips, 1)
 
     def test_extra_parens_are_zero_cost(self):
         orig = ["y = x + 1"]
-        dec  = ["y = (x + 1)"]
+        dec = ["y = (x + 1)"]
         score, _, _total, flips, _ = self.cc._hamming_score_line_aligned(orig, dec)
         self.assertEqual(flips, 0)
         self.assertEqual(score, 1.0)
 
     def test_pass_insertion_is_zero_cost(self):
         orig = ["class Foo:"]
-        dec  = ["class Foo:", "pass"]
+        dec = ["class Foo:", "pass"]
         score, _, _total, flips, _ = self.cc._hamming_score_line_aligned(orig, dec)
         self.assertEqual(flips, 0)
         self.assertEqual(score, 1.0)
 
     def test_half_lines_missing_scores_below_half(self):
         orig = ["x = 1", "y = 2", "z = 3", "w = 4"]
-        dec  = ["x = 1", "y = 2"]
+        dec = ["x = 1", "y = 2"]
         score, _, _, _, _ = self.cc._hamming_score_line_aligned(orig, dec)
         self.assertLess(score, 0.75)
 
     def test_flip_sample_populated_on_mismatch(self):
         orig = ["foo = bar(x, y, z)"]
-        dec  = ["baz = qux(a, b, c)"]
+        dec = ["baz = qux(a, b, c)"]
         _, _, _, flips, flip_sample = self.cc._hamming_score_line_aligned(orig, dec)
         self.assertGreater(flips, 0)
         self.assertGreater(len(flip_sample), 0)
 
     def test_score_monotone_with_accuracy(self):
         orig = ["result = compute_value(alpha, beta, gamma)"]
-        perfect     = ["result = compute_value(alpha, beta, gamma)"]
-        two_errors  = ["result = compute_value(alpha, XXXX, gamma)"]
+        perfect = ["result = compute_value(alpha, beta, gamma)"]
+        two_errors = ["result = compute_value(alpha, XXXX, gamma)"]
         many_errors = ["result = YYYYY(alpha, XXXX, ZZZZ)"]
 
         def s(dec):
@@ -136,7 +138,7 @@ class TestTokenHamming(unittest.TestCase):
 
     def test_excess_artefact_penalised(self):
         orig = "if func == '__build_class__': pass\n"
-        dec  = "__build_class__\nif func == '__build_class__': pass\n"
+        dec = "__build_class__\nif func == '__build_class__': pass\n"
         result = self.cc.score_cleanliness(dec, orig)
         self.assertLess(result.score, 1.0)
         self.assertIn("__build_class__", result.detail)
@@ -154,7 +156,7 @@ class TestTokenHamming(unittest.TestCase):
 
     def test_completely_different_source_low_score(self):
         orig = "def compute(x, y):\n    return x * y + x - y\n"
-        dec  = "import os\nfoo = bar\n"
+        dec = "import os\nfoo = bar\n"
         result = self.cc.score_token_hamming(orig, dec)
         self.assertLess(result.score, 0.5)
 
@@ -176,26 +178,26 @@ class TestTokenHamming(unittest.TestCase):
 
     def test_quote_normalisation_is_zero_cost(self):
         orig = "name = 'hello'\n"
-        dec  = 'name = "hello"\n'
+        dec = 'name = "hello"\n'
         result = self.cc.score_token_hamming(orig, dec)
         self.assertEqual(result.score, 1.0)
 
     def test_detail_contains_flip_count(self):
         orig = "def add(x, y):\n    return x + y\n"
-        dec  = "def add(a, b):\n    return a + b\n"
+        dec = "def add(a, b):\n    return a + b\n"
         result = self.cc.score_token_hamming(orig, dec)
         if result.score < 1.0:
             self.assertIn("flip", result.detail)
 
     def test_extra_parens_in_full_text(self):
         orig = "x = 1\ny = x + 2\nz = y * 3\n"
-        dec  = "x = 1\ny = (x + 2)\nz = (y * 3)\n"
+        dec = "x = 1\ny = (x + 2)\nz = (y * 3)\n"
         result = self.cc.score_token_hamming(orig, dec)
         self.assertEqual(result.score, 1.0)
 
     def test_annotation_stripping_is_zero_cost(self):
         orig = "def greet(name: str) -> str:\n    return name\n"
-        dec  = "def greet(name):\n    return name\n"
+        dec = "def greet(name):\n    return name\n"
         result = self.cc.score_token_hamming(orig, dec)
         self.assertEqual(result.score, 1.0)
 
@@ -239,6 +241,7 @@ class TestTokenHamming(unittest.TestCase):
             if os.path.exists(sp):
                 os.unlink(sp)
         self.assertEqual(len(report.dimensions), 9)
+
 
 class TestOutputCleanliness(unittest.TestCase):
     """
@@ -352,7 +355,7 @@ class TestOutputCleanliness(unittest.TestCase):
         self.assertNotIn("# <class", result.detail)
 
     def test_tuple_leak_in_assignment_penalised(self):
-        dec_func  = "x = ('func', 'def f(): pass')()\n"
+        dec_func = "x = ('func', 'def f(): pass')()\n"
         result = self.cc.score_cleanliness(dec_func, "")
         self.assertIn("raw-tuple leak", result.detail)
 
@@ -365,6 +368,7 @@ class TestOutputCleanliness(unittest.TestCase):
         result = self.cc.score_cleanliness("x = 1\n", "x = 1\n")
         self.assertEqual(result.name, "Output cleanliness")
         self.assertAlmostEqual(result.weight, 0.05, places=5)
+
 
 if __name__ == "__main__":
     unittest.main()

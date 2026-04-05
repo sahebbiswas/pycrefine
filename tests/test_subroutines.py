@@ -1,6 +1,8 @@
+from pycrefine import BytecodeInstruction, Decompiler39
 import unittest
-import os
-from .test_helpers import decompile, assert_contains
+
+from .test_helpers import assert_contains, decompile
+
 
 class TestFunctions(unittest.TestCase):
     def test_simple_function(self):
@@ -52,6 +54,7 @@ class TestFunctions(unittest.TestCase):
         out = decompile("print('hello', 'world')\n")
         assert_contains(out, "print(")
 
+
 class TestClasses(unittest.TestCase):
     def test_simple_class(self):
         out = decompile("class Foo:\n    pass\n")
@@ -73,11 +76,9 @@ class TestClasses(unittest.TestCase):
         out = decompile("class Foo:\n    def __init__(self):\n        self.name = 'test'\n")
         assert_contains(out, "self.name = 'test'")
 
-from pycrefine import Decompiler39, BytecodeInstruction
 
 class TestDecompiler39Classes(unittest.TestCase):
     def _make_dec(self):
-        import types
         code = compile("pass", "<test>", "exec")
         return Decompiler39(code)
 
@@ -177,6 +178,7 @@ class TestDecompiler39Classes(unittest.TestCase):
         out = "\n".join(dec.reconstructed)
         self.assertIn("class Foo:", out)
         self.assertNotIn("('class'", out)
+
 
 class TestGenexprRendering(unittest.TestCase):
     def test_simple_genexpr_renders_inline(self):
@@ -282,6 +284,7 @@ class TestGenexprRendering(unittest.TestCase):
             if "return" in line and "x" in line:
                 self.assertNotIn("(x + 1)", line)
 
+
 class TestDecorators(unittest.TestCase):
     def test_simple_decorator(self):
         out = decompile("@deco\ndef f(x):\n    return x\n")
@@ -327,6 +330,7 @@ class TestDecorators(unittest.TestCase):
         out = decompile("def f(x):\n    return x\n")
         self.assertNotIn("@", out)
 
+
 class TestImports(unittest.TestCase):
     def test_plain_import(self):
         out = decompile("import os\n")
@@ -351,6 +355,7 @@ class TestImports(unittest.TestCase):
     def test_import_and_use(self):
         out = decompile("import os\nx = os.getcwd()\n")
         assert_contains(out, "import os")
+
 
 if __name__ == "__main__":
     unittest.main()
