@@ -613,5 +613,45 @@ class TestStoreDerefDispatch(unittest.TestCase):
         dec = Decompiler39(code)
         self.assertIn("STORE_DEREF", dec._dispatch)
 
+class TestChainedComparisons(unittest.TestCase):
+    def test_positive_chaining(self):
+        from pycrefine import collapse_chained_comparisons
+        # Basic case
+        self.assertEqual(
+            collapse_chained_comparisons("1 <= in_a", "in_a <= 10", "core"),
+            "1 <= in_a <= 10"
+        )
+        # Parentheses match
+        self.assertEqual(
+            collapse_chained_comparisons("x <= (a + b)", "(a + b) <= 10", "core"),
+            "x <= (a + b) <= 10"
+        )
+        # Multiply chained matching rightmost operator
+        self.assertEqual(
+            collapse_chained_comparisons("a < b < c", "c < d", "core"),
+            "a < b < c < d"
+        )
+        # Matching variable explicitly (not just substring match)
+        self.assertEqual(
+            collapse_chained_comparisons("1 <= val", "val == 2", "aggressive"),
+            "1 <= val == 2"
+        )
+
+    def test_negative_chaining(self):
+        from pycrefine import collapse_chained_comparisons
+        # Variable name substring overlap (should NOT match)
+        self.assertIsNone(
+            collapse_chained_comparisons("1 <= in_a", "a <= 10", "core")
+        )
+        # Function call argument overlap (should NOT match)
+        self.assertIsNone(
+            collapse_chained_comparisons("foo(x <= y)", "y <= 10", "core")
+        )
+        # None when beautification disabled or low
+        self.assertIsNone(
+            collapse_chained_comparisons("1 <= in_a", "in_a <= 10", "none")
+        )
+
 if __name__ == "__main__":
     unittest.main()
+

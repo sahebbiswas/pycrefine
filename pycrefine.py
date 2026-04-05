@@ -207,6 +207,38 @@ def _collect_multiline_header(lines: List[str], start_idx: int, header_indent_le
             return hj, " ".join(parts)
     return start_idx, first_stripped[kw_len:].rstrip()
 
+def collapse_chained_comparisons(e1: str, e2: str, b_level: str) -> Optional[str]:
+    """
+    Attempt to collapse implicit chained conditions (e.g. `a < b` and `b < c`)
+    into explicit python shorthand: `a < b < c`.
+    """
+    if b_level not in ('core', 'aggressive'):
+        return None
+    ops = [' <= ', ' >= ', ' < ', ' > ', ' == ', ' != ', ' in ', ' not in ', ' is ', ' is not ']
+    e2_left = None
+    e2_remainder = None
+    depth = 0
+    for idx, char in enumerate(e2):
+        if char == '(':
+            depth += 1
+        elif char == ')':
+            depth -= 1
+        elif depth == 0:
+            for op in ops:
+                if e2.startswith(op, idx):
+                    e2_left = e2[:idx]
+                    e2_remainder = e2[idx:]
+                    break
+            if e2_left is not None:
+                break
+    if not e2_left:
+        return None
+    if e1.endswith(e2_left):
+        e1_prefix = e1[:-len(e2_left)]
+        if any(e1_prefix.endswith(op) for op in ops):
+            return e1_prefix + e2_left + e2_remainder
+    return None
+
 
 def flatten_elif(source: str) -> str:
     lines = source.split('\n')
@@ -1560,33 +1592,6 @@ class DecompilerGeneric(DecompilerBase):
             # on jump targets. A jump that targets a point before the current 
             # "final exit" defines the boundary of a local subgroup.
             
-            def _try_chain_exprs(e1: str, e2: str, b_level: str):
-                if b_level not in ('core', 'aggressive'):
-                    return None
-                ops = [' <= ', ' >= ', ' < ', ' > ', ' == ', ' != ', ' in ', ' not in ', ' is ', ' is not ']
-                e2_left = None
-                e2_remainder = None
-                depth = 0
-                for idx, char in enumerate(e2):
-                    if char == '(':
-                        depth += 1
-                    elif char == ')':
-                        depth -= 1
-                    elif depth == 0:
-                        for op in ops:
-                            if e2.startswith(op, idx):
-                                e2_left = e2[:idx]
-                                e2_remainder = e2[idx:]
-                                break
-                        if e2_left is not None:
-                            break
-                if not e2_left:
-                    return None
-                if e1.endswith(e2_left):
-                    e1_prefix = e1[:-len(e2_left)]
-                    if any(e1_prefix.endswith(op) for op in ops):
-                        return e1_prefix + e2_left + e2_remainder
-                return None
 
             def join_flat(s_idx, e_idx):
                 """Linearly joins parts[s_idx:e_idx] without recursion."""
@@ -1601,7 +1606,7 @@ class DecompilerGeneric(DecompilerBase):
                     next_term = parts[k][0]
                     chained = None
                     if c == "and":
-                        chained = _try_chain_exprs(comb, next_term, self.beautification_level)
+                        chained = collapse_chained_comparisons(comb, next_term, self.beautification_level)
                     if chained:
                         comb = chained
                     else:
@@ -1656,7 +1661,7 @@ class DecompilerGeneric(DecompilerBase):
                     
                     chained = None
                     if conn == "and" and not has_or and not next_has_or:
-                        chained = _try_chain_exprs(combined, next_expr, self.beautification_level)
+                        chained = collapse_chained_comparisons(combined, next_expr, self.beautification_level)
                     if chained:
                         combined = chained
                     else:

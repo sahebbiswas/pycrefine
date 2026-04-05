@@ -651,5 +651,34 @@ class TestWhilePrescan(unittest.TestCase):
         self.assertTrue(has_while or has_if)
         self.assertEqual(out.count("while n < 10:") + out.count("if n < 10:"), 1)
 
+class TestChainedExpressions(unittest.TestCase):
+    def test_basic_chain_2(self):
+        src = "def f(a, b, c):\n    if a < b and b < c:\n        return True\n    return False\n"
+        out = decompile(src)
+        self.assertIn("a < b < c", out)
+
+    def test_basic_chain_3(self):
+        src = "def f(a, b, c, d):\n    if a < b and b < c and c < d:\n        return True\n    return False\n"
+        out = decompile(src)
+        self.assertIn("a < b < c < d", out)
+
+    def test_chain_mixed_ops(self):
+        src = "def f(a, b, c):\n    if a <= b and b != c:\n        return True\n    return False\n"
+        out = decompile(src)
+        self.assertTrue("a <= b != c" in out or "a <= b and b != c" in out)
+
+    def test_chain_negative_mismatched_vars(self):
+        src = "def f(a, b, c, d):\n    if a < b and c < d:\n        return True\n    return False\n"
+        out = decompile(src)
+        self.assertIn("a < b", out)
+        self.assertIn("c < d", out)
+        self.assertNotIn(" < b < ", out)
+
+    def test_chain_negative_mismatched_ops(self):
+        src = "def f(a, b, c):\n    if a < b and b + 1 < c:\n        return True\n    return False\n"
+        out = decompile(src)
+        self.assertIn("and", out)
+        self.assertNotIn(" < b < ", out)
+
 if __name__ == "__main__":
     unittest.main()
