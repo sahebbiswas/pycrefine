@@ -388,5 +388,152 @@ class TestNestedTryInsideExcept(unittest.TestCase):
                          f"Expected exactly 1 try:, got {try_count} (inner guard leaked):\n{out}")
 
 
+class TestNestedTryInForLoop39(unittest.TestCase):
+    """Regression tests for Python 3.9 (SETUP_FINALLY) try/except inside for loops.
+
+    Covers three distinct bugs:
+    1. POP_JUMP_IF_FALSE inside a try body was misread as a 'while' condition instead of 'if'.
+    2. JUMP_ABSOLUTE at end of exception handler body (for 'continue') was rendered as 'pass'.
+    3. 'except' header indentation was wrong due to the spurious 'while' block nesting.
+
+    The synthetic bytecode below represents the pattern:
+        for offset in (16, 12, 8, 4):
+            try:
+                obj = in_b
+                if isinstance(obj, int):
+                    code_obj = obj
+                    break
+            except Exception:
+                continue
+    """
+
+    def _run39(self, instructions):
+        return _run39_full_impl(instructions)
+
+    def _make_instructions(self):
+        """Build the canonical Python 3.9 bytecode for the for+try+break+continue pattern."""
+        from pycrefine import BytecodeInstruction as Instr
+        # Offsets and structure:
+        #   0:  LOAD_CONST (16,12,8,4)        get iterable
+        #   2:  GET_ITER
+        #   4:  FOR_ITER -> 60 (end of for)    ← is_jump_target
+        #   6:  STORE_FAST offset               ← is_jump_target (loop top)
+        #   8:  SETUP_FINALLY -> 44             open try, handler at 44
+        #  10:  LOAD_FAST in_b
+        #  12:  STORE_FAST obj
+        #  14:  LOAD_GLOBAL isinstance
+        #  16:  LOAD_FAST obj
+        #  18:  LOAD_GLOBAL int
+        #  20:  CALL_FUNCTION 2
+        #  22:  POP_JUMP_IF_FALSE -> 34         if false: skip to POP_BLOCK (NOT while)
+        #  24:  LOAD_FAST in_b
+        #  26:  STORE_FAST code_obj
+        #  28:  JUMP_ABSOLUTE 60               break: jump past FOR_ITER end
+        #  30:  NOP (padding)
+        #  32:  NOP (padding)
+        #  34:  POP_BLOCK                       ← is_jump_target (POP_JUMP_IF_FALSE False target)
+        #  36:  JUMP_ABSOLUTE 4                 for-loop natural continue (NOT 'continue' keyword)
+        #  38-42: NOPs
+        #  44:  DUP_TOP                        ← is_jump_target (handler entry)
+        #  46:  LOAD_GLOBAL Exception
+        #  48:  JUMP_IF_NOT_EXC_MATCH -> 58
+        #  50:  POP_TOP                        strip exc type
+        #  52:  POP_TOP                        strip exc value
+        #  54:  POP_TOP                        strip exc tb
+        #  56:  JUMP_ABSOLUTE 4                continue: jump to FOR_ITER top
+        #  58:  POP_EXCEPT                     ← is_jump_target (no-match path)
+        #  60:  RERAISE 0                      ← is_jump_target (FOR_ITER end)
+        #  62:  LOAD_CONST None
+        #  64:  RETURN_VALUE
+        return [
+            Instr(100, "LOAD_CONST",          1, (16,12,8,4),  0,  True,  False),
+            Instr(68,  "GET_ITER",          None, None,          2,  None,  False),
+            Instr(93,  "FOR_ITER",            56, 60,            4,  None,  True),   # FOR_ITER end=60
+            Instr(125, "STORE_FAST",           0, "offset",      6,  None,  True),   # loop top
+            Instr(122, "SETUP_FINALLY",        36, 44,           8,  None,  False),  # handler@44
+            Instr(124, "LOAD_FAST",            1, "in_b",       10,  None,  False),
+            Instr(125, "STORE_FAST",           2, "obj",        12,  None,  False),
+            Instr(116, "LOAD_GLOBAL",          0, "isinstance", 14,  None,  False),
+            Instr(124, "LOAD_FAST",            2, "obj",        16,  None,  False),
+            Instr(116, "LOAD_GLOBAL",          1, "int",        18,  None,  False),
+            Instr(131, "CALL_FUNCTION",        2, 2,            20,  None,  False),
+            Instr(114, "POP_JUMP_IF_FALSE",   34, 34,           22,  None,  False),  # if-false -> POP_BLOCK
+            Instr(124, "LOAD_FAST",            1, "in_b",       24,  None,  False),
+            Instr(125, "STORE_FAST",           3, "code_obj",   26,  None,  False),
+            Instr(113, "JUMP_ABSOLUTE",       60, 60,           28,  None,  False),  # break
+            Instr(9,   "NOP",               None, None,         30,  None,  False),
+            Instr(9,   "NOP",               None, None,         32,  None,  False),
+            Instr(87,  "POP_BLOCK",         None, None,         34,  None,  True),   # is_jump_target
+            Instr(113, "JUMP_ABSOLUTE",        4, 4,            36,  None,  False),  # for-loop natural
+            Instr(9,   "NOP",               None, None,         38,  None,  False),
+            Instr(9,   "NOP",               None, None,         40,  None,  False),
+            Instr(9,   "NOP",               None, None,         42,  None,  False),
+            Instr(4,   "DUP_TOP",           None, None,         44,  None,  True),   # handler entry
+            Instr(116, "LOAD_GLOBAL",          0, "Exception",  46,  None,  False),
+            Instr(18,  "JUMP_IF_NOT_EXC_MATCH", 58, 58,        48,  None,  False),
+            Instr(1,   "POP_TOP",           None, None,         50,  None,  False),
+            Instr(1,   "POP_TOP",           None, None,         52,  None,  False),
+            Instr(1,   "POP_TOP",           None, None,         54,  None,  False),
+            Instr(113, "JUMP_ABSOLUTE",        4, 4,            56,  None,  False),  # continue
+            Instr(89,  "POP_EXCEPT",        None, None,         58,  None,  True),
+            Instr(48,  "RERAISE",              0, 0,            60,  None,  True),   # FOR_ITER end
+            Instr(100, "LOAD_CONST",           0, None,         62,  None,  True),
+            Instr(83,  "RETURN_VALUE",      None, None,         64,  None,  False),
+        ]
+
+    def test_39_try_in_for_no_spurious_while(self):
+        """POP_JUMP_IF_FALSE inside a try body must emit 'if', not 'while'."""
+        out = self._run39(self._make_instructions())
+        self.assertNotIn("while isinstance", out,
+                         f"Spurious 'while' detected (should be 'if'):\n{out}")
+        self.assertIn("if isinstance", out,
+                      f"'if isinstance' missing:\n{out}")
+
+    def test_39_try_in_for_except_emits_continue(self):
+        """JUMP_ABSOLUTE at handler exit jumping to FOR_ITER must emit 'continue'."""
+        out = self._run39(self._make_instructions())
+        self.assertIn("continue", out,
+                      f"'continue' not emitted in except handler:\n{out}")
+        # The 'continue' should NOT be a bare 'pass'
+        handler_lines = []
+        capture = False
+        for ln in out.splitlines():
+            if "except Exception" in ln:
+                capture = True
+            elif capture and ln.strip():
+                handler_lines.append(ln.strip())
+                break
+        self.assertFalse(
+            handler_lines == ["pass"],
+            f"except handler emitted 'pass' instead of 'continue':\n{out}",
+        )
+
+    def test_39_try_in_for_except_correct_indent(self):
+        """'except Exception:' must be at the same indent level as 'try:'."""
+        out = self._run39(self._make_instructions())
+        lines = out.splitlines()
+        try_lines   = [ln for ln in lines if ln.lstrip() == "try:"]
+        except_lines = [ln for ln in lines if ln.lstrip().startswith("except Exception")]
+        self.assertTrue(try_lines,   f"No 'try:' found:\n{out}")
+        self.assertTrue(except_lines, f"No 'except Exception' found:\n{out}")
+        try_indent    = len(try_lines[0])   - len(try_lines[0].lstrip())
+        except_indent = len(except_lines[0]) - len(except_lines[0].lstrip())
+        self.assertEqual(
+            try_indent, except_indent,
+            f"'try:' at indent {try_indent} but 'except' at indent {except_indent}:\n{out}",
+        )
+
+    def test_39_try_in_for_break_emitted(self):
+        """JUMP_ABSOLUTE past the FOR_ITER end inside the try body must emit 'break'."""
+        out = self._run39(self._make_instructions())
+        self.assertIn("break", out, f"'break' not found:\n{out}")
+        # break must appear inside the try/if body, not after the for loop
+        lines = out.splitlines()
+        try_idx   = next((i for i, ln in enumerate(lines) if ln.lstrip() == "try:"), -1)
+        break_idx = next((i for i, ln in enumerate(lines) if ln.strip() == "break"), -1)
+        self.assertGreater(break_idx, try_idx, f"'break' appears before 'try:':\n{out}")
+
+
 if __name__ == "__main__":
     unittest.main()
+

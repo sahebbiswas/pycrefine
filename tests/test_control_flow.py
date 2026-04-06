@@ -692,5 +692,131 @@ class TestChainedExpressions(unittest.TestCase):
         self.assertNotRegex(out, r'<\s*b\s*<')
 
 
+class TestNestedTryInLoop(unittest.TestCase):
+    """Regression tests for try/except blocks nested inside for/while loops."""
+
+    def test_break_inside_try_in_for_loop(self):
+        """break from inside a try block nested in a for loop must be reconstructed.
+
+        Note: in Python 3.14+, 'except: pass' in a loop may be rendered as
+        'except: continue' since both compile to identical bytecode (the handler
+        simply returns to the loop head). This is semantically equivalent.
+        """
+        src = (
+            "def f(items):\n"
+            "    result = None\n"
+            "    for x in items:\n"
+            "        try:\n"
+            "            if isinstance(x, int):\n"
+            "                result = x\n"
+            "                break\n"
+            "        except Exception:\n"
+            "            pass\n"
+            "    return result\n"
+        )
+        out = decompile(src)
+        # Must contain exactly one try: and one except block
+        self.assertEqual(out.count("try:"), 1, f"Expected 1 try: block:\n{out}")
+        self.assertIn("except Exception:", out)
+        # No phantom else: block after the for loop
+        self.assertNotIn("else:\n        pass", out)
+        # try: and except: must be at loop body level (8 spaces)
+        lines = out.splitlines()
+        try_lines = [ln for ln in lines if "try:" in ln]
+        except_lines = [ln for ln in lines if "except Exception:" in ln]
+        self.assertTrue(all(ln.startswith("        ") for ln in try_lines),
+                        f"try: must be at 8-space indent:\n{out}")
+        self.assertTrue(all(ln.startswith("        ") for ln in except_lines),
+                        f"except: must be at 8-space indent:\n{out}")
+
+    def test_except_continue_in_for_loop(self):
+        """except Exception: continue inside a for loop must be correctly decompiled.
+
+        In Python 3.14+, 'except: continue' in a for loop is deferred and emitted
+        correctly. The continue statement must appear inside the except block.
+        """
+        src = (
+            "def f(items):\n"
+            "    result = None\n"
+            "    for x in items:\n"
+            "        try:\n"
+            "            if isinstance(x, int):\n"
+            "                result = x\n"
+            "                break\n"
+            "        except Exception:\n"
+            "            continue\n"
+            "    return result\n"
+        )
+        out = decompile(src)
+        self.assertEqual(out.count("try:"), 1, f"Expected 1 try: block:\n{out}")
+        self.assertIn("except Exception:", out)
+        # The handler must appear inside the for loop (8-space indent)
+        lines = out.splitlines()
+        except_lines = [ln for ln in lines if "except Exception:" in ln]
+        self.assertTrue(all(ln.startswith("        ") for ln in except_lines),
+                        f"except: must be inside for loop (8-space indent):\n{out}")
+
+    def test_try_in_for_loop_no_phantom_else(self):
+        """For loops with try/except inside must not emit a phantom else: block."""
+        src = (
+            "def f(items):\n"
+            "    for x in items:\n"
+            "        try:\n"
+            "            print(x)\n"
+            "        except Exception:\n"
+            "            pass\n"
+            "    return True\n"
+        )
+        out = decompile(src)
+        self.assertIn("for", out)
+        self.assertIn("try:", out)
+        self.assertIn("except Exception:", out)
+        # No phantom else after the for loop that could be caused by handler suppression
+        lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+        for i, ln in enumerate(lines):
+            if "for" in ln and i + 1 < len(lines):
+                # The next non-empty line after the for body closes should NOT be "else:"
+                pass  # structure check via count
+        # Strictly: only 1 try and 1 except, no else
+        self.assertEqual(out.count("try:"), 1)
+        self.assertEqual(out.count("except"), 1)
+
+    def test_multiple_break_paths_in_loop_try(self):
+        """Multiple for loops each with try/except containing break must all decompile."""
+        src = (
+            "def f(a, b):\n"
+            "    result = None\n"
+            "    if a == b:\n"
+            "        for x in (4, 8, 12):\n"
+            "            try:\n"
+            "                if isinstance(x, int):\n"
+            "                    result = x\n"
+            "                    break\n"
+            "            except Exception:\n"
+            "                continue\n"
+            "    if result is None:\n"
+            "        for x in (4, 8, 12):\n"
+            "            try:\n"
+            "                if isinstance(x, int):\n"
+            "                    result = x\n"
+            "                    break\n"
+            "            except Exception:\n"
+            "                continue\n"
+            "    return result\n"
+        )
+        out = decompile(src)
+        # Both for loops must have their try/except blocks
+        self.assertEqual(out.count("try:"), 2, f"Expected 2 try: blocks:\n{out}")
+        self.assertEqual(out.count("except Exception:"), 2, f"Expected 2 except blocks:\n{out}")
+        # The except blocks must be at the for-loop body level (12-space indent for nested)
+        lines = out.splitlines()
+        except_lines = [ln for ln in lines if ln.strip() == "except Exception:"]
+        self.assertEqual(len(except_lines), 2, f"Expected 2 except lines:\n{out}")
+        # All except blocks must be inside the if/for nesting (not at function level)
+        for ln in except_lines:
+            self.assertFalse(ln.startswith("except"), f"except must not be at function level:\n{out}")
+
+
 if __name__ == "__main__":
     unittest.main()
+

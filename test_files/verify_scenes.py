@@ -175,4 +175,29 @@ def api_25(in_a):
     return [ s.decode() if isinstance(s, bytes) else s for s in in_a ]
     
 
-    
+def api_26(in_a, in_b):
+    code_obj = None
+    if in_a == in_b:
+        for offset in (16, 12, 8, 4):
+            try:
+                obj = in_b
+                if isinstance(obj, int):
+                    code_obj = obj
+                    break
+            except Exception:
+                continue
+
+    if code_obj is None:
+        for offset in (16, 12, 8, 4):
+            try:
+                obj = in_a
+                if isinstance(obj, int):
+                    code_obj = obj
+                    break
+            except Exception:
+                continue
+
+    if not isinstance(code_obj, int):
+        code_obj = in_a
+
+    return code_obj
