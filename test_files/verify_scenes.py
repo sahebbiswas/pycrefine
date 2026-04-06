@@ -201,3 +201,22 @@ def api_26(in_a, in_b):
         code_obj = in_a
 
     return code_obj
+
+def api_30(in_a=None, in_b=None, in_c=None):
+    print(f"{in_a=} {in_b=} {in_c=}")
+    
+    max_range = 0
+    max_range += 10 if in_a else 1
+    max_range += 10 if in_b else 1
+    max_range += 10 if in_c else 1
+
+    for i in range(max_range):
+        print(i)
+        with open("test.txt", "w") as f:
+            f.write(str(i))
+
+    return max_range
+    
+def api_31(in_a):
+    api_30(30, in_c=in_a)
+    

@@ -752,9 +752,17 @@ class TestNestedTryInLoop(unittest.TestCase):
         self.assertIn("except Exception:", out)
         # The handler must appear inside the for loop (8-space indent)
         lines = out.splitlines()
-        except_lines = [ln for ln in lines if "except Exception:" in ln]
-        self.assertTrue(all(ln.startswith("        ") for ln in except_lines),
-                        f"except: must be inside for loop (8-space indent):\n{out}")
+        except_indices = [i for i, ln in enumerate(lines) if "except Exception:" in ln]
+        self.assertTrue(len(except_indices) > 0)
+        for idx in except_indices:
+            self.assertTrue(lines[idx].startswith("        "), f"except must be at 8-space indent:\n{out}")
+            # The next non-blank line must be 'continue' at 12-space indent
+            next_idx = idx + 1
+            while next_idx < len(lines) and not lines[next_idx].strip():
+                next_idx += 1
+            self.assertTrue(next_idx < len(lines))
+            self.assertEqual(lines[next_idx].lstrip(), "continue", f"Expected 'continue' after except at line {idx+1}")
+            self.assertTrue(lines[next_idx].startswith("            "), f"continue must be at 12-space indent:\n{out}")
 
     def test_try_in_for_loop_no_phantom_else(self):
         """For loops with try/except inside must not emit a phantom else: block."""
