@@ -773,10 +773,7 @@ class TestNestedTryInLoop(unittest.TestCase):
         self.assertIn("except Exception:", out)
         # No phantom else after the for loop that could be caused by handler suppression
         lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
-        for i, ln in enumerate(lines):
-            if "for" in ln and i + 1 < len(lines):
-                # The next non-empty line after the for body closes should NOT be "else:"
-                pass  # structure check via count
+        self.assertNotIn("else:", lines)
         # Strictly: only 1 try and 1 except, no else
         self.assertEqual(out.count("try:"), 1)
         self.assertEqual(out.count("except"), 1)

@@ -2235,6 +2235,10 @@ class DecompilerGeneric(DecompilerBase):
                     break
             if preceded_by_handler_exit:
                 self._exc_handler_jump_offsets.add(jb.offset)
+                if not hasattr(self, "_exc_handler_continue_offsets"):
+                    self._exc_handler_continue_offsets = set()
+                if target in {ins.offset for ins in instrs if ins.opname == "FOR_ITER"}:
+                    self._exc_handler_continue_offsets.add(jb.offset)
 
         # ── 6. Build deferred-finally mappings ───────────────────────────
         # For try/except/finally patterns, the inlined finally code sits
@@ -2286,12 +2290,11 @@ class DecompilerGeneric(DecompilerBase):
                                 merge = t
                 if merge is not None:
                     target = e.target
-                    if merge not in self._push_exc_to_finally_merge.values():
-                        self._push_exc_to_finally_merge[target] = merge
-                        if merge not in self._finally_merge_offsets:
-                            if not hasattr(self, "_except_only_merge_offsets"):
-                                self._except_only_merge_offsets = set()
-                            self._except_only_merge_offsets.add(merge)
+                    self._push_exc_to_finally_merge[target] = merge
+                    if merge not in self._finally_merge_offsets:
+                        if not hasattr(self, "_except_only_merge_offsets"):
+                            self._except_only_merge_offsets = set()
+                        self._except_only_merge_offsets.add(merge)
 
         # ── Suppress full bodies of re-raise wrappers and with-exit handler
         for pei_off in sorted(self._suppress_push_exc_offsets):
@@ -2668,7 +2671,7 @@ class DecompilerGeneric(DecompilerBase):
             # Close blocks whose end offset we have passed
             while sub.blocks and instr.offset >= sub.blocks[-1][0]:
                 boff, btype = sub.blocks[-1]
-                if boff == instr.offset and instr.opname in ("JUMP_BACKWARD", "JUMP_ABSOLUTE") and isinstance(instr.argval, int) and instr.argval < instr.offset:
+                if boff == instr.offset and sub._is_backward_instruction(instr) and isinstance(instr.argval, int) and instr.argval < instr.offset:
                     break  # delay popping until after the jump instruction
 
                 sub.blocks.pop()
@@ -4957,7 +4960,7 @@ class Decompiler39(DecompilerGeneric):
                 for_iter_targets = {
                     fi.offset
                     for fi in self.instructions
-                    if fi.opname == "FOR_ITER"
+                    if fi.opname == "FOR_ITER" and fi.offset < target
                 }
                 # The handler section runs from `target` until the first
                 # POP_EXCEPT or RERAISE at this nesting level (level=0).
