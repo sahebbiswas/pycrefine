@@ -218,5 +218,5 @@ def api_30(in_a=None, in_b=None, in_c=None):
     return max_range
     
 def api_31(in_a):
-    api_30(30, in_c=in_a)
+    api_30(30, in_c=in_a, in_b=10)
     

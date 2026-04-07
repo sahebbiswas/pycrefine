@@ -2168,6 +2168,10 @@ class DecompilerGeneric(DecompilerBase):
         # Loop/iter opcodes that can never be finally-merge labels
         # Opcodes that appear in exception-handler cleanup just before the JB
 
+        def _is_with_cleanup_jump(instrs: list, idx: int) -> bool:
+            """Return True when the jump at instrs[idx] is a with-block natural exit (POP_EXCEPT -> POP_TOP -> JUMP), not a user 'continue'."""
+            return idx >= 2 and instrs[idx - 1].opname == "POP_TOP" and instrs[idx - 2].opname == "POP_EXCEPT"
+
         from collections import Counter
         jb_targets: Counter = Counter()
         for jb in instrs:
@@ -2194,7 +2198,7 @@ class DecompilerGeneric(DecompilerBase):
                 # Stop early if we cross a non-trivial boundary
                 if instrs[check_idx].opname in ("CALL", "BINARY_OP", "COMPARE_OP"):
                     break
-            if preceded_by_handler_exit:
+            if preceded_by_handler_exit and not _is_with_cleanup_jump(instrs, jb_idx):
                 jb_targets[target] += 1
 
         for target_off, count in jb_targets.items():
@@ -2231,7 +2235,7 @@ class DecompilerGeneric(DecompilerBase):
                     break
                 if instrs[check_idx].opname in ("CALL", "BINARY_OP", "COMPARE_OP"):
                     break
-            if preceded_by_handler_exit:
+            if preceded_by_handler_exit and not _is_with_cleanup_jump(instrs, jb_idx):
                 self._exc_handler_jump_offsets.add(jb.offset)
                 if not hasattr(self, "_exc_handler_continue_offsets"):
                     self._exc_handler_continue_offsets = set()
@@ -3763,7 +3767,7 @@ class DecompilerGeneric(DecompilerBase):
                 final_args_raw = pos_vals + kw_vals
                 final_args = [
                     (f"{k}={self._normalize_val(v)}") if i >= num_pos else self._normalize_val(v)
-                    for i, (k, v) in enumerate(zip(kw_names + [""] * num_pos, final_args_raw))
+                    for i, (k, v) in enumerate(zip([""] * num_pos + kw_names, final_args_raw))
                 ]
                 # Special cases need the raw args
                 raw_args = final_args_raw

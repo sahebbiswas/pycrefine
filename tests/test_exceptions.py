@@ -729,5 +729,33 @@ class TestApi26Pattern39(unittest.TestCase):
         )
 
 
+class TestWithBlocksInsideLoops(unittest.TestCase):
+    def test_with_block_no_spurious_continue(self):
+        src = "def f():\n    for i in range(1):\n        with open('x') as f:\n            pass\n    return 0\n"
+        out = decompile(src)
+        self.assertNotIn("continue", out)
+
+    def test_explicit_continue_inside_except_still_emitted(self):
+        src = "def f():\n    for i in range(1):\n        try:\n            pass\n        except Exception:\n            continue\n    return 0\n"
+        out = decompile(src)
+        # Verify 'continue' is the first (and only) statement inside the except block,
+        # not merely present somewhere else in the output.
+        except_body = []
+        capture = False
+        for ln in out.splitlines():
+            if "except Exception" in ln:
+                capture = True
+                continue
+            if capture:
+                if ln.strip():
+                    except_body.append(ln.strip())
+                    break  # first non-blank line of the handler body
+        self.assertEqual(
+            except_body,
+            ["continue"],
+            f"'continue' is not the first statement in the except body:\n{out}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
