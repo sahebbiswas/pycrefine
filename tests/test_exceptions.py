@@ -738,7 +738,23 @@ class TestWithBlocksInsideLoops(unittest.TestCase):
     def test_explicit_continue_inside_except_still_emitted(self):
         src = "def f():\n    for i in range(1):\n        try:\n            pass\n        except Exception:\n            continue\n    return 0\n"
         out = decompile(src)
-        self.assertIn("continue", out)
+        # Verify 'continue' is the first (and only) statement inside the except block,
+        # not merely present somewhere else in the output.
+        except_body = []
+        capture = False
+        for ln in out.splitlines():
+            if "except Exception" in ln:
+                capture = True
+                continue
+            if capture:
+                if ln.strip():
+                    except_body.append(ln.strip())
+                    break  # first non-blank line of the handler body
+        self.assertEqual(
+            except_body,
+            ["continue"],
+            f"'continue' is not the first statement in the except body:\n{out}",
+        )
 
 
 if __name__ == "__main__":
