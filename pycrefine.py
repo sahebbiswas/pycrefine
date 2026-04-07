@@ -936,12 +936,28 @@ class DecompilerGeneric(DecompilerBase):
                     self._append_reconstructed("pass")
 
             if has_else and else_end is not None:
+                real_else = False
+                for ins in self.instructions:
+                    if block_end <= ins.offset < else_end and not ins.opname.startswith("POP_") and not "NOP" in ins.opname and "END_FOR" not in ins.opname:
+                        real_else = True
+                        break
+                if not real_else:
+                    has_else = False
+
+            if has_else and else_end is not None:
                 self.indent_level -= 1
                 self._append_reconstructed("else:")
                 self.indent_level += 1
                 self.blocks.append((else_end, "else"))
             elif block_type not in _NO_INDENT_TYPES:
                 self.indent_level -= 1
+                # If this try_body has a deferred except-only handler (loop case),
+                # emit it immediately — before outer loop blocks also pop at same offset.
+                if block_type in ("try_body", "exc_cleanup"):
+                    exc_only = getattr(self, "_except_only_merge_offsets", set())
+                    if block_end in exc_only:
+                        exc_only.discard(block_end)
+                        self._emit_deferred_finally(block_end, self.indent_level)
 
     # ------------------------------------------------------------------
     # Output helpers
@@ -2217,6 +2233,15 @@ class DecompilerGeneric(DecompilerBase):
                     break
             if preceded_by_handler_exit:
                 self._exc_handler_jump_offsets.add(jb.offset)
+                if not hasattr(self, "_exc_handler_continue_offsets"):
+                    self._exc_handler_continue_offsets = set()
+                # A jump is a continue if its target is a loop head (FOR_ITER or while header)
+                loop_heads = {ins.offset for ins in instrs if ins.opname == "FOR_ITER"}
+                if hasattr(self, "_while_header_targets"):
+                    loop_heads.update(self._while_header_targets.values())
+
+                if target in loop_heads:
+                    self._exc_handler_continue_offsets.add(jb.offset)
 
         # ── 6. Build deferred-finally mappings ───────────────────────────
         # For try/except/finally patterns, the inlined finally code sits
@@ -2247,11 +2272,36 @@ class DecompilerGeneric(DecompilerBase):
 
         # Map: first real PUSH_EXC_INFO → finally-merge offset
         for e in _exc_entries:
-            if e.target in real_push_exc and e.end in self._finally_merge_offsets:
-                merge = e.end
-                target = e.target
-                if merge not in self._push_exc_to_finally_merge.values():
-                    self._push_exc_to_finally_merge[target] = merge
+            if e.target in real_push_exc:
+                merge = None
+                if e.end in self._finally_merge_offsets:
+                    # Already a known finally-merge label.
+                    merge = e.end
+                else:
+                    # Case 1: FOR_ITER loop wraps the try body.
+                    # Use the FOR_ITER's jump target (loop-exit) as the merge.
+                    # Only accept FOR_ITER — not conditional jumps inside outer
+                    # except handlers, which would give false positives.
+                    for ins in instrs:
+                        if ins.offset >= e.start:
+                            break
+                        if ins.opname != "FOR_ITER":
+                            continue
+                        t = self._get_jump_target(ins)
+                        if isinstance(t, int) and t > e.start:
+                            if merge is None or t < merge:
+                                merge = t
+                if merge is not None:
+                    target = e.target
+                    if merge not in self._push_exc_to_finally_merge:
+                        self._push_exc_to_finally_merge[merge] = []
+                    if target not in self._push_exc_to_finally_merge[merge]:
+                        self._push_exc_to_finally_merge[merge].append(target)
+                        self._push_exc_to_finally_merge[merge].sort()
+                    if merge not in self._finally_merge_offsets:
+                        if not hasattr(self, "_except_only_merge_offsets"):
+                            self._except_only_merge_offsets = set()
+                        self._except_only_merge_offsets.add(merge)
 
         # ── Suppress full bodies of re-raise wrappers and with-exit handler
         for pei_off in sorted(self._suppress_push_exc_offsets):
@@ -2270,31 +2320,36 @@ class DecompilerGeneric(DecompilerBase):
 
         # ── Find end of each handler section and pre-decompile it
         sorted_real_pei = sorted(real_push_exc)
-        for push_off, merge_off in self._push_exc_to_finally_merge.items():
-            # Handler section starts at push_off, ends at start of either the
-            # next real PUSH_EXC_INFO or the nearest suppress-wrapper PUSH_EXC_INFO
-            handler_end = instrs[-1].offset + 2
-            for ins in instrs:
-                if ins.offset > push_off and ins.opname == "PUSH_EXC_INFO":
-                    handler_end = ins.offset
-                    break
+        for merge_off, targets in self._push_exc_to_finally_merge.items():
+            for push_off in targets:
+                # Handler section starts at push_off, ends at status of either the
+                # next real PUSH_EXC_INFO or the nearest suppress-wrapper PUSH_EXC_INFO
+                handler_end = instrs[-1].offset + 2
+                for ins in instrs:
+                    if ins.offset > push_off and ins.opname == "PUSH_EXC_INFO":
+                        handler_end = ins.offset
+                        break
 
-            # Collect handler instructions (not already suppressed as finally body)
-            handler_instrs = [
-                ins for ins in instrs
-                if push_off <= ins.offset < handler_end
-                and ins.offset not in self._finally_body_suppress
-            ]
-            for ins in handler_instrs:
-                self._handler_section_suppress.add(ins.offset)
-                self._finally_body_suppress.discard(ins.offset)  # don't double-suppress
+                # Collect handler instructions (not already suppressed as finally body)
+                handler_instrs = [
+                    ins for ins in instrs
+                    if push_off <= ins.offset < handler_end
+                    and ins.offset not in self._finally_body_suppress
+                ]
+                for ins in handler_instrs:
+                    self._handler_section_suppress.add(ins.offset)
+                    self._finally_body_suppress.discard(ins.offset)  # don't double-suppress
 
-            # Pre-decompile the handler section
-            handler_lines = self._render_handler_section(handler_instrs, merge_off)
-            self._deferred_except_lines[merge_off] = handler_lines
+                # Pre-decompile the handler section
+                handler_lines = self._render_handler_section(handler_instrs, merge_off)
+                if merge_off not in self._deferred_except_lines:
+                    self._deferred_except_lines[merge_off] = []
+                self._deferred_except_lines[merge_off].extend(handler_lines)
 
         # ── Find and suppress finally body instructions
-        for push_off, merge_off in self._push_exc_to_finally_merge.items():
+        for merge_off, targets in self._push_exc_to_finally_merge.items():
+            if merge_off in getattr(self, "_except_only_merge_offsets", ()):
+                continue
             body_end = None
             for ins in instrs:
                 if ins.offset > merge_off and ins.opname == "NOP":
@@ -2598,6 +2653,7 @@ class DecompilerGeneric(DecompilerBase):
         sub._suppress_push_exc_offsets = set()
         sub._finally_merge_offsets = set()
         sub._exc_handler_jump_offsets = getattr(self, "_exc_handler_jump_offsets", set())
+        sub._exc_handler_continue_offsets = getattr(self, "_exc_handler_continue_offsets", set())
         sub._with_exit_suppress_offsets = set()
         sub._finally_body_suppress = set()
         sub._handler_section_suppress = set()
@@ -2607,7 +2663,8 @@ class DecompilerGeneric(DecompilerBase):
         sub._deferred_except_lines = {}
         sub._pending_finally_merge = None
         sub._nop_to_push_exc = {}
-        sub._while_header_targets = {}
+        # Sync while loop headers for continue detection in sub-decompiler fallback logic
+        sub._while_header_targets = getattr(self, "_while_header_targets", {})
         sub._while_body_offsets = set()
         sub._while_true_ends = set()
         sub._ternary_jumps = {}
@@ -2625,7 +2682,11 @@ class DecompilerGeneric(DecompilerBase):
             instr = sub.instructions[sub.pc]
             # Close blocks whose end offset we have passed
             while sub.blocks and instr.offset >= sub.blocks[-1][0]:
-                boff, btype = sub.blocks.pop()
+                boff, btype = sub.blocks[-1]
+                if boff == instr.offset and sub._is_backward_instruction(instr) and isinstance(instr.argval, int) and instr.argval < instr.offset:
+                    break  # delay popping until after the jump instruction
+
+                sub.blocks.pop()
                 last_i = len(sub.reconstructed) - 1
                 while last_i >= 0 and not sub.reconstructed[last_i].strip():
                     last_i -= 1
@@ -2778,14 +2839,20 @@ class DecompilerGeneric(DecompilerBase):
         # handlers + finally body in source order, then continue normally.
         # This check MUST come before _finally_body_suppress since the merge-label
         # instruction is the first instruction of the suppressed finally body range.
-        if instr.offset in getattr(self, "_finally_merge_offsets", ()):
-            self._finally_merge_offsets.discard(instr.offset)
+        if instr.offset in getattr(self, "_finally_merge_offsets", ()) or instr.offset in getattr(self, "_except_only_merge_offsets", ()):
+            if instr.offset in getattr(self, "_finally_merge_offsets", ()):
+                self._finally_merge_offsets.discard(instr.offset)
+            if instr.offset in getattr(self, "_except_only_merge_offsets", ()):
+                self._except_only_merge_offsets.discard(instr.offset)
             self._pending_finally_merge = None
             # self.indent_level at this point is the correct header indent:
             # the block manager has just closed the try_body block, leaving us
             # at the same level as the enclosing try:/with: statement.
             self._emit_deferred_finally(instr.offset, self.indent_level)
-            return
+            # Only return (skip instruction) if it was actually a finally merge
+            # (which means this instruction is the start of a suppressed body).
+            if instr.offset in getattr(self, "_finally_body_suppress", ()):
+                return
         # Suppress inlined finally-body instructions (deferred; emitted at merge label)
         if instr.offset in getattr(self, "_finally_body_suppress", ()):
             return
@@ -3170,14 +3237,26 @@ class DecompilerGeneric(DecompilerBase):
 
     def _op_cleanup(self, instr: BytecodeInstruction):
         opname = instr.opname
-        # POP_EXCEPT for try/except cleanup
+        # POP_EXCEPT for try/except cleanup.
+        # In newer Python (3.11+), the POP_EXCEPT is often immediately followed
+        # by a JUMP_BACKWARD (continue) or JUMP_FORWARD (end of try/except).
+        # To avoid emitting a premature 'pass' or popping indentation before
+        # the 'continue' is rendered, we check if the next instruction is a
+        # jump that will be handled by our special logic.
         if opname == "POP_EXCEPT" and self._except_header_indents:
-            last_idx = len(self.reconstructed) - 1
-            while last_idx >= 0 and not self.reconstructed[last_idx].strip():
-                last_idx -= 1
-            if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
-                self._append_reconstructed("pass")
-            self.indent_level = self._except_header_indents.pop()
+            next_is_handler_jump = False
+            if self.pc < len(self.instructions):
+                nxt = self.instructions[self.pc]
+                if nxt.offset in getattr(self, "_exc_handler_jump_offsets", ()):
+                    next_is_handler_jump = True
+
+            if not next_is_handler_jump:
+                last_idx = len(self.reconstructed) - 1
+                while last_idx >= 0 and not self.reconstructed[last_idx].strip():
+                    last_idx -= 1
+                if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
+                    self._append_reconstructed("pass")
+                self.indent_level = self._except_header_indents.pop()
         pass  # cleanup suppression (_exc_cleanup_name) stays active until DELETE_NAME fires
 
     def _op_setup_finally(self, instr: BytecodeInstruction):
@@ -3186,6 +3265,21 @@ class DecompilerGeneric(DecompilerBase):
         self._append_reconstructed("try:")
         self.indent_level += 1
         jump_target = self._get_jump_target(instr)
+        if isinstance(jump_target, int):
+            min_t = None
+            for j_ins in self.instructions:
+                if j_ins.offset >= instr.offset:
+                    break
+                # Only use FOR_ITER as definite loop boundaries;
+                # conditional jumps inside outer except bodies are not loop limits.
+                if j_ins.opname not in ("FOR_ITER",):
+                    continue
+                t = self._get_jump_target(j_ins)
+                if t is not None and isinstance(t, int) and t > instr.offset:
+                    if min_t is None or t < min_t:
+                        min_t = t
+            if min_t is not None and min_t < jump_target:
+                jump_target = min_t
         self.blocks.append((jump_target, "try_body"))
 
     def _op_setup_with(self, instr: BytecodeInstruction):
@@ -3899,7 +3993,11 @@ class DecompilerGeneric(DecompilerBase):
             # JUMP_BACKWARD instructions that exit except/finally
             # handlers (they jump to a finally-merge label) must NOT be
             # treated as loop back-edges.  Skip them silently.
+            # Exception: if they are a 3.9-style explicit 'continue' inside
+            # a handler body, emit 'continue' before returning.
             if instr.offset in getattr(self, "_exc_handler_jump_offsets", ()):
+                if instr.offset in getattr(self, "_exc_handler_continue_offsets", ()):
+                    self._append_reconstructed("continue")
                 return
 
             # If the prescan successfully identified the loop guard
@@ -3995,8 +4093,25 @@ class DecompilerGeneric(DecompilerBase):
                     if next_pei > 0:
                         # Use the finally-merge label as block end when present
                         pef_map = getattr(self, "_push_exc_to_finally_merge", {})
-                        merge = pef_map.get(next_pei)
-                        block_end = merge if (merge is not None and merge > instr.offset) else next_pei
+                        merge = None
+                        for m_off, targets in pef_map.items():
+                            if next_pei in targets:
+                                merge = m_off
+                                break
+                        if merge is not None and merge > instr.offset:
+                            block_end = merge
+                        else:
+                            block_end = next_pei
+                            for j_ins in self.instructions:
+                                if j_ins.offset >= instr.offset:
+                                    break
+                                # Only FOR_ITER is a definite loop boundary;
+                                # conditional jumps inside except handlers are not.
+                                if j_ins.opname not in ("FOR_ITER",):
+                                    continue
+                                t = self._get_jump_target(j_ins)
+                                if isinstance(t, int) and t > instr.offset and t < block_end:
+                                    block_end = t
                         self.blocks.append((block_end, "try_body"))
                 return
 
@@ -4842,6 +4957,52 @@ class Decompiler39(DecompilerGeneric):
                                 else_end = min(post_except_targets)
                                 self._else_starts[else_start] = else_end
 
+                # ── Populate _exc_handler_jump_offsets for 3.9 ─────────────────
+                # In Python 3.9, a JUMP_ABSOLUTE inside a SETUP_FINALLY handler
+                # body that jumps backward to a FOR_ITER loop head (is_jump_target)
+                # represents an explicit 'continue' statement.  Mark those offsets
+                # so _op_jump treats them as handler exits (not while-loop back-edges)
+                # and _op_cleanup can emit 'continue' instead of 'pass'.
+                if not hasattr(self, "_exc_handler_jump_offsets"):
+                    self._exc_handler_jump_offsets = set()
+                if not hasattr(self, "_exc_handler_continue_offsets"):
+                    self._exc_handler_continue_offsets = set()
+                # The handler body starts at `target` (DUP_TOP or POP_TOP*3).
+                # Collect jump-target offsets of FOR_ITER instructions so we know
+                # which backward destinations are loop heads.
+                # In Python 3.9, JUMP_ABSOLUTE for a loop 'continue' jumps back
+                # to the FOR_ITER instruction's own offset (not to its target).
+                # So we collect FOR_ITER *offsets* as the set of valid loop heads.
+                for_iter_targets = {
+                    fi.offset
+                    for fi in self.instructions
+                    if fi.opname == "FOR_ITER" and fi.offset < target
+                }
+                # The handler section runs from `target` until the first
+                # POP_EXCEPT or RERAISE at this nesting level (level=0).
+                t_idx2 = next(
+                    (k for k, x in enumerate(self.instructions) if x.offset == target), None
+                )
+                if t_idx2 is not None:
+                    level2 = 0
+                    for k in range(t_idx2, len(self.instructions)):
+                        kx = self.instructions[k]
+                        if kx.opname in ("SETUP_FINALLY", "SETUP_WITH", "SETUP_EXCEPT"):
+                            level2 += 1
+                        elif kx.opname == "POP_BLOCK":
+                            level2 -= 1
+                        elif kx.opname in ("POP_EXCEPT", "RERAISE") and level2 <= 0:
+                            break  # handler section ends
+                        # A backward JUMP_ABSOLUTE/JUMP_FORWARD to a loop head
+                        # inside this handler is an explicit 'continue'.
+                        if kx.opname in ("JUMP_ABSOLUTE", "JUMP_FORWARD"):
+                            jt = self._get_jump_target(kx)
+                            if (isinstance(jt, int)
+                                    and jt < kx.offset
+                                    and (jt in for_iter_targets or (hasattr(self, "_while_header_targets") and jt in self._while_header_targets.values()))):
+                                self._exc_handler_jump_offsets.add(kx.offset)
+                                self._exc_handler_continue_offsets.add(kx.offset)
+
     # clean instruction dispatch for 3.9-specific opcodes
     def _handle_instruction(self, instr: BytecodeInstruction):
         # Suppress exception-path finally bodies
@@ -5035,6 +5196,91 @@ class Decompiler39(DecompilerGeneric):
         elif opname == "POP_BLOCK":
             is_finally_pop = False
             finally_target = None
+
+            # ── Early-exit: for-loop break inside if-within-try (Python 3.9) ──────
+            # Pattern:
+            #   for x in ...:
+            #       try:
+            #           if cond:
+            #               ...
+            #               break           ← POP_BLOCK fires here with 'if' on top
+            #   POP_BLOCK  offset N         (top block = 'if', try_body below)
+            #   POP_TOP    offset N+2       (pops the for-iterator off the stack)
+            #   JUMP_ABSOLUTE for_iter_end  (the actual break jump)
+            #   ...                         (NOPs / dead code)
+            #   POP_BLOCK  offset M         (natural-continue path, if-false target) ← suppress
+            #   JUMP_ABSOLUTE for_head      (natural-continue back-edge)            ← suppress
+            #
+            # This POP_BLOCK is NOT the try_body-exit POP_BLOCK – that one fires
+            # at offset M (after the if-false fall-through).  We must emit 'break'
+            # NOW (before the if block is closed) and suppress all the implementation
+            # detail instructions, then return EARLY so the unconditional
+            # _except_header_indents.append() at the bottom of this branch is NOT
+            # reached (which would create a spurious ghost handler entry).
+            if (self.blocks
+                    and self.blocks[-1][1] == "if"
+                    and any(b[1] == "try_body" for b in self.blocks)):
+                look = self.pc
+                while (look < len(self.instructions)
+                       and self.instructions[look].opname in ("RESUME", "NOP", "CACHE")):
+                    look += 1
+                if (look < len(self.instructions)
+                        and self.instructions[look].opname == "POP_TOP"):
+                    look2 = look + 1
+                    while (look2 < len(self.instructions)
+                           and self.instructions[look2].opname in ("RESUME", "NOP", "CACHE")):
+                        look2 += 1
+                    if (look2 < len(self.instructions)
+                            and self.instructions[look2].opname == "JUMP_ABSOLUTE"):
+                        jmp = self.instructions[look2]
+                        jmp_target = self._get_jump_target(jmp)
+                        # Locate the nearest FOR_ITER whose end is beyond this instr.
+                        for_iter_end = -1
+                        for fi in self.instructions:
+                            if fi.opname == "FOR_ITER":
+                                t = self._get_jump_target(fi)
+                                if isinstance(t, int) and t > instr.offset:
+                                    if for_iter_end < 0 or t < for_iter_end:
+                                        for_iter_end = t
+                        if (isinstance(jmp_target, int)
+                                and jmp_target > instr.offset
+                                and for_iter_end > 0
+                                and jmp_target >= for_iter_end):
+                            # Emit break at current indentation (inside the if body).
+                            self._append_reconstructed("break")
+                            # Suppress break-path implementation instructions.
+                            _fb = getattr(self, "_finally_body_suppress", set())
+                            _fb.add(self.instructions[look].offset)   # POP_TOP
+                            _fb.add(jmp.offset)                        # JUMP_ABSOLUTE(break)
+                            # Suppress all NOPs between the break JUMP_ABSOLUTE and
+                            # the natural-continue POP_BLOCK that follows.
+                            sup = look2 + 1
+                            while (sup < len(self.instructions)
+                                   and self.instructions[sup].opname in (
+                                       "RESUME", "NOP", "CACHE")):
+                                _fb.add(self.instructions[sup].offset)
+                                sup += 1
+                            # Suppress the natural-continue POP_BLOCK (if-false target)
+                            # and its JUMP_ABSOLUTE back-edge, so they don't cause:
+                            #   (a) a spurious _except_header_indents push, and
+                            #   (b) a retroactive 'if' → 'while' rewrite.
+                            if (sup < len(self.instructions)
+                                    and self.instructions[sup].opname == "POP_BLOCK"):
+                                _fb.add(self.instructions[sup].offset)  # natural POP_BLOCK
+                                sup += 1
+                                while (sup < len(self.instructions)
+                                       and self.instructions[sup].opname in (
+                                           "RESUME", "NOP", "CACHE")):
+                                    sup += 1
+                                if (sup < len(self.instructions)
+                                        and self.instructions[sup].opname == "JUMP_ABSOLUTE"):
+                                    _fb.add(self.instructions[sup].offset)  # natural JUMP_ABSOLUTE
+                            self._finally_body_suppress = _fb
+                            # Return early: do NOT push to _except_header_indents.
+                            # The DUP_TOP handler (exception handler entry) will set up
+                            # the indent correctly via its own _except_header_indents logic.
+                            return
+
             if self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup"):
                 # Peek ahead: if the next meaningful instruction is JUMP_ABSOLUTE
                 # targeting the enclosing while-end, this POP_BLOCK is the exit from
@@ -5077,6 +5323,43 @@ class Decompiler39(DecompilerGeneric):
                                 if (sup < len(self.instructions)
                                         and self.instructions[sup].opname == "JUMP_ABSOLUTE"):
                                     _fb.add(self.instructions[sup].offset)
+                                self._finally_body_suppress = _fb
+
+                    # Python 3.9 for-loop break inside try: the break path is
+                    # POP_BLOCK -> POP_TOP -> JUMP_ABSOLUTE(past FOR_ITER end).
+                    # The POP_TOP pops the for-iterator off the operand stack.
+                    elif nxt.opname == "POP_TOP":
+                        look2 = look + 1
+                        while (look2 < len(self.instructions)
+                               and self.instructions[look2].opname in ("RESUME", "NOP", "CACHE")):
+                            look2 += 1
+                        if (look2 < len(self.instructions)
+                                and self.instructions[look2].opname == "JUMP_ABSOLUTE"):
+                            jmp = self.instructions[look2]
+                            jmp_target = self._get_jump_target(jmp)
+                            # Confirm this is a forward break jump that lands beyond or
+                            # at the enclosing FOR_ITER end (i.e. exits the for loop).
+                            _for_end = next(
+                                (b[0] for b in reversed(self.blocks) if b[1] == "try_body"), -1
+                            )
+                            for_iter_end = -1
+                            for fi in self.instructions:
+                                if fi.opname == "FOR_ITER":
+                                    t = self._get_jump_target(fi)
+                                    if isinstance(t, int) and t > instr.offset:
+                                        if for_iter_end < 0 or t < for_iter_end:
+                                            for_iter_end = t
+                            if (isinstance(jmp_target, int)
+                                    and jmp_target > instr.offset
+                                    and for_iter_end > 0
+                                    and jmp_target >= for_iter_end):
+                                # Emit break while still inside the try body
+                                self._append_reconstructed("break")
+                                # Suppress POP_TOP and JUMP_ABSOLUTE (they are implementation
+                                # details of breaking out of a for-loop-within-try)
+                                _fb = getattr(self, "_finally_body_suppress", set())
+                                _fb.add(nxt.offset)                    # POP_TOP
+                                _fb.add(jmp.offset)                    # JUMP_ABSOLUTE
                                 self._finally_body_suppress = _fb
 
                 finally_target = self.blocks[-1][0]
@@ -5394,11 +5677,33 @@ class Decompiler39(DecompilerGeneric):
         # reached this via the jump target path, so just skip silently.
         elif opname == "POP_EXCEPT":
             if self._except_header_indents:
-                last_idx = len(self.reconstructed) - 1
-                while last_idx >= 0 and not self.reconstructed[last_idx].strip():
-                    last_idx -= 1
-                if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
-                    self._append_reconstructed("pass")
+                # Peek ahead: if the next instruction is a backward JUMP_ABSOLUTE
+                # to a FOR_ITER loop head, this POP_EXCEPT is the exit from an
+                # exception handler whose only action is 'continue'.
+                # Emit 'continue' instead of 'pass' in that case.
+                _emitted_continue = False
+                look = self.pc
+                if (look < len(self.instructions)
+                        and self.instructions[look].opname in ("JUMP_ABSOLUTE", "JUMP_BACKWARD")
+                        and isinstance(self.instructions[look].argval, int)
+                        and self.instructions[look].argval < self.instructions[look].offset):
+                    jmp = self.instructions[look]
+                    jt = self._get_jump_target(jmp)
+                    # Check if the target is a FOR_ITER instruction offset
+                    _for_iter_offsets = {
+                        fi.offset for fi in self.instructions if fi.opname == "FOR_ITER"
+                    }
+                    if isinstance(jt, int) and jt in _for_iter_offsets:
+                        self._append_reconstructed("continue")
+                        self.pc = look + 1   # consume the JUMP_ABSOLUTE
+                        _emitted_continue = True
+
+                if not _emitted_continue:
+                    last_idx = len(self.reconstructed) - 1
+                    while last_idx >= 0 and not self.reconstructed[last_idx].strip():
+                        last_idx -= 1
+                    if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
+                        self._append_reconstructed("pass")
 
                 self.indent_level = self._except_header_indents.pop()
             if self.stack and self.stack[-1] == "_exc_match":
