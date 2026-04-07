@@ -357,5 +357,12 @@ class TestImports(unittest.TestCase):
         assert_contains(out, "import os")
 
 
+class TestCallFunctionKw(unittest.TestCase):
+    def test_call_function_kw_mixing_positional_and_kwargs(self):
+        src = "def f(a, b, c):\n    pass\ndef caller():\n    f(30, c=1, b=2)\n"
+        out = decompile(src)
+        self.assertIn("f(30, c=1, b=2)", out)
+
+
 if __name__ == "__main__":
     unittest.main()

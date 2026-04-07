@@ -729,5 +729,17 @@ class TestApi26Pattern39(unittest.TestCase):
         )
 
 
+class TestWithBlocksInsideLoops(unittest.TestCase):
+    def test_with_block_no_spurious_continue(self):
+        src = "def f():\n    for i in range(1):\n        with open('x') as f:\n            pass\n    return 0\n"
+        out = decompile(src)
+        self.assertNotIn("continue", out)
+
+    def test_explicit_continue_inside_except_still_emitted(self):
+        src = "def f():\n    for i in range(1):\n        try:\n            pass\n        except Exception:\n            continue\n    return 0\n"
+        out = decompile(src)
+        self.assertIn("continue", out)
+
+
 if __name__ == "__main__":
     unittest.main()
