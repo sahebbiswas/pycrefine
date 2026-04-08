@@ -4061,7 +4061,7 @@ class DecompilerGeneric(DecompilerBase):
                     self.indent_level -= 1
                     self._append_reconstructed("else:")
                     self.indent_level += 1
-                    self.blocks.pop()  # pop the matched 'if' block
+                    self.blocks.pop(matched_bi)  # pop the matched 'if' block
                     self.blocks.append((jump_target, "else"))
             return
         # detect while loop.
