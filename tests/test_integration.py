@@ -330,11 +330,7 @@ class TestVerifyScenesBugs(unittest.TestCase):
             "    else:\n"
             "        print('in_a is None')\n"
         )
-        print("------ SOURCE ------")
-        print(src)
         out = decompile(src)
-        print("------ OUTPUT ------")
-        print(out)
         import sys
         if sys.version_info < (3, 11):
             self.assertIn("else:", out)
@@ -498,7 +494,7 @@ class TestVerifyScenesBugs(unittest.TestCase):
         # we check for lack of syntax errors like multiple consecutive 'else:' 
         # blocks indented into each other unexpectedly.
         lines = out.splitlines()
-        else_indices = [i for i, l in enumerate(lines) if l.strip() == "else:"]
+        else_indices = [i for i, line in enumerate(lines) if line.strip() == "else:"]
         # Ensure no two else: blocks are at the same or deeper indentation than a sibling 
         # unless correctly nested. 
         # (This is mostly a stability/non-crash check for the guard logic).

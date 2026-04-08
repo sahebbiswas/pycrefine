@@ -4061,7 +4061,7 @@ class DecompilerGeneric(DecompilerBase):
                     # Only pop interior 'if' blocks — stop at any outer structural block
                     # (else, while, for, try_body, etc.) which we must NOT collapse.
                     while len(self.blocks) - 1 > matched_bi:
-                        cb_off, cb_type = self.blocks[-1]
+                        _, cb_type = self.blocks[-1]
                         # Stop if we hit a block that is not an inner if/else branch
                         if cb_type not in ("if", "else"):
                             break
@@ -4075,14 +4075,14 @@ class DecompilerGeneric(DecompilerBase):
                         if cb_type not in _NO_INDENT_TYPES:
                             self.indent_level -= 1
 
+                    if matched_bi != len(self.blocks) - 1:
+                        return
+
                     last_idx = len(self.reconstructed) - 1
                     while last_idx >= 0 and not self.reconstructed[last_idx].strip():
                         last_idx -= 1
                     if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
                         self._append_reconstructed("pass")
-
-                    if matched_bi != len(self.blocks) - 1:
-                        return
 
                     self.indent_level -= 1
                     self._append_reconstructed("else:")
