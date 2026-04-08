@@ -4002,6 +4002,29 @@ class DecompilerGeneric(DecompilerBase):
         # ── jumps / control flow ───────────────────────────────────────
 
     def _op_jump(self, instr: BytecodeInstruction):
+        """
+        Handle jump opcodes and reconstruct high-level control flow constructs (break, continue, else, while),
+        updating the decompiler's block stack, indentation, and reconstructed output.
+        
+        Forward jumps:
+        - If the jump lands at or beyond the end of an enclosing `while`/`for` block, emit `break`.
+        - If the forward jump is not an exception-handler jump and matches the end of a previously opened `if`
+          header, close any inner `if`/`else` branches, emit a `pass` when required for empty headers,
+          decrease indentation for the matched `if`, and emit an `else:` block with adjusted indentation.
+          Does nothing for exception-handler jump offsets.
+        
+        Backward jumps (loop back-edges):
+        - If the jump is an exception-handler back-jump, do not treat it as a loop back-edge (may emit
+          `continue` when it represents an explicit continue inside a handler).
+        - If a prescan already recorded a `while` header for this loop, leave it unchanged.
+        - Otherwise, suppress duplicated condition bytecode produced by certain CPython layouts,
+          drain any extra expressions pushed by the duplicated condition from the expression stack,
+          and retroactively rewrite the most recently emitted `if` header into a `while` header.
+        
+        Parameters:
+            instr (BytecodeInstruction): The disassembled jump instruction to handle.
+        
+        """
         opname = instr.opname
         jump_target = self._get_jump_target(instr)
 

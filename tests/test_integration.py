@@ -270,7 +270,11 @@ class TestVerifyScenesBugs(unittest.TestCase):
         self.assertRegex(out, r"\n    return value\s*$", out)
 
     def test_api_40_pass_in_if_with_else(self):
-        """Positive test: pass must be emitted for an empty if block before else (Py3.9 structure)."""
+        """
+        Verify that decompiling a function with an empty `if` followed by `else` preserves the `pass`/else structure when expected.
+        
+        For Python versions before 3.11, asserts that the decompiled output contains both `pass` and `else:`. For Python 3.11 and later, asserts that the `print` from the `else` branch is present (the compiler/runtime may optimize the `if`/`else` shape).
+        """
         src = (
             "def f(in_a):\n"
             "    if in_a:\n"
@@ -338,7 +342,11 @@ class TestVerifyScenesBugs(unittest.TestCase):
             self.assertIn("print('in_a is None')", out)
 
     def test_api_41_inner_else_only(self):
-        """Negative test: verify else branch binds to inner loop and isn't pulled outwards incorrectly."""
+        """
+        Verify that an inner `else` stays attached to its inner `if` in decompiled output and is not hoisted to the outer scope.
+        
+        Asserts that for Python versions before 3.11 the `else:` header and the inner `print('in_b is false')` appear, and in all versions the trailing `print('done')` remains at the function indentation level.
+        """
         src = (
             "def f(in_a, in_b):\n"
             "    if in_a:\n"
@@ -417,12 +425,10 @@ class TestVerifyScenesBugs(unittest.TestCase):
         self.assertNotIn("        print('done')", out)
 
     def test_force_close_stops_at_structural_blocks(self):
-        """Regression: force-close of inner if blocks must not consume non-if block types.
-
-        Bug: the force-close loop in _op_jump previously used _NO_INDENT_TYPES /
-        _NO_PASS_TYPES as guards, which meant it would pop 'else', 'while', 'for',
-        and 'try_body' blocks and collapse the indent level incorrectly.
-        Fixed by stopping the loop the moment a non-if/else block type is encountered.
+        """
+        Ensure force-close logic stops at structural block boundaries so non-if/else blocks are not collapsed.
+        
+        Regression test that checks: for Python < 3.11 both inner and outer `else:` branches are preserved and the statement following the if/else (`print('after')`) remains at the function indentation level rather than being absorbed into an else block.
         """
         src = (
             "def f(in_a, in_b):\n"
@@ -447,7 +453,11 @@ class TestVerifyScenesBugs(unittest.TestCase):
         self.assertNotIn("        print('after')", out)
 
     def test_force_close_stops_at_structural_blocks_negative(self):
-        """Negative: force-close must not produce a spurious pass or else for a plain if."""
+        """
+        Ensure control-flow reconstruction does not emit a spurious `else:` or `pass` for a simple nested `if`.
+        
+        Verifies that a nested `if` followed by a statement at the function level keeps the trailing statement at the function indentation and does not introduce an `else:` block on Python versions before 3.11.
+        """
         src = (
             "def f(a, b):\n"
             "    if a:\n"
