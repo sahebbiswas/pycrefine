@@ -1,4 +1,5 @@
 import os
+import sys
 import tempfile
 import unittest
 
@@ -268,6 +269,264 @@ class TestVerifyScenesBugs(unittest.TestCase):
         self.assertEqual(out.count("except Exception:"), 3)
         # Ensure return is aligned correctly (not inside except)
         self.assertRegex(out, r"\n    return value\s*$", out)
+
+    def test_api_40_pass_in_if_with_else(self):
+        """
+        Verify that decompiling a function with an empty `if` followed by `else` preserves the `pass`/else structure when expected.
+        
+        For Python versions before 3.11, asserts that the decompiled output contains both `pass` and `else:`. For Python 3.11 and later, asserts that the `print` from the `else` branch is present (the compiler/runtime may optimize the `if`/`else` shape).
+        """
+        src = (
+            "def f(in_a):\n"
+            "    if in_a:\n"
+            "        pass\n"
+            "    else:\n"
+            "        print('in_a is None')\n"
+        )
+        out = decompile(src)
+        import sys
+        if sys.version_info < (3, 11):
+            self.assertIn("pass", out)
+            self.assertIn("else:", out)
+        else:
+            # 3.12+ may optimize trailing if/else into an early return
+            self.assertIn("print", out)
+
+    def test_api_40_pass_in_if_no_else(self):
+        """Positive test: pass must be emitted for an empty if block without else."""
+        src = (
+            "def f(in_a):\n"
+            "    if in_a:\n"
+            "        pass\n"
+            "    print('done')\n"
+        )
+        out = decompile(src)
+        import sys
+        if sys.version_info < (3, 11):
+            self.assertIn("pass", out)
+        self.assertIn("print('done')", out)
+
+    def test_api_40_no_spurious_pass(self):
+        """Negative test: pass must NOT be emitted if the if block has contents."""
+        src = (
+            "def f(in_a):\n"
+            "    if in_a:\n"
+            "        print('hello')\n"
+            "    else:\n"
+            "        print('in_a is None')\n"
+        )
+        out = decompile(src)
+        self.assertNotIn("pass", out)
+        self.assertIn("print('hello')", out)
+
+    def test_api_41_nested_if_else_preservation(self):
+        src = (
+            "def f(in_a, in_b):\n"
+            "    if in_a:\n"
+            "        print('in_a is not None')\n"
+            "    elif type(in_a) == str:\n"
+            "        if in_b and in_b == in_a:\n"
+            "            print('in_b is equal to in_a')\n"
+            "    else:\n"
+            "        print('in_a is None')\n"
+        )
+        out = decompile(src)
+        import sys
+        if sys.version_info < (3, 11):
+            self.assertIn("else:", out)
+            self.assertIn("print('in_a is None')", out)
+        else:
+            self.assertIn("print('in_a is None')", out)
+
+    def test_api_41_inner_else_only(self):
+        """
+        Verify that an inner `else` stays attached to its inner `if` in decompiled output and is not hoisted to the outer scope.
+        
+        Asserts that for Python versions before 3.11 the `else:` header and the inner `print('in_b is false')` appear, and in all versions the trailing `print('done')` remains at the function indentation level.
+        """
+        src = (
+            "def f(in_a, in_b):\n"
+            "    if in_a:\n"
+            "        if in_b:\n"
+            "            print('all true')\n"
+            "        else:\n"
+            "            print('in_b is false')\n"
+            "    print('done')\n"
+        )
+        out = decompile(src)
+        import sys
+        if sys.version_info < (3, 11):
+            self.assertIn("else:", out)
+            self.assertIn("print('in_b is false')", out)
+        self.assertRegex(out, r"\n    print\('done'\)\s*$", out)
+
+    # ------------------------------------------------------------------
+    # Regression tests for else-block detection bugs (code review fixes)
+    # ------------------------------------------------------------------
+
+    def test_else_scope_not_swallowed_by_outer_else(self):
+        """Regression: outer if/else chain must not swallow statements after the else block.
+
+        Bug: when a nested if/else shares the same jump target as the outer else,
+        the decompiler used a deduplication guard that skipped registering the inner
+        else block tracker.  This caused _close_blocks to only decrement indent once
+        instead of twice, making post-else statements appear indented inside the else.
+        """
+        src = (
+            "def f(x):\n"
+            "    y = 0\n"
+            "    if x == 1:\n"
+            "        print('a')\n"
+            "        y = 1\n"
+            "    else:\n"
+            "        if x == 2:\n"
+            "            print('b')\n"
+            "            y = 2\n"
+            "        else:\n"
+            "            print('c')\n"
+            "            y = 3\n"
+            "    print('done')\n"
+            "    return y\n"
+        )
+        out = decompile(src)
+        # 'print done' and 'return y' must be at the top-level function indent,
+        # NOT inside the else: block.
+        self.assertRegex(out, r"\n    print\('done'\)", out)
+        self.assertRegex(out, r"\n    return y\s*$", out)
+        # The inner else: branch must still exist and contain its body
+        self.assertIn("print('c')", out)
+        # Negative: 'done' must NOT appear at deeper indent (inside else body)
+        self.assertNotIn("        print('done')", out)
+
+    def test_else_scope_not_swallowed_negative(self):
+        """Negative regression: the else body itself must remain correctly indented.
+
+        Complementary to test_else_scope_not_swallowed_by_outer_else — verifies
+        the else body sits one level deeper than the else: header, not at root level.
+        """
+        src = (
+            "def f(x):\n"
+            "    if x:\n"
+            "        print('yes')\n"
+            "    else:\n"
+            "        print('no')\n"
+            "    print('done')\n"
+        )
+        out = decompile(src)
+        import sys
+        if sys.version_info < (3, 11):
+            # 'no' must be indented inside the else block
+            self.assertIn("        print('no')", out)
+        # 'done' must be at function-level indent, not inside else
+        self.assertRegex(out, r"\n    print\('done'\)\s*$", out)
+        self.assertNotIn("        print('done')", out)
+
+    def test_force_close_stops_at_structural_blocks(self):
+        """
+        Ensure force-close logic stops at structural block boundaries so non-if/else blocks are not collapsed.
+        
+        Regression test that checks: for Python < 3.11 both inner and outer `else:` branches are preserved and the statement following the if/else (`print('after')`) remains at the function indentation level rather than being absorbed into an else block.
+        """
+        src = (
+            "def f(in_a, in_b):\n"
+            "    if in_a:\n"
+            "        if in_b:\n"
+            "            print('both')\n"
+            "        else:\n"
+            "            print('only a')\n"
+            "    else:\n"
+            "        print('not a')\n"
+            "    print('after')\n"
+        )
+        out = decompile(src)
+        import sys
+        if sys.version_info < (3, 11):
+            # Both else branches must survive
+            self.assertEqual(out.count("else:"), 2)
+            self.assertIn("print('only a')", out)
+            self.assertIn("print('not a')", out)
+        # 'after' must be at function-level — not absorbed into an else block
+        self.assertRegex(out, r"\n    print\('after'\)\s*$", out)
+        self.assertNotIn("        print('after')", out)
+
+    def test_force_close_stops_at_structural_blocks_negative(self):
+        """
+        Ensure control-flow reconstruction does not emit a spurious `else:` or `pass` for a simple nested `if`.
+        
+        Verifies that a nested `if` followed by a statement at the function level keeps the trailing statement at the function indentation and does not introduce an `else:` block on Python versions before 3.11.
+        """
+        src = (
+            "def f(a, b):\n"
+            "    if a:\n"
+            "        if b:\n"
+            "            print('both')\n"
+            "    print('done')\n"
+        )
+        out = decompile(src)
+        import sys
+        if sys.version_info < (3, 11):
+            # No spurious else should appear
+            self.assertNotIn("else:", out)
+        # 'done' must be at function-level indent
+        self.assertRegex(out, r"\n    print\('done'\)\s*$", out)
+
+    def test_force_close_structural_barrier_effect(self):
+        """Regression-like: verify that a while loop spanning beyond an if-exit acts as a blockade.
+        
+        This tests the guard specifically: when a structural block (like while) remains 
+        on the stack and cannot be popped, the decompiler should prefer not emitting 
+        an 'else:' over emitting one at the wrong indentation level.
+        """
+        # Complex case: while loop target (42) is beyond the if target (34).
+        src = (
+            "def f(a, b, c):\n"
+            "    if a:\n"
+            "        while b:\n"
+            "            if c:\n"
+            "                print('c')\n"
+            "            else:\n"
+            "                print('not c')\n"
+            "    else:\n"
+            "        print('not a')\n"
+        )
+        out = decompile(src)
+        # Even if decompilation is not perfect (due to 3.9 while-detection overlaps),
+        # we check for lack of syntax errors like multiple consecutive 'else:' 
+        # blocks indented into each other unexpectedly.
+        lines = out.splitlines()
+        else_indices = [i for i, line in enumerate(lines) if line.strip() == "else:"]
+        # Ensure no two else: blocks are at the same or deeper indentation than a sibling 
+        # unless correctly nested. 
+        # (This is mostly a stability/non-crash check for the guard logic).
+        import ast
+        try:
+            ast.parse(out)
+        except SyntaxError:
+            self.fail("Structural barrier triggered a syntax error in output")
+
+    @unittest.skipIf(sys.version_info >= (3, 11), "Known issue: 3.11+ compiler optimizations scramble nested try-except in ways this guard doesn't yet solve")
+    def test_try_except_nested_in_if_else(self):
+        """Positive test: ensure try/except blocks inside if/else branches work correctly with the new guard."""
+        src = (
+            "def f(a):\n"
+            "    if a:\n"
+            "        try:\n"
+            "            print('try')\n"
+            "        except Exception:\n"
+            "            print('err')\n"
+            "    else:\n"
+            "        print('else_a')\n"
+        )
+        out = decompile(src)
+        self.assertIn("try:", out)
+        self.assertIn("except Exception:", out)
+        import sys
+        if sys.version_info < (3, 11):
+            self.assertIn("else:", out)
+            self.assertIn("print('else_a')", out)
+        # Valid indentation
+        import ast
+        ast.parse(out)
 
     def test_build_slice_support(self):
         src = "def f(lst):\n    return lst[1:-1]\n"

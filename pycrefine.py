@@ -4002,6 +4002,29 @@ class DecompilerGeneric(DecompilerBase):
         # ── jumps / control flow ───────────────────────────────────────
 
     def _op_jump(self, instr: BytecodeInstruction):
+        """
+        Handle jump opcodes and reconstruct high-level control flow constructs (break, continue, else, while),
+        updating the decompiler's block stack, indentation, and reconstructed output.
+        
+        Forward jumps:
+        - If the jump lands at or beyond the end of an enclosing `while`/`for` block, emit `break`.
+        - If the forward jump is not an exception-handler jump and matches the end of a previously opened `if`
+          header, close any inner `if`/`else` branches, emit a `pass` when required for empty headers,
+          decrease indentation for the matched `if`, and emit an `else:` block with adjusted indentation.
+          Does nothing for exception-handler jump offsets.
+        
+        Backward jumps (loop back-edges):
+        - If the jump is an exception-handler back-jump, do not treat it as a loop back-edge (may emit
+          `continue` when it represents an explicit continue inside a handler).
+        - If a prescan already recorded a `while` header for this loop, leave it unchanged.
+        - Otherwise, suppress duplicated condition bytecode produced by certain CPython layouts,
+          drain any extra expressions pushed by the duplicated condition from the expression stack,
+          and retroactively rewrite the most recently emitted `if` header into a `while` header.
+        
+        Parameters:
+            instr (BytecodeInstruction): The disassembled jump instruction to handle.
+        
+        """
         opname = instr.opname
         jump_target = self._get_jump_target(instr)
 
@@ -4023,26 +4046,48 @@ class DecompilerGeneric(DecompilerBase):
             # prior if-block whose target matches jump_target is actually open.
             # (Exception-handler jumps are always excluded.)
             if instr.offset not in getattr(self, "_exc_handler_jump_offsets", ()):
-                # Find the most recent "if" block in self.blocks.
-                prior_if_target = None
-                for b_off, b_type in reversed(self.blocks):
-                    if b_type == "if":
-                        prior_if_target = b_off
-                        break
-
                 next_offset = -1
                 if self.pc < len(self.instructions):
                     next_offset = self.instructions[self.pc].offset
 
-                # Emit else: when the next instruction is the target of the if block
-                if prior_if_target is not None and prior_if_target == next_offset:
+                matched_bi = None
+                for bi in range(len(self.blocks)-1, -1, -1):
+                    if self.blocks[bi][1] == "if" and self.blocks[bi][0] == next_offset:
+                        matched_bi = bi
+                        break
+
+                if matched_bi is not None:
+                    # Force close any blocks nested INSIDE (above) the matched if block.
+                    # Only pop interior 'if' blocks — stop at any outer structural block
+                    # (else, while, for, try_body, etc.) which we must NOT collapse.
+                    while len(self.blocks) - 1 > matched_bi:
+                        _, cb_type = self.blocks[-1]
+                        # Stop if we hit a block that is not an inner if/else branch
+                        if cb_type not in ("if", "else"):
+                            break
+                        self.blocks.pop()
+                        if cb_type not in _NO_PASS_TYPES:
+                            last_idx = len(self.reconstructed) - 1
+                            while last_idx >= 0 and not self.reconstructed[last_idx].strip():
+                                last_idx -= 1
+                            if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
+                                self._append_reconstructed("pass")
+                        if cb_type not in _NO_INDENT_TYPES:
+                            self.indent_level -= 1
+
+                    if matched_bi != len(self.blocks) - 1:
+                        return
+
+                    last_idx = len(self.reconstructed) - 1
+                    while last_idx >= 0 and not self.reconstructed[last_idx].strip():
+                        last_idx -= 1
+                    if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
+                        self._append_reconstructed("pass")
+
                     self.indent_level -= 1
                     self._append_reconstructed("else:")
                     self.indent_level += 1
-                    for bi in range(len(self.blocks)-1, -1, -1):
-                        if self.blocks[bi][1] == "if":
-                            self.blocks.pop(bi)
-                            break
+                    self.blocks.pop(matched_bi)  # pop the matched 'if' block
                     self.blocks.append((jump_target, "else"))
             return
         # detect while loop.

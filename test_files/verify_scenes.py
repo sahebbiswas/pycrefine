@@ -227,3 +227,19 @@ def api_32(in_a):
     print("This is my Input2 : \'%s\' and \"%s\"" % (in_a, in_a))
     return in_a
     
+def api_40(in_a):
+    if in_a:
+        pass
+    else:
+        print("in_a is None")
+    
+def api_41(in_a, in_b):
+    if in_a:
+        print("in_a is not None")
+    elif type(in_a) == str:
+        if in_b and in_b == in_a:
+            print("in_b is equal to in_a")
+    else:
+        print("in_a is None")
+        
+    
