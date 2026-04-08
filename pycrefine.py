@@ -1,6 +1,7 @@
 #!python3
 # pycrefine.py
 import argparse
+import ast
 import dis
 import importlib.util
 import io
@@ -502,18 +503,29 @@ def post_process_source(source: str, beautification_level: str = 'core') -> str:
                     balanced = False
                     break
             if balanced and depth == 0:
-                # Comma check: refuse to unwrap if there is a top-level comma
-                # (that would turn a single tuple argument into multiple args).
-                top_level_comma = False
-                d = 0
-                for char in inside:
-                    if char in '([{': d += 1
-                    elif char in ')]}': d -= 1
-                    elif char == ',' and d == 0:
-                        top_level_comma = True
-                        break
-                if not top_level_comma:
-                    inner = inside
+                try:
+                    # Robust check using AST to see if 'inside' is a tuple.
+                    # We use mode='eval' because 'inside' should be a single expression
+                    # (possibly a tuple expression).
+                    node = ast.parse(inside, mode='eval')
+                    # If it's an ast.Tuple, then unwrapping the outer parentheses
+                    # would turn one tuple argument into multiple arguments.
+                    if not isinstance(node.body, ast.Tuple):
+                        inner = inside
+                except Exception:
+                    # Fallback to the manual comma scan if AST parsing fails.
+                    # (e.g., for specialized syntax like '*args' which mode='eval' might reject)
+                    # Use a scan that skips content inside delimiters.
+                    top_level_comma = False
+                    d = 0
+                    for char in inside:
+                        if char in '([{': d += 1
+                        elif char in ')]}': d -= 1
+                        elif char == ',' and d == 0:
+                            top_level_comma = True
+                            break
+                    if not top_level_comma:
+                        inner = inside
         
         return f"{prefix}{inner})"
 

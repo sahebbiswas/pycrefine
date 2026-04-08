@@ -334,38 +334,50 @@ class TestVerifyScenesBugs(unittest.TestCase):
 
     def test_api_32_print_string_beautification(self):
         import re as _re
+        # Updated to match current verify_scenes.py structure
         src = (
             "def api_32(in_a):\n"
             "    print(\"This is my Input :\\n %s\" % in_a)\n"
+            "    print((in_a, in_a))\n"
             "    print(\"This is my Input2 : \\'%s\\' and \\\"%s\\\"\" % (in_a, in_a))\n"
             "    return in_a\n"
         )
 
         # ── core: newline string is collapsed to a single-line literal ──────
         out_core = decompile(src, beautification_level='core')
-        # The first print must contain key text and in_a, on one line (triple-quote removed).
+
+        # Check First Print: Semaphore text + variable reference, no triple quotes
         self.assertTrue(
             _re.search(r'print\(.*This is my Input.*in_a.*\)', out_core),
-            f"First print not found in core output:\n{out_core}",
+            f"First print not found in core output:\n{out_core}"
         )
-        # The line must NOT be split across multiple source lines (no triple-quote).
-        matching_lines = [ln for ln in out_core.splitlines()
-                          if "This is my Input" in ln and "print" in ln]
-        self.assertTrue(matching_lines, "Could not find 'This is my Input' print line in core output")
-        # Second print must contain 'This is my Input2' and reference in_a twice.
-        self.assertTrue(
-            _re.search(r'This is my Input2.*in_a.*in_a', out_core, _re.DOTALL),
-            f"Second print not found properly in core output:\n{out_core}",
+        self.assertFalse(
+            _re.search(r'"""This is my Input', out_core) or _re.search(r"'''This is my Input", out_core),
+            "First print should not use triple quotes in core mode"
         )
 
-        # ── none: triple-quote form (or f-string on 3.12+) preserved ────────
-        out_none = decompile(src, beautification_level='none')
-        self.assertIn("This is my Input", out_none)
-        self.assertIn("in_a", out_none)
+        # Check Second Print: Tuple preservation (must NOT be print(in_a, in_a))
+        # It must contain either (in_a, in_a) or ((in_a, in_a))
         self.assertTrue(
-            _re.search(r'This is my Input2.*in_a.*in_a', out_none, _re.DOTALL),
-            f"Second print not found in none output:\n{out_none}",
+            _re.search(r'print\(\s*\(in_a\s*,\s*in_a\)\s*\)', out_core),
+            f"Tuple argument was incorrectly unwrapped or mangled:\n{out_core}"
         )
+
+        # Check Third Print: Semaphore text + two variable references
+        # Agnostic to whether it's % format or f-string
+        self.assertTrue(
+            _re.search(r'This is my Input2.*in_a.*in_a', out_core, _re.DOTALL),
+            f"Third print not found properly in core output:\n{out_core}"
+        )
+
+        # ── none: original triple-quote form (or f-string) preserved ────────
+        out_none = decompile(src, beautification_level='none')
+        # Here we just verify key content exists; 'none' is allowed to be verbose
+        self.assertIn("This is my Input", out_none)
+        self.assertIn("This is my Input2", out_none)
+        # Double-check variable name existence in none output.
+        self.assertTrue(out_none.count("in_a") >= 5,
+                        f"'in_a' appears fewer times than expected in none output:\n{out_none}")
 
     def test_api_32_print_none_preserves_triple_quote(self):
         """Under beautification='none', a newline-containing string stays triple-quoted."""
