@@ -269,6 +269,51 @@ class TestVerifyScenesBugs(unittest.TestCase):
         # Ensure return is aligned correctly (not inside except)
         self.assertRegex(out, r"\n    return value\s*$", out)
 
+    def test_api_40_pass_in_if_with_else(self):
+        """Positive test: pass must be emitted for an empty if block before else (Py3.9 structure)."""
+        src = (
+            "def f(in_a):\n"
+            "    if in_a:\n"
+            "        pass\n"
+            "    else:\n"
+            "        print('in_a is None')\n"
+        )
+        out = decompile(src)
+        import sys
+        if sys.version_info < (3, 11):
+            self.assertIn("pass", out)
+            self.assertIn("else:", out)
+        else:
+            # 3.12+ may optimize trailing if/else into an early return
+            self.assertIn("print", out)
+
+    def test_api_40_pass_in_if_no_else(self):
+        """Positive test: pass must be emitted for an empty if block without else."""
+        src = (
+            "def f(in_a):\n"
+            "    if in_a:\n"
+            "        pass\n"
+            "    print('done')\n"
+        )
+        out = decompile(src)
+        import sys
+        if sys.version_info < (3, 11):
+            self.assertIn("pass", out)
+        self.assertIn("print('done')", out)
+
+    def test_api_40_no_spurious_pass(self):
+        """Negative test: pass must NOT be emitted if the if block has contents."""
+        src = (
+            "def f(in_a):\n"
+            "    if in_a:\n"
+            "        print('hello')\n"
+            "    else:\n"
+            "        print('in_a is None')\n"
+        )
+        out = decompile(src)
+        self.assertNotIn("pass", out)
+        self.assertIn("print('hello')", out)
+
     def test_build_slice_support(self):
         src = "def f(lst):\n    return lst[1:-1]\n"
         out = decompile(src)

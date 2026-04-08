@@ -4036,6 +4036,12 @@ class DecompilerGeneric(DecompilerBase):
 
                 # Emit else: when the next instruction is the target of the if block
                 if prior_if_target is not None and prior_if_target == next_offset:
+                    last_idx = len(self.reconstructed) - 1
+                    while last_idx >= 0 and not self.reconstructed[last_idx].strip():
+                        last_idx -= 1
+                    if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
+                        self._append_reconstructed("pass")
+
                     self.indent_level -= 1
                     self._append_reconstructed("else:")
                     self.indent_level += 1
