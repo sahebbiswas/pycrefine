@@ -426,6 +426,57 @@ class TestVerifyScenesBugs(unittest.TestCase):
         except SyntaxError as exc:
             self.fail(f"Embedded-quote rewrite produced invalid Python: {exc}\n{out}")
 
+    def test_print_embedded_single_quotes_safe(self):
+        """Triple-quoted string with embedded single-quotes must produce valid Python."""
+        import ast
+        from pycrefine import post_process_source
+        src = "print((\"\"\"it's a test\\nfoo\"\"\" % x))\n"
+        out = post_process_source(src, beautification_level='core')
+        try:
+            ast.parse(out)
+        except SyntaxError as exc:
+            self.fail(f"Embedded-single-quote rewrite produced invalid Python: {exc}\n{out}")
+        # The output must be single-line (no actual newline in the middle of the literal).
+        self.assertEqual(out.count('\n'), 1,
+                         f"Output spans multiple lines unexpectedly:\n{out}")
+
+    def test_print_single_element_tuple_not_unwrapped(self):
+        """print((x,)) is a one-element tuple — must NOT be unwrapped to print(x,)."""
+        from pycrefine import post_process_source
+        src = "print((x,))\n"
+        out = post_process_source(src, beautification_level='core')
+        self.assertNotIn("print(x,)", out,
+                         f"Single-element tuple was incorrectly unwrapped:\n{out}")
+        self.assertIn("(x,)", out)
+
+    def test_print_none_level_preserves_grouping_parens(self):
+        """Under beautification='none', grouping parens around a print arg are kept."""
+        from pycrefine import post_process_source
+        src = 'print(("fmt %s" % x))\n'
+        out = post_process_source(src, beautification_level='none')
+        # The double-paren form must be preserved as-is.
+        self.assertIn("print((", out,
+                      f"Grouping parens were stripped under 'none' level:\n{out}")
+
+    def test_print_aggressive_level_removes_grouping_parens(self):
+        """Under beautification='aggressive', grouping parens are removed (same as core)."""
+        from pycrefine import post_process_source
+        src = 'print(("fmt %s" % x))\n'
+        out = post_process_source(src, beautification_level='aggressive')
+        self.assertNotIn("print((", out,
+                         f"Grouping parens were not removed under 'aggressive' level:\n{out}")
+
+    def test_print_aggressive_level_fixes_triple_quote(self):
+        """Under beautification='aggressive', triple-quoted strings in print are collapsed."""
+        import re as _re
+        from pycrefine import post_process_source
+        src = 'print(("""line1\\nline2"""))\n'
+        out = post_process_source(src, beautification_level='aggressive')
+        self.assertFalse(
+            _re.search(r'"""', out) or _re.search(r"'''", out),
+            f"Triple-quoted string leaked into aggressive output:\n{out}",
+        )
+
 
 class TestFindingsRefinement(unittest.TestCase):
     def test_blank_separator_nested_logic(self):
