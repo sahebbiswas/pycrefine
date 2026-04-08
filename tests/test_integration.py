@@ -332,6 +332,100 @@ class TestVerifyScenesBugs(unittest.TestCase):
         self.assertIn("in_a, in_b = api_21(None)", out)
         self.assertIn("'not found' if in_b is None else 'reset'", out)
 
+    def test_api_32_print_string_beautification(self):
+        import re as _re
+        src = (
+            "def api_32(in_a):\n"
+            "    print(\"This is my Input :\\n %s\" % in_a)\n"
+            "    print(\"This is my Input2 : \\'%s\\' and \\\"%s\\\"\" % (in_a, in_a))\n"
+            "    return in_a\n"
+        )
+
+        # ── core: newline string is collapsed to a single-line literal ──────
+        out_core = decompile(src, beautification_level='core')
+        # The first print must contain key text and in_a, on one line (triple-quote removed).
+        self.assertTrue(
+            _re.search(r'print\(.*This is my Input.*in_a.*\)', out_core),
+            f"First print not found in core output:\n{out_core}",
+        )
+        # The line must NOT be split across multiple source lines (no triple-quote).
+        matching_lines = [ln for ln in out_core.splitlines()
+                          if "This is my Input" in ln and "print" in ln]
+        self.assertTrue(matching_lines, "Could not find 'This is my Input' print line in core output")
+        # Second print must contain 'This is my Input2' and reference in_a twice.
+        self.assertTrue(
+            _re.search(r'This is my Input2.*in_a.*in_a', out_core, _re.DOTALL),
+            f"Second print not found properly in core output:\n{out_core}",
+        )
+
+        # ── none: triple-quote form (or f-string on 3.12+) preserved ────────
+        out_none = decompile(src, beautification_level='none')
+        self.assertIn("This is my Input", out_none)
+        self.assertIn("in_a", out_none)
+        self.assertTrue(
+            _re.search(r'This is my Input2.*in_a.*in_a', out_none, _re.DOTALL),
+            f"Second print not found in none output:\n{out_none}",
+        )
+
+    def test_api_32_print_none_preserves_triple_quote(self):
+        """Under beautification='none', a newline-containing string stays triple-quoted."""
+        import re as _re
+        src = (
+            "def f(x):\n"
+            "    print(\"line1\\nline2\" % x)\n"
+        )
+        out_none = decompile(src, beautification_level='none')
+        # Must contain triple-quoted form (actual newline inside the string literal).
+        self.assertTrue(
+            _re.search(r'print\(.*""".*\n.*"""', out_none, _re.DOTALL)
+            or _re.search(r"print\(.*'''.*\n.*'''", out_none, _re.DOTALL),
+            f"Expected triple-quoted string in none output:\n{out_none}",
+        )
+
+    def test_api_32_print_core_no_triple_quote(self):
+        """Under beautification='core', a newline-containing string must NOT be triple-quoted."""
+        import re as _re
+        src = (
+            "def f(x):\n"
+            "    print(\"line1\\nline2\" % x)\n"
+        )
+        out_core = decompile(src, beautification_level='core')
+        # The print statement must be a single line — no triple-quote spanning.
+        print_lines = [ln for ln in out_core.splitlines() if "print" in ln]
+        self.assertTrue(print_lines, f"No print line found:\n{out_core}")
+        self.assertFalse(
+            _re.search(r'"""', out_core) or _re.search(r"'''", out_core),
+            f"Triple-quoted string leaked into core output:\n{out_core}",
+        )
+
+    def test_print_tuple_arg_not_unwrapped(self):
+        """print((a, b)) must NOT become print(a, b) — the tuple is a single argument."""
+        from pycrefine import post_process_source
+        src = "print((a, b))\n"
+        out = post_process_source(src, beautification_level='core')
+        self.assertNotIn("print(a, b)", out,
+                         f"Tuple was incorrectly unwrapped:\n{out}")
+        self.assertIn("(a, b)", out)
+
+    def test_print_grouping_parens_unwrapped(self):
+        """print((expr)) where inner has no top-level comma should be unwrapped to print(expr)."""
+        from pycrefine import post_process_source
+        src = 'print(("fmt %s" % x))\n'
+        out = post_process_source(src, beautification_level='core')
+        self.assertNotIn("print((", out,
+                         f"Grouping parens were not removed:\n{out}")
+
+    def test_print_embedded_quotes_safe(self):
+        """Triple-quoted string with embedded quotes must produce valid Python."""
+        import ast
+        from pycrefine import post_process_source
+        src = 'print(("""hello "world"\\nfoo""" % x))\n'
+        out = post_process_source(src, beautification_level='core')
+        try:
+            ast.parse(out)
+        except SyntaxError as exc:
+            self.fail(f"Embedded-quote rewrite produced invalid Python: {exc}\n{out}")
+
 
 class TestFindingsRefinement(unittest.TestCase):
     def test_blank_separator_nested_logic(self):
@@ -363,32 +457,6 @@ class TestFindingsRefinement(unittest.TestCase):
         out = decompile(src)
         self.assertIn("(a, b), c =", out)
 
-    def test_api_32_print_string_beautification(self):
-        src = (
-            "def api_32(in_a):\n"
-            "    print(\"This is my Input :\\n %s\" % in_a)\n"
-            "    print(\"This is my Input2 : \\'%s\\' and \\\"%s\\\"\" % (in_a, in_a))\n"
-            "    return in_a\n"
-        )
-        
-        # Test core beautification
-        out_core = decompile(src, beautification_level='core')
-        self.assertIn("print(\"This is my Input :\\n %s\" % in_a)", out_core)
-        if "f\"This is my Input2" in out_core:
-            self.assertIn("print(f\"This is my Input2 : {in_a}\\' and {in_a}\")", out_core)
-        else:
-            self.assertIn("print('This is my Input2 : \\'%s\\' and \"%s\"' % (in_a, in_a))", out_core)
-        
-        # Test none beautification
-        out_none = decompile(src, beautification_level='none')
-        # Expect triple quotes due to newline
-        self.assertIn("print((\"\"\"This is my Input :\n %s\"\"\" % in_a))", out_none)
-        if "f\"This is my Input2" in out_none:
-            self.assertIn("print(f\"This is my Input2 : {in_a}\\' and {in_a}\")", out_none)
-        else:
-            self.assertIn("print(('This is my Input2 : \\'%s\\' and \"%s\"' % (in_a, in_a)))", out_none)
-
 
 if __name__ == "__main__":
     unittest.main()
-
