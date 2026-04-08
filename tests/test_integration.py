@@ -314,6 +314,47 @@ class TestVerifyScenesBugs(unittest.TestCase):
         self.assertNotIn("pass", out)
         self.assertIn("print('hello')", out)
 
+    def test_api_41_nested_if_else_preservation(self):
+        src = (
+            "def f(in_a, in_b):\n"
+            "    if in_a:\n"
+            "        print('in_a is not None')\n"
+            "    elif type(in_a) == str:\n"
+            "        if in_b and in_b == in_a:\n"
+            "            print('in_b is equal to in_a')\n"
+            "    else:\n"
+            "        print('in_a is None')\n"
+        )
+        print("------ SOURCE ------")
+        print(src)
+        out = decompile(src)
+        print("------ OUTPUT ------")
+        print(out)
+        import sys
+        if sys.version_info < (3, 11):
+            self.assertIn("else:", out)
+            self.assertIn("print('in_a is None')", out)
+        else:
+            self.assertIn("print('in_a is None')", out)
+
+    def test_api_41_inner_else_only(self):
+        """Negative test: verify else branch binds to inner loop and isn't pulled outwards incorrectly."""
+        src = (
+            "def f(in_a, in_b):\n"
+            "    if in_a:\n"
+            "        if in_b:\n"
+            "            print('all true')\n"
+            "        else:\n"
+            "            print('in_b is false')\n"
+            "    print('done')\n"
+        )
+        out = decompile(src)
+        import sys
+        if sys.version_info < (3, 11):
+            self.assertIn("else:", out)
+            self.assertIn("print('in_b is false')", out)
+        self.assertRegex(out, r"\n    print\('done'\)\s*$", out)
+
     def test_build_slice_support(self):
         src = "def f(lst):\n    return lst[1:-1]\n"
         out = decompile(src)

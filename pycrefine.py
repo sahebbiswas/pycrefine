@@ -4023,19 +4023,29 @@ class DecompilerGeneric(DecompilerBase):
             # prior if-block whose target matches jump_target is actually open.
             # (Exception-handler jumps are always excluded.)
             if instr.offset not in getattr(self, "_exc_handler_jump_offsets", ()):
-                # Find the most recent "if" block in self.blocks.
-                prior_if_target = None
-                for b_off, b_type in reversed(self.blocks):
-                    if b_type == "if":
-                        prior_if_target = b_off
-                        break
-
                 next_offset = -1
                 if self.pc < len(self.instructions):
                     next_offset = self.instructions[self.pc].offset
 
-                # Emit else: when the next instruction is the target of the if block
-                if prior_if_target is not None and prior_if_target == next_offset:
+                matched_bi = None
+                for bi in range(len(self.blocks)-1, -1, -1):
+                    if self.blocks[bi][1] == "if" and self.blocks[bi][0] == next_offset:
+                        matched_bi = bi
+                        break
+
+                if matched_bi is not None:
+                    # Force close any blocks nested inside the matched if block
+                    while len(self.blocks) - 1 > matched_bi:
+                        cb_off, cb_type = self.blocks.pop()
+                        if cb_type not in _NO_PASS_TYPES:
+                            last_idx = len(self.reconstructed) - 1
+                            while last_idx >= 0 and not self.reconstructed[last_idx].strip():
+                                last_idx -= 1
+                            if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
+                                self._append_reconstructed("pass")
+                        if cb_type not in _NO_INDENT_TYPES:
+                            self.indent_level -= 1
+
                     last_idx = len(self.reconstructed) - 1
                     while last_idx >= 0 and not self.reconstructed[last_idx].strip():
                         last_idx -= 1
@@ -4045,10 +4055,7 @@ class DecompilerGeneric(DecompilerBase):
                     self.indent_level -= 1
                     self._append_reconstructed("else:")
                     self.indent_level += 1
-                    for bi in range(len(self.blocks)-1, -1, -1):
-                        if self.blocks[bi][1] == "if":
-                            self.blocks.pop(bi)
-                            break
+                    self.blocks.pop()  # pop the matched 'if' block
                     self.blocks.append((jump_target, "else"))
             return
         # detect while loop.
