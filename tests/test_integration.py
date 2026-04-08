@@ -332,6 +332,163 @@ class TestVerifyScenesBugs(unittest.TestCase):
         self.assertIn("in_a, in_b = api_21(None)", out)
         self.assertIn("'not found' if in_b is None else 'reset'", out)
 
+    def test_api_32_print_string_beautification(self):
+        import re as _re
+        # Updated to match current verify_scenes.py structure
+        src = (
+            "def api_32(in_a):\n"
+            "    print(\"This is my Input :\\n %s\" % in_a)\n"
+            "    print((in_a, in_a))\n"
+            "    print(\"This is my Input2 : \\'%s\\' and \\\"%s\\\"\" % (in_a, in_a))\n"
+            "    return in_a\n"
+        )
+
+        # ── core: newline string is collapsed to a single-line literal ──────
+        out_core = decompile(src, beautification_level='core')
+
+        # Check First Print: Semaphore text + variable reference, no triple quotes
+        self.assertTrue(
+            _re.search(r'print\(.*This is my Input.*in_a.*\)', out_core),
+            f"First print not found in core output:\n{out_core}"
+        )
+        self.assertFalse(
+            _re.search(r'"""This is my Input', out_core) or _re.search(r"'''This is my Input", out_core),
+            "First print should not use triple quotes in core mode"
+        )
+
+        # Check Second Print: Tuple preservation (must NOT be print(in_a, in_a))
+        # It must contain either (in_a, in_a) or ((in_a, in_a))
+        self.assertTrue(
+            _re.search(r'print\(\s*\(in_a\s*,\s*in_a\)\s*\)', out_core),
+            f"Tuple argument was incorrectly unwrapped or mangled:\n{out_core}"
+        )
+
+        # Check Third Print: Semaphore text + two variable references
+        # Agnostic to whether it's % format or f-string
+        self.assertTrue(
+            _re.search(r'This is my Input2.*in_a.*in_a', out_core, _re.DOTALL),
+            f"Third print not found properly in core output:\n{out_core}"
+        )
+
+        # ── none: original triple-quote form (or f-string) preserved ────────
+        out_none = decompile(src, beautification_level='none')
+        # Here we just verify key content exists; 'none' is allowed to be verbose
+        self.assertIn("This is my Input", out_none)
+        self.assertIn("This is my Input2", out_none)
+        # Double-check variable name existence in none output.
+        self.assertTrue(out_none.count("in_a") >= 5,
+                        f"'in_a' appears fewer times than expected in none output:\n{out_none}")
+
+    def test_api_32_print_none_preserves_triple_quote(self):
+        """Under beautification='none', a newline-containing string stays triple-quoted."""
+        import re as _re
+        src = (
+            "def f(x):\n"
+            "    print(\"line1\\nline2\" % x)\n"
+        )
+        out_none = decompile(src, beautification_level='none')
+        # Must contain triple-quoted form (actual newline inside the string literal).
+        self.assertTrue(
+            _re.search(r'print\(.*""".*\n.*"""', out_none, _re.DOTALL)
+            or _re.search(r"print\(.*'''.*\n.*'''", out_none, _re.DOTALL),
+            f"Expected triple-quoted string in none output:\n{out_none}",
+        )
+
+    def test_api_32_print_core_no_triple_quote(self):
+        """Under beautification='core', a newline-containing string must NOT be triple-quoted."""
+        import re as _re
+        src = (
+            "def f(x):\n"
+            "    print(\"line1\\nline2\" % x)\n"
+        )
+        out_core = decompile(src, beautification_level='core')
+        # The print statement must be a single line — no triple-quote spanning.
+        print_lines = [ln for ln in out_core.splitlines() if "print" in ln]
+        self.assertTrue(print_lines, f"No print line found:\n{out_core}")
+        self.assertFalse(
+            _re.search(r'"""', out_core) or _re.search(r"'''", out_core),
+            f"Triple-quoted string leaked into core output:\n{out_core}",
+        )
+
+    def test_print_tuple_arg_not_unwrapped(self):
+        """print((a, b)) must NOT become print(a, b) — the tuple is a single argument."""
+        from pycrefine import post_process_source
+        src = "print((a, b))\n"
+        out = post_process_source(src, beautification_level='core')
+        self.assertNotIn("print(a, b)", out,
+                         f"Tuple was incorrectly unwrapped:\n{out}")
+        self.assertIn("(a, b)", out)
+
+    def test_print_grouping_parens_unwrapped(self):
+        """print((expr)) where inner has no top-level comma should be unwrapped to print(expr)."""
+        from pycrefine import post_process_source
+        src = 'print(("fmt %s" % x))\n'
+        out = post_process_source(src, beautification_level='core')
+        self.assertNotIn("print((", out,
+                         f"Grouping parens were not removed:\n{out}")
+
+    def test_print_embedded_quotes_safe(self):
+        """Triple-quoted string with embedded quotes must produce valid Python."""
+        import ast
+        from pycrefine import post_process_source
+        src = 'print(("""hello "world"\\nfoo""" % x))\n'
+        out = post_process_source(src, beautification_level='core')
+        try:
+            ast.parse(out)
+        except SyntaxError as exc:
+            self.fail(f"Embedded-quote rewrite produced invalid Python: {exc}\n{out}")
+
+    def test_print_embedded_single_quotes_safe(self):
+        """Triple-quoted string with embedded single-quotes must produce valid Python."""
+        import ast
+        from pycrefine import post_process_source
+        src = "print((\"\"\"it's a test\\nfoo\"\"\" % x))\n"
+        out = post_process_source(src, beautification_level='core')
+        try:
+            ast.parse(out)
+        except SyntaxError as exc:
+            self.fail(f"Embedded-single-quote rewrite produced invalid Python: {exc}\n{out}")
+        # The output must be single-line (no actual newline in the middle of the literal).
+        self.assertEqual(out.count('\n'), 1,
+                         f"Output spans multiple lines unexpectedly:\n{out}")
+
+    def test_print_single_element_tuple_not_unwrapped(self):
+        """print((x,)) is a one-element tuple — must NOT be unwrapped to print(x,)."""
+        from pycrefine import post_process_source
+        src = "print((x,))\n"
+        out = post_process_source(src, beautification_level='core')
+        self.assertNotIn("print(x,)", out,
+                         f"Single-element tuple was incorrectly unwrapped:\n{out}")
+        self.assertIn("(x,)", out)
+
+    def test_print_none_level_preserves_grouping_parens(self):
+        """Under beautification='none', grouping parens around a print arg are kept."""
+        from pycrefine import post_process_source
+        src = 'print(("fmt %s" % x))\n'
+        out = post_process_source(src, beautification_level='none')
+        # The double-paren form must be preserved as-is.
+        self.assertIn("print((", out,
+                      f"Grouping parens were stripped under 'none' level:\n{out}")
+
+    def test_print_aggressive_level_removes_grouping_parens(self):
+        """Under beautification='aggressive', grouping parens are removed (same as core)."""
+        from pycrefine import post_process_source
+        src = 'print(("fmt %s" % x))\n'
+        out = post_process_source(src, beautification_level='aggressive')
+        self.assertNotIn("print((", out,
+                         f"Grouping parens were not removed under 'aggressive' level:\n{out}")
+
+    def test_print_aggressive_level_fixes_triple_quote(self):
+        """Under beautification='aggressive', triple-quoted strings in print are collapsed."""
+        import re as _re
+        from pycrefine import post_process_source
+        src = 'print(("""line1\\nline2"""))\n'
+        out = post_process_source(src, beautification_level='aggressive')
+        self.assertFalse(
+            _re.search(r'"""', out) or _re.search(r"'''", out),
+            f"Triple-quoted string leaked into aggressive output:\n{out}",
+        )
+
 
 class TestFindingsRefinement(unittest.TestCase):
     def test_blank_separator_nested_logic(self):

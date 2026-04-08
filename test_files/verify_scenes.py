@@ -220,3 +220,10 @@ def api_30(in_a=None, in_b=None, in_c=None):
 def api_31(in_a):
     api_30(30, in_c=in_a, in_b=10)
     
+def api_32(in_a):
+    print("This is my Input :\n %s" % in_a)
+    print((in_a,in_a))
+    print("""this is a valid multi-line string with print(("in_a=", in_a))""")
+    print("This is my Input2 : \'%s\' and \"%s\"" % (in_a, in_a))
+    return in_a
+    
