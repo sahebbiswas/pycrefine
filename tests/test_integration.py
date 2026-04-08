@@ -355,6 +355,114 @@ class TestVerifyScenesBugs(unittest.TestCase):
             self.assertIn("print('in_b is false')", out)
         self.assertRegex(out, r"\n    print\('done'\)\s*$", out)
 
+    # ------------------------------------------------------------------
+    # Regression tests for else-block detection bugs (code review fixes)
+    # ------------------------------------------------------------------
+
+    def test_else_scope_not_swallowed_by_outer_else(self):
+        """Regression: outer if/else chain must not swallow statements after the else block.
+
+        Bug: when a nested if/else shares the same jump target as the outer else,
+        the decompiler used a deduplication guard that skipped registering the inner
+        else block tracker.  This caused _close_blocks to only decrement indent once
+        instead of twice, making post-else statements appear indented inside the else.
+        """
+        src = (
+            "def f(x):\n"
+            "    y = 0\n"
+            "    if x == 1:\n"
+            "        print('a')\n"
+            "        y = 1\n"
+            "    else:\n"
+            "        if x == 2:\n"
+            "            print('b')\n"
+            "            y = 2\n"
+            "        else:\n"
+            "            print('c')\n"
+            "            y = 3\n"
+            "    print('done')\n"
+            "    return y\n"
+        )
+        out = decompile(src)
+        # 'print done' and 'return y' must be at the top-level function indent,
+        # NOT inside the else: block.
+        self.assertRegex(out, r"\n    print\('done'\)", out)
+        self.assertRegex(out, r"\n    return y\s*$", out)
+        # The inner else: branch must still exist and contain its body
+        self.assertIn("print('c')", out)
+        # Negative: 'done' must NOT appear at deeper indent (inside else body)
+        self.assertNotIn("        print('done')", out)
+
+    def test_else_scope_not_swallowed_negative(self):
+        """Negative regression: the else body itself must remain correctly indented.
+
+        Complementary to test_else_scope_not_swallowed_by_outer_else — verifies
+        the else body sits one level deeper than the else: header, not at root level.
+        """
+        src = (
+            "def f(x):\n"
+            "    if x:\n"
+            "        print('yes')\n"
+            "    else:\n"
+            "        print('no')\n"
+            "    print('done')\n"
+        )
+        out = decompile(src)
+        import sys
+        if sys.version_info < (3, 11):
+            # 'no' must be indented inside the else block
+            self.assertIn("        print('no')", out)
+        # 'done' must be at function-level indent, not inside else
+        self.assertRegex(out, r"\n    print\('done'\)\s*$", out)
+        self.assertNotIn("        print('done')", out)
+
+    def test_force_close_stops_at_structural_blocks(self):
+        """Regression: force-close of inner if blocks must not consume non-if block types.
+
+        Bug: the force-close loop in _op_jump previously used _NO_INDENT_TYPES /
+        _NO_PASS_TYPES as guards, which meant it would pop 'else', 'while', 'for',
+        and 'try_body' blocks and collapse the indent level incorrectly.
+        Fixed by stopping the loop the moment a non-if/else block type is encountered.
+        """
+        src = (
+            "def f(in_a, in_b):\n"
+            "    if in_a:\n"
+            "        if in_b:\n"
+            "            print('both')\n"
+            "        else:\n"
+            "            print('only a')\n"
+            "    else:\n"
+            "        print('not a')\n"
+            "    print('after')\n"
+        )
+        out = decompile(src)
+        import sys
+        if sys.version_info < (3, 11):
+            # Both else branches must survive
+            self.assertEqual(out.count("else:"), 2)
+            self.assertIn("print('only a')", out)
+            self.assertIn("print('not a')", out)
+        # 'after' must be at function-level — not absorbed into an else block
+        self.assertRegex(out, r"\n    print\('after'\)\s*$", out)
+        self.assertNotIn("        print('after')", out)
+
+    def test_force_close_stops_at_structural_blocks_negative(self):
+        """Negative: force-close must not produce a spurious pass or else for a plain if."""
+        src = (
+            "def f(a, b):\n"
+            "    if a:\n"
+            "        if b:\n"
+            "            print('both')\n"
+            "    print('done')\n"
+        )
+        out = decompile(src)
+        import sys
+        if sys.version_info < (3, 11):
+            # No spurious else should appear
+            self.assertNotIn("else:", out)
+        # 'done' must be at function-level indent
+        self.assertRegex(out, r"\n    print\('done'\)\s*$", out)
+
     def test_build_slice_support(self):
         src = "def f(lst):\n    return lst[1:-1]\n"
         out = decompile(src)

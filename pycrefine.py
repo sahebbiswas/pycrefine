@@ -4034,9 +4034,15 @@ class DecompilerGeneric(DecompilerBase):
                         break
 
                 if matched_bi is not None:
-                    # Force close any blocks nested inside the matched if block
+                    # Force close any blocks nested INSIDE (above) the matched if block.
+                    # Only pop interior 'if' blocks — stop at any outer structural block
+                    # (else, while, for, try_body, etc.) which we must NOT collapse.
                     while len(self.blocks) - 1 > matched_bi:
-                        cb_off, cb_type = self.blocks.pop()
+                        cb_off, cb_type = self.blocks[-1]
+                        # Stop if we hit a block that is not an inner if/else branch
+                        if cb_type not in ("if", "else"):
+                            break
+                        self.blocks.pop()
                         if cb_type not in _NO_PASS_TYPES:
                             last_idx = len(self.reconstructed) - 1
                             while last_idx >= 0 and not self.reconstructed[last_idx].strip():
