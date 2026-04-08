@@ -4081,6 +4081,9 @@ class DecompilerGeneric(DecompilerBase):
                     if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
                         self._append_reconstructed("pass")
 
+                    if matched_bi != len(self.blocks) - 1:
+                        return
+
                     self.indent_level -= 1
                     self._append_reconstructed("else:")
                     self.indent_level += 1
