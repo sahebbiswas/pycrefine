@@ -463,6 +463,39 @@ def post_process_source(source: str, beautification_level: str = 'core') -> str:
     flush_imports()
 
     text = '\n'.join(out_lines)
+
+    def fix_print_parens_and_strings(match):
+        prefix = match.group(1)
+        inner = match.group(2)
+        
+        # convert triple quoted strings to literal newline strings
+        def repl_str(m):
+            string_content = m.group(1).replace('\n', '\\n')
+            return f'"{string_content}"'
+
+        inner = re.sub(r"'''([\s\S]*?)'''", repl_str, inner)
+        inner = re.sub(r'"""([\s\S]*?)"""', repl_str, inner)
+
+        # strip extra parentheses if present
+        m = re.match(r'^\((.*)\)$', inner, flags=re.DOTALL)
+        if m:
+            inside = m.group(1)
+            depth = 0
+            balanced = True
+            for char in inside:
+                if char == '(': depth += 1
+                elif char == ')': depth -= 1
+                if depth < 0: 
+                    balanced = False
+                    break
+            if balanced and depth == 0:
+                inner = inside
+        
+        return f"{prefix}{inner})"
+
+    if beautification_level in ('core', 'aggressive'):
+        text = re.sub(r'^([ \t]*print\s*\()([\s\S]*?)\)$', fix_print_parens_and_strings, text, flags=re.MULTILINE)
+
     text = re.sub(r'\n{3,}', '\n\n', text)
 
     # ── Final cleanup: suppress raw decompiler-tuple leakage ─────────────

@@ -32,11 +32,11 @@ def _compile(src: str) -> str:
     return pyc_path
 
 
-def decompile(src: str) -> str:
+def decompile(src: str, beautification_level: str = 'core') -> str:
     """Compile *src* and decompile it; cleans up the .pyc automatically."""
     pyc = _compile(src)
     try:
-        return get_decompiler(pyc).decompile()
+        return get_decompiler(pyc, beautification_level=beautification_level).decompile()
     finally:
         if os.path.exists(pyc):
             os.unlink(pyc)

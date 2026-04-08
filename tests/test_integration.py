@@ -363,6 +363,32 @@ class TestFindingsRefinement(unittest.TestCase):
         out = decompile(src)
         self.assertIn("(a, b), c =", out)
 
+    def test_api_32_print_string_beautification(self):
+        src = (
+            "def api_32(in_a):\n"
+            "    print(\"This is my Input :\\n %s\" % in_a)\n"
+            "    print(\"This is my Input2 : \\'%s\\' and \\\"%s\\\"\" % (in_a, in_a))\n"
+            "    return in_a\n"
+        )
+        
+        # Test core beautification
+        out_core = decompile(src, beautification_level='core')
+        self.assertIn("print(\"This is my Input :\\n %s\" % in_a)", out_core)
+        if "f\"This is my Input2" in out_core:
+            self.assertIn("print(f\"This is my Input2 : {in_a}\\' and {in_a}\")", out_core)
+        else:
+            self.assertIn("print('This is my Input2 : \\'%s\\' and \"%s\"' % (in_a, in_a))", out_core)
+        
+        # Test none beautification
+        out_none = decompile(src, beautification_level='none')
+        # Expect triple quotes due to newline
+        self.assertIn("print((\"\"\"This is my Input :\n %s\"\"\" % in_a))", out_none)
+        if "f\"This is my Input2" in out_none:
+            self.assertIn("print(f\"This is my Input2 : {in_a}\\' and {in_a}\")", out_none)
+        else:
+            self.assertIn("print(('This is my Input2 : \\'%s\\' and \"%s\"' % (in_a, in_a)))", out_none)
+
 
 if __name__ == "__main__":
     unittest.main()
+
