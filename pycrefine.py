@@ -538,6 +538,20 @@ def post_process_source(source: str, beautification_level: str = 'core') -> str:
     # If any ('func', ...) or ('class', ...) tuples slipped through to an
     # assignment RHS or statement position, replace the ENTIRE statement
     # (to end-of-line) with a comment + None so the output stays valid Python.
+    # Matches either:
+    # 1. string representation created by `_render_func_tuple`: "lambda params: ..."
+    # 2. raw "def <lambda>(params):\n..." block
+    text = re.sub(
+        r"([ \t]*)([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*\('(func|class)',\s*.*?(?:def\s+<lambda>|lambda\s).*?(?:\n\1\)|'\)|\"\)|\"\"\"\)|'''\))\)?",
+        lambda m: (
+            f"{m.group(1)}# <{'genexpr/lambda' if m.group(3) == 'func' else 'class'}"
+            f" \u2014 not reconstructable>\n{m.group(1)}{m.group(2)} = None"
+        ),
+        text,
+        flags=re.MULTILINE | re.DOTALL
+    )
+    
+    # Also clean up un-wrapped cases that might be floating
     text = re.sub(
         r"([ \t]*)([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*\('(func|class)',[^\n]*",
         lambda m: (
@@ -545,6 +559,16 @@ def post_process_source(source: str, beautification_level: str = 'core') -> str:
             f" \u2014 not reconstructable>\n{m.group(1)}{m.group(2)} = None"
         ),
         text,
+    )
+    
+    # Catch stray `def <lambda>` blocks anywhere
+    text = re.sub(
+        r"([ \t]*).*(?:def\s+<lambda>)[\s\S]*?(?=\n[ \t]*\S|\Z)",
+        lambda m: (
+            f"{m.group(1)}# <genexpr/lambda \u2014 not reconstructable>\n{m.group(1)}pass"
+        ),
+        text,
+        flags=re.MULTILINE
     )
 
     if beautification_level in ('core', 'aggressive'):
@@ -643,9 +667,13 @@ def _render_func_tuple(body_text: str, args: List[str]) -> str:
         params = m.group(1).strip() if m else ""
         # Find return expression
         ret_expr = None
-        for line in lines[1:]:
+        for i, line in enumerate(lines[1:]):
             if line.startswith("return "):
-                ret_expr = line[7:].strip()
+                ret_expr = line[7:]
+                if ret_expr.startswith("("):
+                    ret_expr = "\n".join([line[7:]] + lines[i+2:])
+                else:
+                    ret_expr = ret_expr.strip()
                 break
         if ret_expr is not None:
             expr = f"lambda {params}: {ret_expr}" if params else f"lambda: {ret_expr}"
@@ -3581,7 +3609,14 @@ class DecompilerGeneric(DecompilerBase):
             dec = dec_class(inner_code, indent_level=1, beautification_level=self.beautification_level)
             body = dec.decompile()
             sig = f"def {inner_code.co_name}({', '.join(params)}):"
-            self.stack.append(("func", f"{sig}\n{body}"))
+            
+            if inner_code.co_name == '<lambda>':
+                rendered = _render_func_tuple(f"{sig}\n{body}", [])
+                if not rendered.startswith("("):
+                    rendered = f"({rendered})"
+                self.stack.append(rendered)
+            else:
+                self.stack.append(("func", f"{sig}\n{body}"))
         else:
             self.stack.append("make_function(?)")
 
