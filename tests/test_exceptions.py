@@ -1,5 +1,7 @@
 import sys
 import unittest
+import re
+import ast
 
 from .test_helpers import _run39_full_impl, assert_contains, decompile
 
@@ -334,23 +336,21 @@ class TestBreakInTryInsideFor(unittest.TestCase):
 
     # ── syntax validity guard (original bug was a SyntaxError) ───────────────
 
-    def test_if_break_output_is_valid_python(self):
-        """Decompiled output must parse without SyntaxError (direct regression guard)."""
-        import ast as _ast
-        out = decompile(self._SRC_IF_BREAK)
+    def _assert_decompiled_valid(self, source):
+        """Helper to ensure decompiled source parses without SyntaxError."""
+        out = decompile(source)
         try:
-            _ast.parse(out)
+            ast.parse(out)
         except SyntaxError as exc:
             self.fail(f"Decompiled output is not valid Python: {exc}\n{out}")
 
+    def test_if_break_output_is_valid_python(self):
+        """Decompiled output must parse without SyntaxError (direct regression guard)."""
+        self._assert_decompiled_valid(self._SRC_IF_BREAK)
+
     def test_bare_break_output_is_valid_python(self):
         """Bare-break variant must also produce syntactically valid output."""
-        import ast as _ast
-        out = decompile(self._SRC_BARE_BREAK)
-        try:
-            _ast.parse(out)
-        except SyntaxError as exc:
-            self.fail(f"Decompiled output is not valid Python: {exc}\n{out}")
+        self._assert_decompiled_valid(self._SRC_BARE_BREAK)
 
     # ── negative assertions ───────────────────────────────────────────────────
 
@@ -363,7 +363,7 @@ class TestBreakInTryInsideFor(unittest.TestCase):
         """
         out = decompile(self._SRC_IF_BREAK)
         # No while loop should appear anywhere in the output.
-        self.assertNotIn("while", out, f"Spurious 'while' keyword in output:\n{out}")
+        self.assertIsNone(re.search(r'\bwhile\b', out), msg=f"Spurious 'while' keyword in output:\n{out}")
         # The conditional must be emitted as 'if', not dropped.
         self.assertIn("if i > 0:", out, f"'if i > 0:' not found in output:\n{out}")
 
