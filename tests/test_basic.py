@@ -153,7 +153,7 @@ class TestComprehensions(unittest.TestCase):
             self.assertIn("yield (x * 2)", out)
             self.assertNotIn("append", out)
         else:
-            self.assertTrue("[x * 2 for x in items]" in out or "[(x * 2) for x in items]" in out)
+            self.assertTrue("[x * 2 for x in items if x > 0]" in out or "[(x * 2) for x in items if x > 0]" in out)
 
     def test_dict_comprehension_yield(self):
         src = "def h(items):\n    return {k: v for k, v in items}\n"

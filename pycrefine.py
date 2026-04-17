@@ -2009,10 +2009,7 @@ class DecompilerGeneric(DecompilerBase):
                     ):
                         dup_start = ins.offset + 2
 
-            # Register entire dup-condition region [dup_start .. JUMP_BACKWARD]
-            for ins in self.instructions:
-                if dup_start <= ins.offset <= jb.offset:
-                    self._while_body_offsets.add(ins.offset)
+            # (moved into guard_offset >= 0 check below to avoid suppressing for-loop inner nodes)
 
             # The loop guard: POP_JUMP_IF_FALSE immediately before body_start
             # whose target is beyond JUMP_BACKWARD (the loop-exit path).
@@ -2076,6 +2073,11 @@ class DecompilerGeneric(DecompilerBase):
                     guard_offset = ins.offset
             if guard_offset >= 0:
                 self._while_header_targets[body_start] = guard_offset
+                # Register entire dup-condition region [dup_start .. JUMP_BACKWARD]
+                # We only do this if this is definitely a while-loop (not a for loop jump back)
+                for ins in self.instructions:
+                    if dup_start <= ins.offset <= jb.offset:
+                        self._while_body_offsets.add(ins.offset)
             else:
                 # while-True pattern: no conventional guard found, but the
                 # back-edge target is a known jump target (loop start).
@@ -5405,33 +5407,9 @@ class Decompiler39(DecompilerGeneric):
                             _fb = getattr(self, "_finally_body_suppress", set())
                             _fb.add(self.instructions[look].offset)   # POP_TOP
                             _fb.add(jmp.offset)                        # JUMP_ABSOLUTE(break)
-                            # Suppress all NOPs between the break JUMP_ABSOLUTE and
-                            # the natural-continue POP_BLOCK that follows.
-                            sup = look2 + 1
-                            while (sup < len(self.instructions)
-                                   and self.instructions[sup].opname in (
-                                       "RESUME", "NOP", "CACHE")):
-                                _fb.add(self.instructions[sup].offset)
-                                sup += 1
-                            # Suppress the natural-continue POP_BLOCK (if-false target)
-                            # and its JUMP_ABSOLUTE back-edge, so they don't cause:
-                            #   (a) a spurious _except_header_indents push, and
-                            #   (b) a retroactive 'if' → 'while' rewrite.
-                            if (sup < len(self.instructions)
-                                    and self.instructions[sup].opname == "POP_BLOCK"):
-                                _fb.add(self.instructions[sup].offset)  # natural POP_BLOCK
-                                sup += 1
-                                while (sup < len(self.instructions)
-                                       and self.instructions[sup].opname in (
-                                           "RESUME", "NOP", "CACHE")):
-                                    sup += 1
-                                if (sup < len(self.instructions)
-                                        and self.instructions[sup].opname == "JUMP_ABSOLUTE"):
-                                    _fb.add(self.instructions[sup].offset)  # natural JUMP_ABSOLUTE
                             self._finally_body_suppress = _fb
-                            # Return early: do NOT push to _except_header_indents.
-                            # The DUP_TOP handler (exception handler entry) will set up
-                            # the indent correctly via its own _except_header_indents logic.
+                            # Return early: do NOT pop the 'if' block.
+                            # The natural POP_BLOCK will follow and handle the try_body exit appropriately.
                             return
 
             if self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup"):
@@ -5477,6 +5455,7 @@ class Decompiler39(DecompilerGeneric):
                                         and self.instructions[sup].opname == "JUMP_ABSOLUTE"):
                                     _fb.add(self.instructions[sup].offset)
                                 self._finally_body_suppress = _fb
+                                return
 
                     # Python 3.9 for-loop break inside try: the break path is
                     # POP_BLOCK -> POP_TOP -> JUMP_ABSOLUTE(past FOR_ITER end).
@@ -5514,6 +5493,7 @@ class Decompiler39(DecompilerGeneric):
                                 _fb.add(nxt.offset)                    # POP_TOP
                                 _fb.add(jmp.offset)                    # JUMP_ABSOLUTE
                                 self._finally_body_suppress = _fb
+                                return
 
                 finally_target = self.blocks[-1][0]
                 _finally_ts = getattr(self, "_finally_targets", set())
