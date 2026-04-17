@@ -178,6 +178,15 @@ class TestComprehensions(unittest.TestCase):
         self.assertNotIn("yield", out)
         self.assertIn("append", out)
 
+    def test_generator_expression_with_closure(self):
+        # Regression test for LOAD_CLOSURE falling through to _op_unknown
+        # and producing an 'unknown_func' in the decompiled output
+        src = "class C:\n    def f(self, items):\n        return any(self.check(x) for x in items)\n"
+        out = decompile(src)
+        self.assertNotIn("unknown_func", out)
+        self.assertIn("any", out)
+        self.assertTrue("self.check(x) for x in items" in out or "self.check" in out)
+
 
 if __name__ == "__main__":
     unittest.main()

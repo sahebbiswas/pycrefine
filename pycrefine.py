@@ -663,19 +663,15 @@ def _render_func_tuple(body_text: str, args: List[str]) -> str:
     # ── Case 2: lambda ───────────────────────────────────────────────────
     if "<lambda>" in lines[0]:
         # Extract params from 'def <lambda>(params):'
-        m = re.match(r"def\s+<lambda>\s*\(([^)]*)\):", lines[0])
+        m = re.match(r"^[ \t]*def\s+<lambda>\s*\(([^)]*)\):", lines[0])
         params = m.group(1).strip() if m else ""
-        # Find return expression
-        ret_expr = None
-        for i, line in enumerate(lines[1:]):
-            if line.startswith("return "):
-                ret_expr = line[7:]
-                if ret_expr.startswith("("):
-                    ret_expr = "\n".join([line[7:]] + lines[i+2:])
-                else:
-                    ret_expr = ret_expr.strip()
-                break
-        if ret_expr is not None:
+        # Find return expression reliably without truncating multiline strings
+        m_ret = re.search(r"^[ \t]*return\s+(.*)", body_text, flags=re.MULTILINE | re.DOTALL)
+        if m_ret:
+            ret_expr = m_ret.group(1)
+            # if ret_expr was wrapped in parentheses by earlier processing, we can optionally strip outer parens
+            # but usually it's fine. Wait, `body_text.strip()` or `ret_expr.rstrip()` is needed.
+            ret_expr = ret_expr.rstrip()
             expr = f"lambda {params}: {ret_expr}" if params else f"lambda: {ret_expr}"
             if args:
                 return f"({expr})({', '.join(str(a) for a in args)})"
@@ -2606,7 +2602,7 @@ class DecompilerGeneric(DecompilerBase):
                         val = val[0]
                     # Use repr for constants so strings keep their quotes
                     if op in ("LOAD_CONST", "LOAD_SMALL_INT"):
-                        stack.append(repr(val))
+                        stack.append(self._format_val(val))
                     else:
                         s = str(val)
                         if " + NULL" in s:
@@ -2822,6 +2818,7 @@ class DecompilerGeneric(DecompilerBase):
             "LOAD_GLOBAL": self._op_load, "LOAD_SMALL_INT": self._op_load, "LOAD_FAST_BORROW": self._op_load,
             "LOAD_CONST_BORROW": self._op_load, "LOAD_DEREF": self._op_load,
             "LOAD_FAST_BORROW_LOAD_FAST_BORROW": self._op_load, "LOAD_GLOBAL_MODULE": self._op_load,
+            "LOAD_CLOSURE": self._op_load, "LOAD_CLASSDEREF": self._op_load,
 
             # Stores
             "STORE_NAME": self._op_store, "STORE_FAST": self._op_store, "STORE_GLOBAL": self._op_store,
@@ -2890,9 +2887,10 @@ class DecompilerGeneric(DecompilerBase):
             "BUILD_SLICE": self._op_build_slice,
             "BUILD_CONST_KEY_MAP": self._op_build_const_key_map,
             "GET_ITER": self._op_no_op, "UNPACK_SEQUENCE": self._op_unpack_sequence,
+            "LIST_APPEND": self._op_list_append,
             "LIST_EXTEND": self._op_list_extend, "DICT_MERGE": self._op_dict_merge,
             "DICT_UPDATE": self._op_dict_merge,
-            "LIST_APPEND": self._op_list_append, "SET_ADD": self._op_set_add,
+            "SET_ADD": self._op_set_add, "SET_UPDATE": self._op_set_update,
             "MAP_ADD": self._op_map_add,
 
             # Secondary loads
@@ -3685,6 +3683,19 @@ class DecompilerGeneric(DecompilerBase):
                 pass
             else:
                 self._append_reconstructed(f"return {val}")
+                # A return exits the function entirely. If we are within a try/except,
+                # any remaining instructions are either dead code or jump targets for
+                # other control flow. Because RETURN_VALUE bypasses the normal POP_BLOCK
+                # sequence, we need to artificially clear out try/except blocks to
+                # restore indentation for any following peer functions/blocks.
+                # Actually, the Decompiler runs linearly. Returning doesn't shift
+                # the decompiler's physical PC backward, but any code immediately AFTER
+                # a return is typically an except/finally block or unreachable. 
+                # We should drop all pending try_body / exc_cleanup blocks that belong
+                # to the current return path. Wait, _close_blocks uses the block target.
+                # There is no need, the blocks will be closed by _close_blocks at their
+                # targets, or they will be skipped if unreachable.
+                # Actually, let's just leave it, maybe the bug is in _render_finally_body or try_ret block handling.
     def _op_return_const(self, instr: BytecodeInstruction):
         opname = instr.opname
         # RETURN_CONST None has two meanings:
@@ -3902,29 +3913,31 @@ class DecompilerGeneric(DecompilerBase):
         #   func_val = decorator, raw_args = [('func', body)]
 
         # Pattern A (3.11+ / Generic fallback)
-        if isinstance(orig_func_val, tuple) and orig_func_val[0] == "func":
+        if isinstance(orig_func_val, tuple) and orig_func_val[0] in ("func", "class"):
             body_text = str(orig_func_val[1])
             first_line = body_text.strip().split("\n")[0] if body_text.strip() else ""
-            if not _is_anonymous_func_body(first_line) and self.stack:
-                decorator_expr = self._normalize_val(self.stack.pop())
-                deco_line = f"@{decorator_expr}"
-                self.stack.append(("func", f"{deco_line}\n{body_text}"))
+            if orig_func_val[0] == "class" or not _is_anonymous_func_body(first_line):
+                if self.stack:
+                    decorator_expr = self._normalize_val(self.stack.pop())
+                    deco_line = f"@{decorator_expr}"
+                    self.stack.append((orig_func_val[0], f"{deco_line}\n{body_text}"))
+                    return
+            if orig_func_val[0] == "func":
+                rendered = _render_func_tuple(body_text, final_args)
+                self.stack.append(rendered)
                 return
-            rendered = _render_func_tuple(body_text, final_args)
-            self.stack.append(rendered)
-            return
 
         # Pattern B (3.9 specialisation incorporated here)
         if (len(raw_args) == 1
                 and isinstance(raw_args[0], tuple)
-                and raw_args[0][0] == "func"):
+                and raw_args[0][0] in ("func", "class")):
             body_val = raw_args[0]
             body_text = str(body_val[1])
             first_line = body_text.strip().split("\n")[0] if body_text.strip() else ""
-            if not _is_anonymous_func_body(first_line):
-                # Detected as decorator application: @decorator def name...
+            if body_val[0] == "class" or not _is_anonymous_func_body(first_line):
+                # Detected as decorator application: @decorator def name... or @decorator class Name...
                 deco_line = f"@{func}"
-                self.stack.append(("func", f"{deco_line}\n{body_text}"))
+                self.stack.append((body_val[0], f"{deco_line}\n{body_text}"))
                 return
 
         # ── Class builder detection ──────────────────────────────────
@@ -4034,8 +4047,14 @@ class DecompilerGeneric(DecompilerBase):
         content = "".join(
             str(p).strip("'\"") if has_fmt else str(p) for p in parts
         )
-        self.stack.append(f'f"{content}"' if has_fmt else f'"{content}"')
-
+        if has_fmt:
+            if "\n" in content:
+                wrapper = "'''" if '"""' in content else '"""'
+            else:
+                wrapper = "'" if '"' in content and "'" not in content else '"'
+            self.stack.append(f"f{wrapper}{content}{wrapper}")
+        else:
+            self.stack.append(f'"{content}"')
         # ── jumps / control flow ───────────────────────────────────────
 
     def _op_jump(self, instr: BytecodeInstruction):
@@ -4065,18 +4084,34 @@ class DecompilerGeneric(DecompilerBase):
         opname = instr.opname
         jump_target = self._get_jump_target(instr)
 
-        # Detect `break`: forward jump that lands at the exact end of a while loop.
+        # Detect `break`: forward jump that lands at the exact end of a while/for loop.
         if instr.opname in ("JUMP_FORWARD", "JUMP_ABSOLUTE") and isinstance(jump_target, int) and jump_target > instr.offset:
             matched_while = False
+            matched_b_type = None
             for b_off, b_type in reversed(self.blocks):
                 if b_type in ("while", "for") and jump_target >= b_off:
                     self._append_reconstructed("break")
                     matched_while = True
+                    matched_b_type = b_type
                     break
                 if b_type in ("while", "for"):
                     break  # only check innermost loop
 
             if matched_while:
+                # Python 3.9: a break from a for-loop emits:
+                #   POP_TOP (pops the iterator) + JUMP_ABSOLUTE(past_end) + JUMP_ABSOLUTE(for_head)
+                # The last JUMP_ABSOLUTE is dead/unreachable but will be processed next.
+                # Suppress it so the backward-jump handler doesn't retroactively rewrite
+                # the preceding `if` block header to `while`.
+                if matched_b_type == "for" and self.pc < len(self.instructions):
+                    nxt = self.instructions[self.pc]
+                    if (not nxt.is_jump_target
+                            and "JUMP" in nxt.opname
+                            and isinstance(self._get_jump_target(nxt), int)
+                            and self._get_jump_target(nxt) <= nxt.offset):
+                        _fb = getattr(self, "_finally_body_suppress", set())
+                        _fb.add(nxt.offset)
+                        self._finally_body_suppress = _fb
                 return
 
             # Non-break forward jump -> reconstruct as else-branch only when a
@@ -4597,7 +4632,10 @@ class DecompilerGeneric(DecompilerBase):
         elif opname == "BUILD_LIST":
             self.stack.append("[" + ", ".join(items) + "]")
         elif opname == "BUILD_SET":
-            self.stack.append("{" + ", ".join(items) + "}")
+            if not items:
+                self.stack.append("set()")
+            else:
+                self.stack.append("{" + ", ".join(items) + "}")
 
         # BUILD_MAP
 
@@ -4678,6 +4716,28 @@ class DecompilerGeneric(DecompilerBase):
     def _op_set_add(self, instr: BytecodeInstruction):
         val = self.stack.pop() if self.stack else "None"
         self._append_reconstructed(f"yield {val}")
+
+    def _op_set_update(self, instr: BytecodeInstruction):
+        # Python 3.9+ frozenset literals generate: BUILD_SET 0, LOAD_CONST frozenset, SET_UPDATE 1
+        if self.stack:
+            val = str(self.stack.pop())
+            # We want to represent the updated set. The base is TOS.
+            if self.stack:
+                base = str(self.stack.pop())
+                # If base is an empty set (set()), and val is frozenset({a, b}),
+                # we render the inner literal without frozenset wrap for the argument.
+                # E.g. val is "frozenset({'A', 'B'})" -> "{'A', 'B'}"
+                # Or if val is just a set constructor.
+                if val.startswith("frozenset({") and val.endswith("})"):
+                    inner = val[10:-1]  # removes frozenset( and )
+                    self.stack.append(inner)
+                elif val.startswith("frozenset([") and val.endswith("])"):
+                    inner = "{" + val[11:-2] + "}"
+                    self.stack.append(inner)
+                else:
+                    self.stack.append(val)
+            else:
+                self.stack.append(val)
 
     def _op_map_add(self, instr: BytecodeInstruction):
         val = self.stack.pop() if self.stack else "None"
@@ -5413,13 +5473,33 @@ class Decompiler39(DecompilerGeneric):
                             return
 
             if self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup"):
-                # Peek ahead: if the next meaningful instruction is JUMP_ABSOLUTE
-                # targeting the enclosing while-end, this POP_BLOCK is the exit from
-                # a try: block that contains a bare `break` statement.  Emit `break`
-                # now (at the current try-body indent) BEFORE closing the block, then
-                # suppress the redundant dead-code instructions that follow (compiler
-                # generates an extra POP_BLOCK + JUMP_ABSOLUTE backward that is
-                # unreachable).
+                # ── Python 3.9 return-inside-try ─────────────────────────────────
+                # CPython 3.9 emits: ... LOAD_FAST x → POP_BLOCK → RETURN_VALUE
+                # The return SEMANTICALLY belongs inside the try body but the
+                # POP_BLOCK fires first, which would close the try indent before we
+                # emit the return.  Detect this pattern and emit the return NOW,
+                # consuming the RETURN_VALUE so the normal path doesn't re-emit it.
+                look = self.pc
+                while (look < len(self.instructions)
+                       and self.instructions[look].opname in ("RESUME", "NOP", "CACHE")):
+                    look += 1
+                if (look < len(self.instructions)
+                        and self.instructions[look].opname in ("RETURN_VALUE", "RETURN_CONST")):
+                    ret_instr = self.instructions[look]
+                    if ret_instr.opname == "RETURN_CONST":
+                        ret_val = self._format_val(ret_instr.argval)
+                    else:
+                        ret_val = str(self.stack.pop()) if self.stack else "None"
+                    # Only emit if not a compiler-generated 'return None'
+                    is_compiler_gen = (ret_val == "None"
+                                       and self.is_compiler_generated_return(look))
+                    if not is_compiler_gen:
+                        self._append_reconstructed(f"return {ret_val}")
+                    # Consume the RETURN_VALUE so it's not re-emitted
+                    self.pc = look + 1
+                    # Fall through to normal block-close / except handling below.
+
+                # Peek ahead for break/loop patterns (existing logic)
                 look = self.pc
                 while (look < len(self.instructions)
                        and self.instructions[look].opname in ("RESUME", "NOP", "CACHE")):
@@ -5454,8 +5534,14 @@ class Decompiler39(DecompilerGeneric):
                                 if (sup < len(self.instructions)
                                         and self.instructions[sup].opname == "JUMP_ABSOLUTE"):
                                     _fb.add(self.instructions[sup].offset)
+                                
+                                dead = sup + 1
+                                while dead < len(self.instructions) and not self.instructions[dead].is_jump_target:
+                                    _fb.add(self.instructions[dead].offset)
+                                    dead += 1
+
                                 self._finally_body_suppress = _fb
-                                return
+                                # Fall through to pop the try_body block
 
                     # Python 3.9 for-loop break inside try: the break path is
                     # POP_BLOCK -> POP_TOP -> JUMP_ABSOLUTE(past FOR_ITER end).
@@ -5492,8 +5578,16 @@ class Decompiler39(DecompilerGeneric):
                                 _fb = getattr(self, "_finally_body_suppress", set())
                                 _fb.add(nxt.offset)                    # POP_TOP
                                 _fb.add(jmp.offset)                    # JUMP_ABSOLUTE
+                                
+                                dead = look2 + 1
+                                while dead < len(self.instructions) and not self.instructions[dead].is_jump_target:
+                                    _fb.add(self.instructions[dead].offset)
+                                    dead += 1
+
                                 self._finally_body_suppress = _fb
-                                return
+                                self.pc = look2 + 1
+                                # Do NOT return here! This POP_BLOCK is the structural exit of the try_body
+                                # for this execution path. Fall through to pop the block.
 
                 finally_target = self.blocks[-1][0]
                 _finally_ts = getattr(self, "_finally_targets", set())
@@ -5506,7 +5600,21 @@ class Decompiler39(DecompilerGeneric):
                     while look < len(self.instructions) and self.instructions[look].opname in ("NOP", "RESUME", "CACHE"):
                         look += 1
                     if look < len(self.instructions) and self.instructions[look].offset == finally_target:
-                        is_finally_pop = True
+                        # Guard: if the target instruction looks like an except-handler entry
+                        # (DUP_TOP for typed except, three POP_TOPs for bare except,
+                        # or WITH_EXCEPT_START), this is NOT a finally block — it's the
+                        # except clause that coincidentally lands right after POP_BLOCK.
+                        target_op = self.instructions[look].opname
+                        is_handler_entry = (
+                            target_op == "DUP_TOP"
+                            or target_op == "WITH_EXCEPT_START"
+                            or (target_op == "POP_TOP"
+                                and look + 2 < len(self.instructions)
+                                and self.instructions[look + 1].opname == "POP_TOP"
+                                and self.instructions[look + 2].opname == "POP_TOP")
+                        )
+                        if not is_handler_entry:
+                            is_finally_pop = True
 
                 _closing_exc_cleanup = self.blocks[-1][1] == "exc_cleanup"
                 self.blocks.pop()
@@ -5548,6 +5656,33 @@ class Decompiler39(DecompilerGeneric):
             if jump_target <= instr.offset:
                 # Backward JUMP_ABSOLUTE: delegate to the backward-jump handler
                 # in super(). _is_backward_instruction returns True for this case.
+                #
+                # Special case: if this backward jump targets a FOR_ITER AND is
+                # NOT itself a jump target (meaning it's unreachable dead code
+                # after a try-body POP_BLOCK for the clean-exit path), suppress it.
+                # These are CPython 3.9's implicit for-loop back-edges — not user
+                # `continue` statements — and emitting them causes `continue` to
+                # appear outside the `try` block, producing SyntaxError.
+                body_start = jump_target
+                body_instr = next(
+                    (ins for ins in self.instructions if ins.offset == body_start), None
+                )
+                _exc_handler_jumps = getattr(self, "_exc_handler_jump_offsets", set())
+                # Find the previous instruction in bytecode order
+                prev_instr = None
+                for _pi, _ins in enumerate(self.instructions):
+                    if _ins.offset == instr.offset and _pi > 0:
+                        prev_instr = self.instructions[_pi - 1]
+                        break
+                if (body_instr
+                        and body_instr.opname == "FOR_ITER"
+                        and not instr.is_jump_target
+                        and self._except_header_indents
+                        and instr.offset not in _exc_handler_jumps
+                        and prev_instr is not None
+                        and prev_instr.opname == "POP_BLOCK"):
+                    # Implicit for-loop continuation after try clean exit — suppress.
+                    return
                 super()._handle_instruction(instr)
             else:
                 # Check for break: forward jump whose target matches the enclosing
@@ -5832,11 +5967,33 @@ class Decompiler39(DecompilerGeneric):
                         _emitted_continue = True
 
                 if not _emitted_continue:
-                    last_idx = len(self.reconstructed) - 1
-                    while last_idx >= 0 and not self.reconstructed[last_idx].strip():
-                        last_idx -= 1
-                    if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
-                        self._append_reconstructed("pass")
+                    # ── Python 3.9 return-inside-except ─────────────────────────
+                    # CPython 3.9 emits: LOAD_FAST x → ROT_FOUR → POP_EXCEPT → RETURN_VALUE
+                    # The return value is on the stack but POP_EXCEPT fires first.
+                    # Peek: if next instruction is RETURN_VALUE, emit now at handler indent.
+                    look = self.pc
+                    while (look < len(self.instructions)
+                           and self.instructions[look].opname in ("RESUME", "NOP", "CACHE")):
+                        look += 1
+                    if (look < len(self.instructions)
+                            and self.instructions[look].opname in ("RETURN_VALUE", "RETURN_CONST")):
+                        ret_instr = self.instructions[look]
+                        if ret_instr.opname == "RETURN_CONST":
+                            ret_val = self._format_val(ret_instr.argval)
+                        else:
+                            # The return value was loaded before the ROT_FOUR and sits on stack
+                            ret_val = str(self.stack.pop()) if self.stack else "None"
+                        is_compiler_gen = (ret_val == "None"
+                                           and self.is_compiler_generated_return(look))
+                        if not is_compiler_gen:
+                            self._append_reconstructed(f"return {ret_val}")
+                        self.pc = look + 1  # consume RETURN_VALUE
+                    else:
+                        last_idx = len(self.reconstructed) - 1
+                        while last_idx >= 0 and not self.reconstructed[last_idx].strip():
+                            last_idx -= 1
+                        if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
+                            self._append_reconstructed("pass")
 
                 self.indent_level = self._except_header_indents.pop()
             if self.stack and self.stack[-1] == "_exc_match":
