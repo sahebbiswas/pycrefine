@@ -265,16 +265,50 @@ class TestBreakInTryInsideWhile(unittest.TestCase):
         self.assertNotIn("e = None", out)
         self.assertNotIn("del e", out)
 
+
+@unittest.skipIf(sys.version_info >= (3, 11), "Python 3.11+ uses zero-cost exception tables, no POP_BLOCK")
 class TestBreakInTryInsideFor(unittest.TestCase):
+    """Regression tests for break inside an if inside a try inside a for loop (Python 3.9).
+
+    The root bug: when POP_BLOCK fires with 'if' on top of the block stack and
+    'try_body' below it, the handler must return early after emitting 'break' and
+    suppressing the implementation-detail instructions.  Without the early return the
+    try_body block is popped prematurely, indent_level is decremented, and
+    _except_header_indents gets a ghost entry — producing a SyntaxError near the
+    'except' clause in the decompiled output.
+    """
+
+    # Shared source string used by multiple test methods (DRY).
+    _SRC_IF_BREAK = (
+        "def f(items):\n"
+        "    for i in items:\n"
+        "        try:\n"
+        "            if i > 0:\n"
+        "                break\n"
+        "        except Exception:\n"
+        "            pass\n"
+    )
+
+    _SRC_BARE_BREAK = (
+        "def f(items):\n"
+        "    for i in items:\n"
+        "        try:\n"
+        "            break\n"
+        "        except Exception:\n"
+        "            pass\n"
+    )
+
+    # ── positive indentation assertions ──────────────────────────────────────
+
     def test_for_try_if_break_correct_indentation(self):
-        src = "def f(items):\n    for i in items:\n        try:\n            if i > 0:\n                break\n        except Exception:\n            pass\n"
-        out = decompile(src)
+        """try: and except: must be at the same indent level."""
+        out = decompile(self._SRC_IF_BREAK)
         lines = out.splitlines()
         try_lines    = [ln for ln in lines if ln.lstrip() == "try:"]
         except_lines = [ln for ln in lines if ln.lstrip().startswith("except Exception:")]
-        self.assertTrue(try_lines, "try: not found")
+        self.assertTrue(try_lines,    "try: not found")
         self.assertTrue(except_lines, "except Exception: not found")
-        
+
         try_indent    = len(try_lines[0])    - len(try_lines[0].lstrip())
         except_indent = len(except_lines[0]) - len(except_lines[0].lstrip())
         self.assertEqual(
@@ -282,13 +316,68 @@ class TestBreakInTryInsideFor(unittest.TestCase):
             f"'try:' at indent {try_indent} but 'except' at indent {except_indent}:\n{out}",
         )
 
+    def test_for_try_bare_break_correct_indentation(self):
+        """break directly in try body (no enclosing if) must still align except correctly."""
+        out = decompile(self._SRC_BARE_BREAK)
+        lines = out.splitlines()
+        try_lines    = [ln for ln in lines if ln.lstrip() == "try:"]
+        except_lines = [ln for ln in lines if ln.lstrip().startswith("except Exception:")]
+        self.assertTrue(try_lines,    f"try: not found:\n{out}")
+        self.assertTrue(except_lines, f"except Exception: not found:\n{out}")
+
+        try_indent    = len(try_lines[0])    - len(try_lines[0].lstrip())
+        except_indent = len(except_lines[0]) - len(except_lines[0].lstrip())
+        self.assertEqual(
+            try_indent, except_indent,
+            f"'try:' at indent {try_indent} but 'except' at indent {except_indent}:\n{out}",
+        )
+
+    # ── syntax validity guard (original bug was a SyntaxError) ───────────────
+
+    def test_if_break_output_is_valid_python(self):
+        """Decompiled output must parse without SyntaxError (direct regression guard)."""
+        import ast as _ast
+        out = decompile(self._SRC_IF_BREAK)
+        try:
+            _ast.parse(out)
+        except SyntaxError as exc:
+            self.fail(f"Decompiled output is not valid Python: {exc}\n{out}")
+
+    def test_bare_break_output_is_valid_python(self):
+        """Bare-break variant must also produce syntactically valid output."""
+        import ast as _ast
+        out = decompile(self._SRC_BARE_BREAK)
+        try:
+            _ast.parse(out)
+        except SyntaxError as exc:
+            self.fail(f"Decompiled output is not valid Python: {exc}\n{out}")
+
+    # ── negative assertions ───────────────────────────────────────────────────
+
     def test_no_false_while_in_try_break(self):
-        # Negative test: ensure the if/break pattern inside try isn't mistakenly wrapped
-        # as a `while` loop due to jump-backs.
-        src = "def f(items):\n    for i in items:\n        try:\n            if i > 0:\n                break\n        except Exception:\n            pass\n"
-        out = decompile(src)
-        # We expect a for loop and an if statement, but NOT a while statement.
-        self.assertNotIn("while i > 0:", out)
+        """The if/break pattern inside try must not be misread as a while loop.
+
+        Negative: no 'while' keyword of any form.
+        Positive: the 'if' keyword must be present (prevents silent pass if the
+        decompiler emits a parenthesised variant like 'while (i > 0):').
+        """
+        out = decompile(self._SRC_IF_BREAK)
+        # No while loop should appear anywhere in the output.
+        self.assertNotIn("while", out, f"Spurious 'while' keyword in output:\n{out}")
+        # The conditional must be emitted as 'if', not dropped.
+        self.assertIn("if i > 0:", out, f"'if i > 0:' not found in output:\n{out}")
+
+    def test_break_is_emitted(self):
+        """The 'break' keyword must appear in the output."""
+        out = decompile(self._SRC_IF_BREAK)
+        self.assertIn("break", out, f"'break' not found:\n{out}")
+
+    def test_bare_break_is_emitted(self):
+        """'break' must appear in the bare-break variant too."""
+        out = decompile(self._SRC_BARE_BREAK)
+        self.assertIn("break", out, f"'break' not found:\n{out}")
+
+
 
 class TestNestedTryInsideExcept(unittest.TestCase):
     def _run39_full(self, instructions):
