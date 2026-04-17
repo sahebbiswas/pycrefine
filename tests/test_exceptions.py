@@ -265,6 +265,30 @@ class TestBreakInTryInsideWhile(unittest.TestCase):
         self.assertNotIn("e = None", out)
         self.assertNotIn("del e", out)
 
+class TestBreakInTryInsideFor(unittest.TestCase):
+    def test_for_try_if_break_correct_indentation(self):
+        src = "def f(items):\n    for i in items:\n        try:\n            if i > 0:\n                break\n        except Exception:\n            pass\n"
+        out = decompile(src)
+        lines = out.splitlines()
+        try_lines    = [ln for ln in lines if ln.lstrip() == "try:"]
+        except_lines = [ln for ln in lines if ln.lstrip().startswith("except Exception:")]
+        self.assertTrue(try_lines, "try: not found")
+        self.assertTrue(except_lines, "except Exception: not found")
+        
+        try_indent    = len(try_lines[0])    - len(try_lines[0].lstrip())
+        except_indent = len(except_lines[0]) - len(except_lines[0].lstrip())
+        self.assertEqual(
+            try_indent, except_indent,
+            f"'try:' at indent {try_indent} but 'except' at indent {except_indent}:\n{out}",
+        )
+
+    def test_no_false_while_in_try_break(self):
+        # Negative test: ensure the if/break pattern inside try isn't mistakenly wrapped
+        # as a `while` loop due to jump-backs.
+        src = "def f(items):\n    for i in items:\n        try:\n            if i > 0:\n                break\n        except Exception:\n            pass\n"
+        out = decompile(src)
+        # We expect a for loop and an if statement, but NOT a while statement.
+        self.assertNotIn("while i > 0:", out)
 
 class TestNestedTryInsideExcept(unittest.TestCase):
     def _run39_full(self, instructions):

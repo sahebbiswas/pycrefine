@@ -5477,6 +5477,7 @@ class Decompiler39(DecompilerGeneric):
                                         and self.instructions[sup].opname == "JUMP_ABSOLUTE"):
                                     _fb.add(self.instructions[sup].offset)
                                 self._finally_body_suppress = _fb
+                                return
 
                     # Python 3.9 for-loop break inside try: the break path is
                     # POP_BLOCK -> POP_TOP -> JUMP_ABSOLUTE(past FOR_ITER end).
@@ -5514,6 +5515,7 @@ class Decompiler39(DecompilerGeneric):
                                 _fb.add(nxt.offset)                    # POP_TOP
                                 _fb.add(jmp.offset)                    # JUMP_ABSOLUTE
                                 self._finally_body_suppress = _fb
+                                return
 
                 finally_target = self.blocks[-1][0]
                 _finally_ts = getattr(self, "_finally_targets", set())
