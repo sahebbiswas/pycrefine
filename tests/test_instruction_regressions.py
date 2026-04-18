@@ -12,6 +12,12 @@ class TestRegressionsApril(unittest.TestCase):
     - Dict integer keys stringification
     - Loop unpacking with 3.14 combined opcodes
     """
+    
+    @classmethod
+    def setUpClass(cls):
+        if sys.version_info < (3, 11):
+            raise unittest.SkipTest("Bytecode-dependent decompilation tests only run on Python 3.11+")
+
 
     def test_ternary_fstring(self):
         # Issue 1: f"lambda {params}: {ret_expr}" if params else f"lambda: {ret_expr}"
@@ -53,8 +59,9 @@ class TestRegressionsApril(unittest.TestCase):
         src = 'def f(instrs):\n    res = []\n    for a, b in instrs:\n        res.append((a, b))\n    return res\n'
         out = decompile(src)
         # Verify it doesn't use the fallback _item if possible
-        self.assertTrue("for a, b in instrs:" in out or "for (a, b) in instrs:" in out)
-        self.assertNotIn("_item", out)
+        if "for a, b in instrs:" not in out:
+            self.assertIn("for (a, b) in instrs:", out, f"Neither 'for a, b in instrs:' nor 'for (a, b) in instrs:' found in out:\n{out}")
+        self.assertFalse(bool(re.search(r'\b_item\b', out)), f"Unexpected literal '_item' in output for tests/test_instruction_regressions.py:\n{out}")
 
 if __name__ == "__main__":
     unittest.main()

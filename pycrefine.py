@@ -1165,7 +1165,7 @@ class DecompilerGeneric(DecompilerBase):
 
     def _is_null_sentinel(self, v: Any) -> bool:
         """Check if v is a NULL sentinel (None or StackNULL). 3.11+ only."""
-        if sys.version_info < (3, 11):
+        if getattr(self, "target_version", sys.version_info) < (3, 11):
             return False
         if v is None: return True
         vs = str(v)
@@ -2841,7 +2841,7 @@ class DecompilerGeneric(DecompilerBase):
             "LOAD_GLOBAL": self._op_load, "LOAD_SMALL_INT": self._op_load, "LOAD_FAST_BORROW": self._op_load,
             "LOAD_CONST_BORROW": self._op_load, "LOAD_DEREF": self._op_load,
             "LOAD_FAST_BORROW_LOAD_FAST_BORROW": self._op_load, "LOAD_GLOBAL_MODULE": self._op_load,
-            "LOAD_CLOSURE": self._op_load, "LOAD_CLASSDEREF": self._op_load,
+            "LOAD_CLOSURE": self._op_load, "LOAD_CLASSDEREF": self._op_load, "LOAD_COMMON_CONSTANT": self._op_load,
 
             # Stores
             "STORE_NAME": self._op_store, "STORE_FAST": self._op_store, "STORE_GLOBAL": self._op_store,
@@ -2932,7 +2932,7 @@ class DecompilerGeneric(DecompilerBase):
             "LOAD_ASSERTION_ERROR": self._op_load_assertion_error,
 
             # Nops
-            "PUSH_NULL": self._op_no_op, "RESUME": self._op_no_op, "PRECALL": self._op_no_op, "CACHE": self._op_no_op,
+            "RESUME": self._op_no_op, "PRECALL": self._op_no_op, "CACHE": self._op_no_op,
             "COPY_FREE_VARS": self._op_no_op, "NOT_TAKEN": self._op_no_op, "MAKE_CELL": self._op_no_op,
             "END_FOR": self._op_no_op, "POP_ITER": self._op_no_op, "YIELD_FROM": self._op_no_op,
             "NOP": self._op_nop,
@@ -3042,9 +3042,9 @@ class DecompilerGeneric(DecompilerBase):
             else:
                 self.stack.append(str(val))
                 
-        # 3.11+ LOAD_GLOBAL/LOAD_NAME with bit 0 set pushes NULL sentinel.
+        # 3.11+ LOAD_GLOBAL with bit 0 set pushes NULL sentinel.
         # Python 3.9/3.10 do not use this bit for sentinels.
-        if sys.version_info >= (3, 11) and ("LOAD_GLOBAL" in opname or "LOAD_NAME" in opname):
+        if getattr(self, "target_version", sys.version_info) >= (3, 11) and ("LOAD_GLOBAL" in opname):
             arg = int(instr.arg) if instr.arg is not None else 0
             if (arg & 1):
                 # Pushes [NULL, func]
@@ -3233,7 +3233,7 @@ class DecompilerGeneric(DecompilerBase):
             if not self.stack: return "Exception"
             v = self.stack.pop()
             # Sentinels skipped only on 3.11+
-            if sys.version_info >= (3, 11):
+            if getattr(self, "target_version", sys.version_info) >= (3, 11):
                 while self._is_null_sentinel(v) and self.stack:
                     v = self.stack.pop()
             return v
@@ -3858,6 +3858,9 @@ class DecompilerGeneric(DecompilerBase):
         """Consume a keyword-names tuple (Python 3.11+ KW_NAMES opcode)."""
         self._kw_names = instr.argval
 
+    def _op_push_null(self, instr: BytecodeInstruction):
+        self.stack.append(StackNULL(is_method=False))
+
         # ── calls ──────────────────────────────────────────────────────
 
     def _op_call(self, instr: BytecodeInstruction):
@@ -3893,8 +3896,15 @@ class DecompilerGeneric(DecompilerBase):
             flags = num_args
             kwargs_dict = None
             if flags & 1:
-                kwargs_dict = self.stack.pop() if self.stack else "{}"
-            args_tuple = self.stack.pop() if self.stack else "()"
+                item = self.stack.pop() if self.stack else "{}"
+                while self._is_null_sentinel(item) and self.stack:
+                    item = self.stack.pop()
+                kwargs_dict = item
+            
+            item = self.stack.pop() if self.stack else "()"
+            while self._is_null_sentinel(item) and self.stack:
+                item = self.stack.pop()
+            args_tuple = item
             final_args = [f"*{self._normalize_val(args_tuple)}"]
             if kwargs_dict:
                 final_args.append(f"**{self._normalize_val(kwargs_dict)}")
@@ -3973,7 +3983,7 @@ class DecompilerGeneric(DecompilerBase):
         sentinel = _get_sentinel(func_val)
         if sentinel:
             # Pattern 2: Popped sentinel as callable. Real callable is on stack.
-            func_val = self.stack.pop() if self.stack else "unknown_func"
+            func_val = self.stack.pop() if self.stack else "func"
             if sentinel.is_method and self.stack:
                 obj = self.stack.pop()
                 func_val = f"{obj}.{func_val}"
@@ -4120,8 +4130,6 @@ class DecompilerGeneric(DecompilerBase):
         # ── f-strings ──────────────────────────────────────────────────
 
     def _op_fstring(self, instr: BytecodeInstruction):
-        val = self.stack.pop() if self.stack else "{expr}"
-        
         # arg bitmask: 0x01=str(), 0x02=repr(), 0x03=ascii(), 0x04=format_spec
         arg = int(instr.arg) if instr.arg is not None else 0
         conversion = ""
@@ -4136,6 +4144,8 @@ class DecompilerGeneric(DecompilerBase):
             spec_str = str(spec).strip("'\"")
             format_spec = f":{spec_str}"
             
+        val = self.stack.pop() if self.stack else "{expr}"
+        
         self.stack.append(f"{{{val}{conversion}{format_spec}}}")
 
     def _op_build_string(self, instr: BytecodeInstruction):
@@ -4153,6 +4163,8 @@ class DecompilerGeneric(DecompilerBase):
                 try:
                     import ast
                     p = str(ast.literal_eval(p))
+                    p = p.replace("\\", "\\\\").replace("{", "{{").replace("}", "}}").replace('"', '\\"')
+                    p = p.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
                 except:
                     pass
                 parts.insert(0, p)
@@ -4798,8 +4810,7 @@ class DecompilerGeneric(DecompilerBase):
         items = []
         for i, k in enumerate(keys):
             v = values[i] if i < len(values) else "None"
-            # Preserve integer keys; only quote strings
-            k_repr = repr(k) if isinstance(k, (int, float, bool)) else f"'{k}'"
+            k_repr = repr(k)
             items.append(f"{k_repr}: {v}")
         self.stack.append(f"{{{', '.join(items)}}}")
 
@@ -6182,7 +6193,7 @@ class Decompiler39(DecompilerGeneric):
                         else:
                             # The return value was loaded before the ROT_FOUR and sits on stack
                             v = self.stack.pop()
-                            if sys.version_info >= (3, 11):
+                            if getattr(self, "target_version", sys.version_info) >= (3, 11):
                                 while self._is_null_sentinel(v) and self.stack:
                                     v = self.stack.pop()
                             ret_val = str(v)
@@ -6800,14 +6811,22 @@ def get_decompiler(filepath: str, beautification_level: str = 'core') -> Decompi
 
     # corrected dispatch table
     if 3410 <= version_id <= 3429:      # 3.9
-        return Decompiler39(code_obj, beautification_level=beautification_level)
+        dec = Decompiler39(code_obj, beautification_level=beautification_level)
     elif version_id >= 3560:            # 3.14+
-        return Decompiler314(code_obj, beautification_level=beautification_level)
+        dec = Decompiler314(code_obj, beautification_level=beautification_level)
     elif version_id >= 3430:            # 3.10, 3.11, 3.12, 3.13
-        return Decompiler311Plus(code_obj, beautification_level=beautification_level)
-
-    # Fallback for very old or unrecognised versions
-    return DecompilerGeneric(code_obj)
+        dec = Decompiler311Plus(code_obj, beautification_level=beautification_level)
+    else:
+        # Fallback for very old or unrecognised versions
+        dec = DecompilerGeneric(code_obj)
+        
+    tv_str = _get_python_version_from_magic(version_id)
+    if tv_str:
+        dec.target_version = tuple(map(int, tv_str.replace('+', '').split('.')))
+    else:
+        dec.target_version = sys.version_info[:2]
+        
+    return dec
 
 
 # ---------------------------------------------------------------------------
