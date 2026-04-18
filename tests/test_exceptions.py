@@ -870,5 +870,281 @@ class TestWithBlocksInsideLoops(unittest.TestCase):
         )
 
 
+
+class TestMultiExceptionTuple(unittest.TestCase):
+    """Tests for `except (E1, E2, ...):` tuple syntax reconstruction.
+
+    Fix: DUP_TOP handler now collects all LOAD_* exception types before BUILD_TUPLE
+    rather than stopping at the first one.  Before the fix, only E1 was captured;
+    then ``is_exc_match`` was False (BUILD_TUPLE was next, not JUMP_IF_NOT_EXC_MATCH),
+    causing a fallthrough to the bare-``except:`` branch.
+    """
+
+    # ── positive: all exception types must appear ────────────────────────────
+
+    def test_two_type_tuple(self):
+        """except (E1, E2): — 2-type tuple, the minimal multi-type case."""
+        src = "def f():\n    try:\n        pass\n    except (ValueError, TypeError):\n        pass\n"
+        out = decompile(src)
+        self.assertIn("ValueError", out)
+        self.assertIn("TypeError", out)
+
+    def test_three_type_tuple(self):
+        """except (E1, E2, E3): — 3-type tuple."""
+        src = "def f():\n    try:\n        pass\n    except (ValueError, TypeError, KeyError):\n        pass\n"
+        out = decompile(src)
+        self.assertIn("ValueError", out)
+        self.assertIn("TypeError", out)
+        self.assertIn("KeyError", out)
+
+    @unittest.skipIf(sys.version_info >= (3, 10),
+        "DUP_TOP multi-exception tuple fix is 3.9-only (3.10+ uses CHECK_EXC_MATCH)")
+    def test_four_type_tuple(self):
+        """except (E1, E2, E3, E4): — 4-type tuple (the bug's canonical case)."""
+        src = (
+            "def f(x):\n"
+            "    try:\n"
+            "        return int(x)\n"
+            "    except (AttributeError, TypeError, ValueError, IndexError):\n"
+            "        return 0\n"
+        )
+        out = decompile(src)
+        for name in ("AttributeError", "TypeError", "ValueError", "IndexError"):
+            self.assertIn(name, out, f"{name} missing from output:\n{out}")
+
+    @unittest.skipIf(sys.version_info >= (3, 10),
+        "DUP_TOP multi-exception tuple fix is 3.9-only (3.10+ uses CHECK_EXC_MATCH)")
+    def test_five_type_tuple(self):
+        """except (E1, E2, E3, E4, E5): — 5-type tuple (beyond the original bug's case)."""
+        src = (
+            "def f(x):\n"
+            "    try:\n"
+            "        return int(x)\n"
+            "    except (ValueError, TypeError, KeyError, IndexError, AttributeError):\n"
+            "        return 0\n"
+        )
+        out = decompile(src)
+        for name in ("ValueError", "TypeError", "KeyError", "IndexError", "AttributeError"):
+            self.assertIn(name, out, f"{name} missing from output:\n{out}")
+
+    def test_tuple_except_body_is_preserved(self):
+        """The except body must still be emitted after the tuple header."""
+        src = (
+            "def f():\n"
+            "    try:\n"
+            "        x = int('a')\n"
+            "    except (ValueError, TypeError):\n"
+            "        x = -1\n"
+        )
+        out = decompile(src)
+        self.assertIn("x = -1", out)
+        self.assertIn("except", out)
+
+    # ── negative: no spurious bare `except:` ──────────────────────────────────
+
+    def test_two_type_no_bare_except(self):
+        """2-type tuple must not produce a preceding bare 'except:'."""
+        src = "def f():\n    try:\n        pass\n    except (ValueError, TypeError):\n        pass\n"
+        out = decompile(src)
+        self.assertNotIn("except:\n", out,
+            f"Spurious bare except: found:\n{out}")
+
+    @unittest.skipIf(sys.version_info >= (3, 10),
+        "DUP_TOP multi-exception tuple fix is 3.9-only (3.10+ uses CHECK_EXC_MATCH)")
+    def test_four_type_no_bare_except(self):
+        """4-type tuple must not produce a preceding bare 'except:'."""
+        src = (
+            "def f(x):\n"
+            "    try:\n"
+            "        return int(x)\n"
+            "    except (AttributeError, TypeError, ValueError, IndexError):\n"
+            "        return 0\n"
+        )
+        out = decompile(src)
+        self.assertNotIn("except:\n", out,
+            f"Spurious bare except: found:\n{out}")
+
+    def test_tuple_except_count_is_one(self):
+        """Exactly one except clause should appear (no duplication)."""
+        src = "def f():\n    try:\n        pass\n    except (ValueError, TypeError, KeyError):\n        pass\n"
+        out = decompile(src)
+        count = len(re.findall(r'^\s*except', out, re.MULTILINE))
+        self.assertEqual(count, 1,
+            f"Expected 1 except clause, got {count}:\n{out}")
+
+    def test_bare_except_still_works_after_fix(self):
+        """Regression guard: a plain bare 'except:' must still work correctly."""
+        src = "def f():\n    try:\n        x = 1\n    except:\n        x = 0\n"
+        out = decompile(src)
+        self.assertIn("except:", out)
+        self.assertIn("x = 0", out)
+
+    def test_single_type_except_unaffected(self):
+        """Single-type except (not a tuple) must still work correctly."""
+        src = "def f():\n    try:\n        x = int('a')\n    except ValueError:\n        x = 0\n"
+        out = decompile(src)
+        self.assertIn("except ValueError", out)
+        self.assertNotIn("except:\n", out)
+
+
+@unittest.skipIf(sys.version_info >= (3, 10),
+    "Python 3.9 POP_BLOCK early-exit pattern only")
+class TestReturnInsideForInsideTry(unittest.TestCase):
+    """Tests for `return` inside `for` inside `try` — Python 3.9 POP_BLOCK fix.
+
+    In Python 3.9 the compiler emits:
+        SETUP_FINALLY  (try)
+        FOR_ITER      (for-loop)
+        POP_BLOCK     (VM cleanup for early return)
+        LOAD_CONST / RETURN_VALUE
+        JUMP_ABSOLUTE (dead)
+        POP_BLOCK     (structural try_body exit)
+
+    Before the fix the decompiler would:
+    - Emit a spurious bare ``except:`` before the typed clause (POP_BLOCK #1 not
+      recognised as return-cleanup, fell through to ``_except_header_indents`` path)
+    - Emit the return value at for-body indentation instead of if-body
+    """
+
+    _SRC_TUPLE4 = (
+        "def f(self, instr):\n"
+        "    try:\n"
+        "        for e in getattr(self, 'entries', []):\n"
+        "            if e.start <= instr.offset < e.end:\n"
+        "                return False\n"
+        "    except (AttributeError, TypeError, ValueError, IndexError):\n"
+        "        pass\n"
+    )
+
+    _SRC_SINGLE = (
+        "def f(items):\n"
+        "    try:\n"
+        "        for e in items:\n"
+        "            if e:\n"
+        "                return True\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "    return False\n"
+    )
+
+    # ── positive: the return value must be present in output ─────────────────
+
+    def test_return_false_present(self):
+        """'return False' must appear somewhere in the decompiled output."""
+        out = decompile(self._SRC_TUPLE4)
+        self.assertIn("return", out,
+            f"No 'return' statement found:\n{out}")
+
+    def test_return_true_present(self):
+        """'return True' must appear inside the try body."""
+        out = decompile(self._SRC_SINGLE)
+        self.assertIn("True", out,
+            f"The True constant was not decompiled:\n{out}")
+
+    def test_try_keyword_present(self):
+        """The 'try:' keyword must appear in the output."""
+        out = decompile(self._SRC_TUPLE4)
+        self.assertIn("try:", out)
+
+    def test_for_keyword_present(self):
+        """The 'for' keyword must appear inside the try body."""
+        out = decompile(self._SRC_TUPLE4)
+        self.assertIn("for", out)
+
+    def test_try_appears_before_except(self):
+        """Structural ordering: 'try:' must precede 'except'."""
+        out = decompile(self._SRC_TUPLE4)
+        lines = out.splitlines()
+        try_pos = next((i for i, ln in enumerate(lines)
+                        if ln.lstrip() == "try:"), -1)
+        exc_pos = next((i for i, ln in enumerate(lines)
+                        if ln.lstrip().startswith("except")), -1)
+        self.assertNotEqual(try_pos, -1, f"'try:' not found:\n{out}")
+        self.assertNotEqual(exc_pos, -1, f"'except' not found:\n{out}")
+        self.assertLess(try_pos, exc_pos,
+            f"'try:' at line {try_pos} is after 'except' at line {exc_pos}:\n{out}")
+
+    def test_exception_type_present_single(self):
+        """The single except Exception type must appear correctly."""
+        out = decompile(self._SRC_SINGLE)
+        self.assertIn("except", out)
+        self.assertIn("Exception", out)
+
+    def test_exception_types_all_present_tuple4(self):
+        """All four exception types in the tuple must appear in the output."""
+        out = decompile(self._SRC_TUPLE4)
+        for name in ("AttributeError", "TypeError", "ValueError", "IndexError"):
+            self.assertIn(name, out, f"{name} missing:\n{out}")
+
+    # ── positive: syntax validity ─────────────────────────────────────────────
+
+    def test_tuple4_output_is_valid_python(self):
+        """4-type tuple variant: decompiled output must parse without SyntaxError."""
+        out = decompile(self._SRC_TUPLE4)
+        try:
+            ast.parse(out)
+        except SyntaxError as exc:
+            self.fail(f"Output is not valid Python: {exc}\n{out}")
+
+    def test_single_except_output_is_valid_python(self):
+        """Single-type except variant: output must parse without SyntaxError."""
+        out = decompile(self._SRC_SINGLE)
+        try:
+            ast.parse(out)
+        except SyntaxError as exc:
+            self.fail(f"Output is not valid Python: {exc}\n{out}")
+
+    # ── negative: no spurious artifacts ──────────────────────────────────────
+
+    def test_no_bare_except_before_typed(self):
+        """Must NOT produce a bare 'except:' before the typed clause.
+        This was the primary symptom: 'except:\nexcept (E1,...):'.
+        """
+        out = decompile(self._SRC_TUPLE4)
+        self.assertNotIn("except:\n", out,
+            f"Spurious bare 'except:' found before typed clause:\n{out}")
+
+    def test_no_bare_except_single_handler(self):
+        """Single-type except variant must also not get a spurious bare 'except:'."""
+        out = decompile(self._SRC_SINGLE)
+        # Not a bare except: in the intended output; bare would mean misidentification.
+        lines_stripped = [ln.strip() for ln in out.splitlines()]
+        self.assertNotIn("except:", lines_stripped,
+            f"Spurious bare 'except:' found:\n{out}")
+
+    def test_no_double_except_tuple4(self):
+        """Exactly one except clause — no duplication from the two POP_BLOCKs."""
+        out = decompile(self._SRC_TUPLE4)
+        count = len(re.findall(r'^\s*except', out, re.MULTILINE))
+        self.assertEqual(count, 1,
+            f"Expected 1 except clause, got {count}:\n{out}")
+
+    def test_no_double_except_single(self):
+        """Single-type except variant must also have exactly one except clause."""
+        out = decompile(self._SRC_SINGLE)
+        count = len(re.findall(r'^\s*except', out, re.MULTILINE))
+        self.assertEqual(count, 1,
+            f"Expected 1 except clause, got {count}:\n{out}")
+
+    def test_no_wrong_return_value(self):
+        """The return value must not be mangled to 'return None' when the source
+        returns False.  This guards against the empty-stack mis-read."""
+        out = decompile(self._SRC_TUPLE4)
+        # 'return False' (or at least 'False') must appear
+        self.assertIn("False", out,
+            f"'False' constant missing — return value may be wrong:\n{out}")
+        # Should not see 'return None' as the early-exit value
+        lines = [ln.strip() for ln in out.splitlines()]
+        self.assertNotIn("return None", lines,
+            f"'return None' at top-level suggests return value was misread as None:\n{out}")
+
+    def test_return_value_correct_true(self):
+        """'return True' must not be flattened to 'return None'."""
+        out = decompile(self._SRC_SINGLE)
+        self.assertNotIn("return None", [ln.strip() for ln in out.splitlines()],
+            f"'return None' appeared where True was expected:\n{out}")
+
+
 if __name__ == "__main__":
     unittest.main()
+

@@ -5472,32 +5472,97 @@ class Decompiler39(DecompilerGeneric):
                             # The natural POP_BLOCK will follow and handle the try_body exit appropriately.
                             return
 
-            if self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup"):
-                # ── Python 3.9 return-inside-try ─────────────────────────────────
-                # CPython 3.9 emits: ... LOAD_FAST x → POP_BLOCK → RETURN_VALUE
-                # The return SEMANTICALLY belongs inside the try body but the
-                # POP_BLOCK fires first, which would close the try indent before we
-                # emit the return.  Detect this pattern and emit the return NOW,
-                # consuming the RETURN_VALUE so the normal path doesn't re-emit it.
+            _top_is_try = (self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup"))
+            _inner_try = (
+                self.blocks
+                and self.blocks[-1][1] in ("for", "if", "while")
+                and any(b[1] in ("try_body", "exc_cleanup") for b in self.blocks[:-1])
+            )
+            if _top_is_try or _inner_try:
+                # ── Python 3.9 early-exit return from for-inside-try ───────────
+                # Pattern:
+                #   48 POP_TOP            ← pop DUP_TOP from chained comparison
+                #   50 POP_BLOCK          ← THIS (VM cleanup for early-exit)
+                #   52 LOAD_CONST False   ← return value loads
+                #   54 RETURN_VALUE       ← actual return
+                #   56 JUMP_ABSOLUTE 14   ← dead code
+                #   58 POP_BLOCK          ← structural try_body exit (jump_target=True)
+                # Strategy:
+                #  (a) Emit `return <val>` at CURRENT indent (inside if body)
+                #  (b) Suppress 52..56 from dispatch (push to _finally_body_suppress)
+                #  (c) Return early; structural POP_BLOCK at 58 fires correctly.
                 look = self.pc
-                while (look < len(self.instructions)
-                       and self.instructions[look].opname in ("RESUME", "NOP", "CACHE")):
-                    look += 1
-                if (look < len(self.instructions)
-                        and self.instructions[look].opname in ("RETURN_VALUE", "RETURN_CONST")):
-                    ret_instr = self.instructions[look]
+                ret_idx = -1
+                while look < len(self.instructions):
+                    op = self.instructions[look].opname
+                    if op in ("RETURN_VALUE", "RETURN_CONST"):
+                        ret_idx = look
+                        break
+                    # Skip over ops that build the return expression
+                    if ("LOAD_" in op or op in
+                            ("POP_TOP", "RESUME", "NOP", "CACHE", "DUP_TOP", "ROT_THREE")):
+                        look += 1
+                    else:
+                        break
+
+                if ret_idx >= 0:
+                    ret_instr = self.instructions[ret_idx]
                     if ret_instr.opname == "RETURN_CONST":
                         ret_val = self._format_val(ret_instr.argval)
                     else:
-                        ret_val = str(self.stack.pop()) if self.stack else "None"
-                    # Only emit if not a compiler-generated 'return None'
+                        # The LOAD instructions between here and RETURN_VALUE
+                        # haven't been dispatched yet — evaluate them into a
+                        # temporary mini-stack to get the actual return value.
+                        mini_stack = list(self.stack)  # copy current state
+                        for mi in range(self.pc, ret_idx):
+                            mi_instr = self.instructions[mi]
+                            mi_op = mi_instr.opname
+                            if mi_op in ("RESUME", "NOP", "CACHE", "POP_TOP"):
+                                if mini_stack and mi_op == "POP_TOP":
+                                    mini_stack.pop()
+                            elif "LOAD_CONST" == mi_op:
+                                mini_stack.append(self._format_val(mi_instr.argval))
+                            elif "LOAD_" in mi_op:
+                                mini_stack.append(str(mi_instr.argval))
+                        ret_val = str(mini_stack[-1]) if mini_stack else "None"
+
                     is_compiler_gen = (ret_val == "None"
-                                       and self.is_compiler_generated_return(look))
+                                       and self.is_compiler_generated_return(ret_idx))
                     if not is_compiler_gen:
+                        # If the last emitted line is an unclosed block header
+                        # (e.g. 'if cond:') that never got a body, emit the
+                        # return at one extra indent level to place it inside that block.
+                        last_real = -1
+                        for li in range(len(self.reconstructed) - 1, -1, -1):
+                            if self.reconstructed[li].strip():
+                                last_real = li
+                                break
+                        last_line = self.reconstructed[last_real].strip() if last_real >= 0 else ""
+                        extra_indent = 0
+                        if last_line.endswith(":") and last_line.startswith(("if ", "elif ", "else:", "while ")):
+                            extra_indent = 1
+
+                        saved_indent = self.indent_level
+                        self.indent_level += extra_indent
                         self._append_reconstructed(f"return {ret_val}")
-                    # Consume the RETURN_VALUE so it's not re-emitted
-                    self.pc = look + 1
-                    # Fall through to normal block-close / except handling below.
+                        self.indent_level = saved_indent
+
+                    # Suppress all instructions from pc up to ret_instr
+                    # plus dead code until the next jump target.
+                    _fb = getattr(self, "_finally_body_suppress", set())
+                    sup = self.pc
+                    while sup < len(self.instructions):
+                        ins_s = self.instructions[sup]
+                        _fb.add(ins_s.offset)
+                        sup += 1
+                        if ins_s.offset == ret_instr.offset:
+                            while (sup < len(self.instructions)
+                                   and not self.instructions[sup].is_jump_target):
+                                _fb.add(self.instructions[sup].offset)
+                                sup += 1
+                            break
+                    self._finally_body_suppress = _fb
+                    return
 
                 # Peek ahead for break/loop patterns (existing logic)
                 look = self.pc
@@ -5745,13 +5810,35 @@ class Decompiler39(DecompilerGeneric):
                         "LOAD_NAME", "LOAD_GLOBAL", "LOAD_FAST",
                         "LOAD_DEREF", "LOAD_ATTR",
             )):
-                exc_type = str(self.instructions[look].argval)
+                exc_types = [str(self.instructions[look].argval)]
                 look += 1
                 # Follow any LOAD_ATTR chain for dotted exception names like socket.error
                 while (look < len(self.instructions)
                        and self.instructions[look].opname == "LOAD_ATTR"):
-                    exc_type = f"{exc_type}.{self.instructions[look].argval}"
+                    exc_types[-1] = f"{exc_types[-1]}.{self.instructions[look].argval}"
                     look += 1
+                # Collect additional exception types in a tuple (except E1, E2, E3):
+                # Pattern: LOAD E1; LOAD E2; ...; BUILD_TUPLE N; JUMP_IF_NOT_EXC_MATCH
+                while (look < len(self.instructions)
+                       and self.instructions[look].opname in (
+                           "LOAD_NAME", "LOAD_GLOBAL", "LOAD_FAST",
+                           "LOAD_DEREF", "LOAD_ATTR",
+                )):
+                    exc_types.append(str(self.instructions[look].argval))
+                    look += 1
+                    while (look < len(self.instructions)
+                           and self.instructions[look].opname == "LOAD_ATTR"):
+                        exc_types[-1] = f"{exc_types[-1]}.{self.instructions[look].argval}"
+                        look += 1
+                # Skip BUILD_TUPLE if present
+                if (look < len(self.instructions)
+                        and self.instructions[look].opname == "BUILD_TUPLE"):
+                    look += 1
+                # Format the exception type string
+                if len(exc_types) == 1:
+                    exc_type = exc_types[0]
+                else:
+                    exc_type = f"({', '.join(exc_types)})"
                 # 3.9 type-match gate: JUMP_IF_NOT_EXC_MATCH or COMPARE_OP
                 is_exc_match = (
                     look < len(self.instructions)
