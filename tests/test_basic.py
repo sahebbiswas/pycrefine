@@ -178,6 +178,18 @@ class TestComprehensions(unittest.TestCase):
         self.assertNotIn("yield", out)
         self.assertIn("append", out)
 
+    def test_generator_expression_with_closure(self):
+        # Regression test for LOAD_CLOSURE falling through to _op_unknown
+        # and producing an 'unknown_func' in the decompiled output
+        src = "class C:\n    def f(self, items):\n        return any(self.check(x) for x in items)\n"
+        out = decompile(src)
+        self.assertNotIn("unknown_func", out)
+        # The genexpr content must be present (any() wrapper may be dropped by some Python versions)
+        self.assertTrue(
+            "self.check" in out,
+            f"Expected genexpr content in decompiled output, got: {out!r}"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
