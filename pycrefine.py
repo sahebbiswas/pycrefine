@@ -703,9 +703,12 @@ def _is_anonymous_func_body(first_line: str) -> bool:
     return any(tok in first_line for tok in _ANON_TOKENS)
 
 # ---------------------------------------------------------------------------
-# Base
-# ---------------------------------------------------------------------------
-
+class StackNULL:
+    """Internal sentinel pushed onto the stack to represent Python 3.11+ NULL sentinels in method calls."""
+    def __init__(self, is_method=False):
+        self.is_method = is_method
+    def __repr__(self): return "__SENTINEL_NULL__"
+    def __str__(self): return "__SENTINEL_NULL__"
 
 class DecompilerBase:
     def __init__(self, code_obj: types.CodeType, indent_level: int = 0, beautification_level: str = 'core'):
@@ -713,6 +716,8 @@ class DecompilerBase:
         self.instructions: List[BytecodeInstruction] = []
         self.reconstructed: List[str] = []
         self.indent_level = indent_level
+        self.stack = []
+        self.instructions = list(code_obj.instructions) if hasattr(code_obj, 'instructions') else []
         self.starts_as_function = indent_level > 0
         self.blocks: List[Tuple[int, str]] = []  # stack of (end_offset, type)
         self.pc = 0
@@ -867,7 +872,6 @@ class DecompilerGeneric(DecompilerBase):
             _nop_to_push_exc (dict): Mapping from try-entry NOP offsets to the following PUSH_EXC_INFO offset (populated by prescan).
         """
         super().__init__(code_obj, indent_level, beautification_level)
-        self.stack: List[Union[str, Tuple[Any, ...]]] = []
         self.has_doc = False
         # Tracks offsets of while-loop body starts so we can suppress the
         # duplicated condition check emitted at the bottom of 3.11+ while loops.
@@ -892,7 +896,7 @@ class DecompilerGeneric(DecompilerBase):
         self._wrapper_body_suppress: set = set()
         self._pending_finally_merge: Optional[int] = None
         self._nop_to_push_exc: dict = {}
-        self._pending_kw_names: Optional[Tuple[str, ...]] = None
+        self._kw_names: Tuple[str, ...] = ()
         self._else_starts: dict = {}  # map of else_start_offset -> else_end_offset
         self._build_dispatch()
 
@@ -1158,6 +1162,14 @@ class DecompilerGeneric(DecompilerBase):
     def _has_jump_backward(self) -> bool:
         """Return True if the code contains any backward jump."""
         return any(self._is_backward_instruction(ins) for ins in self.instructions)
+
+    def _is_null_sentinel(self, v: Any) -> bool:
+        """Check if v is a NULL sentinel (None or StackNULL). 3.11+ only."""
+        if sys.version_info < (3, 11):
+            return False
+        if v is None: return True
+        vs = str(v)
+        return vs in ("NULL", "__SENTINEL_NULL__") or getattr(v, '__class__', None).__name__ == 'StackNULL'
 
     def _find_jump_backward_target(self) -> int:
         """Return the jump target of the first backward jump, or -1."""
@@ -1816,15 +1828,6 @@ class DecompilerGeneric(DecompilerBase):
         return self._eval_ternary_branch(instrs)
 
     def _eval_ternary_branch(self, instrs: list) -> str:
-        """
-        Reconstructs a Python expression from a sequence of pure-expression bytecode instructions.
-
-        Parameters:
-                instrs (list): Disassembled instruction objects for a ternary branch; expected to contain only expression-building opcodes.
-
-        Returns:
-                expr (str): The reconstructed expression as source text, or "?" if an expression could not be determined.
-        """
         mini_stack: list = []
         for ins in instrs:
             op = ins.opname
@@ -1833,7 +1836,6 @@ class DecompilerGeneric(DecompilerBase):
                       "RETURN_CONST", "RETURN_VALUE"):
                 continue
             if op == "LOAD_FAST_BORROW_LOAD_FAST_BORROW":
-                # Pushes two values: argval is a tuple (name1, name2)
                 if isinstance(ins.argval, (tuple, list)) and len(ins.argval) >= 2:
                     mini_stack.append(str(ins.argval[0]))
                     mini_stack.append(str(ins.argval[1]))
@@ -1851,6 +1853,27 @@ class DecompilerGeneric(DecompilerBase):
                     mini_stack.append(self._format_val(val))
                 else:
                     mini_stack.append(str(val))
+            elif op in ("FORMAT_VALUE", "FORMAT_SIMPLE", "BUILD_STRING", "BUILD_CONST_KEY_MAP", "BUILD_MAP"):
+                if op in ("FORMAT_VALUE", "FORMAT_SIMPLE"):
+                    val = mini_stack.pop() if mini_stack else "{expr}"
+                    mini_stack.append(f"{{{val}}}")
+                elif op == "BUILD_STRING":
+                    count = int(ins.arg) if ins.arg is not None else 0
+                    parts = []
+                    for _ in range(count):
+                        if mini_stack:
+                            p = str(mini_stack.pop())
+                            # Try to strip literal quotes if they exist
+                            if (p.startswith("'") and p.endswith("'")) or (p.startswith('"') and p.endswith('"')):
+                                p = p[1:-1]
+                            parts.insert(0, p)
+                    mini_stack.append(f'f"{"".join(parts)}"')
+                elif op in ("BUILD_MAP", "BUILD_CONST_KEY_MAP"):
+                    count = int(ins.arg) if ins.arg is not None else 0
+                    pop_cnt = (count * 2) if op == "BUILD_MAP" else (count + 1)
+                    for _ in range(pop_cnt):
+                        if mini_stack: mini_stack.pop()
+                    mini_stack.append("{}") # Placeholder for dict
             elif op in ("GET_ATTR", "LOAD_ATTR", "LOAD_METHOD"):
                 if mini_stack:
                     obj = mini_stack.pop()
@@ -2850,8 +2873,9 @@ class DecompilerGeneric(DecompilerBase):
             # Functions
             "CALL": self._op_call, "CALL_FUNCTION": self._op_call,
             "CALL_FUNCTION_KW": self._op_call, "CALL_FUNCTION_EX": self._op_call,
-            "CALL_METHOD": self._op_call,
+            "CALL_METHOD": self._op_call, "CALL_KW": self._op_call,
             "KW_NAMES": self._op_kw_names,
+            "PUSH_NULL": self._op_push_null,
 
             # Pops
             "POP_TOP": self._op_pop_top,
@@ -3017,6 +3041,16 @@ class DecompilerGeneric(DecompilerBase):
                 self.stack.append(self._format_val(val))
             else:
                 self.stack.append(str(val))
+                
+        # 3.11+ LOAD_GLOBAL/LOAD_NAME with bit 0 set pushes NULL sentinel.
+        # Python 3.9/3.10 do not use this bit for sentinels.
+        if sys.version_info >= (3, 11) and ("LOAD_GLOBAL" in opname or "LOAD_NAME" in opname):
+            arg = int(instr.arg) if instr.arg is not None else 0
+            if (arg & 1):
+                # Pushes [NULL, func]
+                func = self.stack.pop()
+                self.stack.append(StackNULL(is_method=False))
+                self.stack.append(func)
 
         # ── stores ─────────────────────────────────────────────────────
 
@@ -3195,12 +3229,21 @@ class DecompilerGeneric(DecompilerBase):
     def _op_raise_varargs(self, instr: BytecodeInstruction):
         opname = instr.opname
         num = int(instr.arg) if instr.arg is not None else 0
+        def _pop_exc_val():
+            if not self.stack: return "Exception"
+            v = self.stack.pop()
+            # Sentinels skipped only on 3.11+
+            if sys.version_info >= (3, 11):
+                while self._is_null_sentinel(v) and self.stack:
+                    v = self.stack.pop()
+            return v
+
         if num == 2:
-            cause = self.stack.pop() if self.stack else "None"
-            exc = self.stack.pop() if self.stack else "Exception"
+            cause = _pop_exc_val()
+            exc = _pop_exc_val()
             self._append_reconstructed(f"raise {exc} from {cause}")
         elif num == 1:
-            val = self.stack.pop() if self.stack else "Exception"
+            val = _pop_exc_val()
             self._append_reconstructed(f"raise {val}")
         else:
             self._append_reconstructed("raise")
@@ -3244,7 +3287,7 @@ class DecompilerGeneric(DecompilerBase):
         ):
             look += 1
         if look < len(self.instructions) and self.instructions[look].opname in (
-            "LOAD_NAME", "LOAD_GLOBAL", "LOAD_FAST", "LOAD_DEREF"
+            "LOAD_NAME", "LOAD_GLOBAL", "LOAD_FAST", "LOAD_DEREF", "PUSH_NULL"
         ):
             self.stack.append("_exc_info")
             return  # defer header to CHECK_EXC_MATCH
@@ -3813,7 +3856,7 @@ class DecompilerGeneric(DecompilerBase):
 
     def _op_kw_names(self, instr: BytecodeInstruction):
         """Consume a keyword-names tuple (Python 3.11+ KW_NAMES opcode)."""
-        self._pending_kw_names = instr.argval
+        self._kw_names = instr.argval
 
         # ── calls ──────────────────────────────────────────────────────
 
@@ -3840,76 +3883,122 @@ class DecompilerGeneric(DecompilerBase):
         final_args: List[str] = []
         raw_args: List[Any] = []
 
+        # CALL_KW (3.13/3.14) or CALL_FUNCTION_KW (3.9/3.10) pops names tuple first
+        if opname in ("CALL_KW", "CALL_FUNCTION_KW"):
+            if self.stack:
+                self._kw_names = self.stack.pop()
+
         # CALL_FUNCTION_EX: *args [and **kwargs]
         if opname == "CALL_FUNCTION_EX":
             flags = num_args
             kwargs_dict = None
             if flags & 1:
                 kwargs_dict = self.stack.pop() if self.stack else "{}"
-
             args_tuple = self.stack.pop() if self.stack else "()"
-
-            # Form final_args as strings
-            final_args.append(f"*{self._normalize_val(args_tuple)}")
+            final_args = [f"*{self._normalize_val(args_tuple)}"]
             if kwargs_dict:
                 final_args.append(f"**{self._normalize_val(kwargs_dict)}")
+            raw_args = [args_tuple]
         else:
-            # keyword argument handling
-            # CALL_KW: TOS is a tuple of kw-names; then num_args values (kw last)
-            # CALL_FUNCTION_KW: same as CALL_KW but for Python 3.9/3.10
-            # Python 3.11+: KW_NAMES opcode sets self._pending_kw_names
-            kw_names: List[str] = []
-            if opname == "CALL_KW" or opname == "CALL_FUNCTION_KW" or ("kwnames" in str(instr.argval)) or self._pending_kw_names is not None:
-                if self._pending_kw_names is not None:
-                    kw_names = list(self._pending_kw_names)
-                    self._pending_kw_names = None
-                elif self.stack:
-                    raw_kw = self.stack.pop()
-                    s_kw = str(raw_kw).strip("()")
-                    if s_kw:
-                        kw_names = [n.strip("'\" ") for n in s_kw.split(",") if n.strip()]
+            final_args = []
+            final_args_raw = []
+            if self.stack:
+                # Handle KW_NAMES: if preceding KW_NAMES exist, CALL pops (num_args) positional
+                # and then the keyword names tuple was already popped by _op_kw_names
+                # and stored in self._kw_names.
+                kw_names = getattr(self, "_kw_names", ())
+                if isinstance(kw_names, str) and kw_names.startswith("("):
+                    try:
+                        import ast
+                        kw_names = ast.literal_eval(kw_names)
+                    except:
+                        pass
+                
+                if kw_names and len(self.stack) >= num_args:
+                    n_kw = len(kw_names)
+                    n_pos = num_args - n_kw
+                    # Pop keyword values first (they are on top of positional args)
+                    kw_vals = []
+                    collected_kw = 0
+                    while collected_kw < n_kw and self.stack:
+                        item = self.stack.pop()
+                        if self._is_null_sentinel(item): continue
+                        kw_vals.insert(0, item)
+                        collected_kw += 1
 
-                num_kw = len(kw_names)
-                num_pos = num_args - num_kw
+                    # Pop positional args
+                    pos_args = []
+                    collected_pos = 0
+                    while collected_pos < n_pos and self.stack:
+                        item = self.stack.pop()
+                        if self._is_null_sentinel(item): continue
+                        pos_args.insert(0, item)
+                        collected_pos += 1
+                    
+                    final_args = [self._normalize_val(v) for v in pos_args]
+                    final_args_raw = pos_args
+                    for name, val in zip(kw_names, kw_vals):
+                        v_str = self._normalize_val(val)
+                        final_args.append(f"{name}={v_str}")
+                        final_args_raw.append(val)
+                    self._kw_names = () # clear
+                    # Special cases need the raw args
+                    raw_args = final_args_raw
+                else:
+                    raw_args = []
+                    collected = 0
+                    while collected < num_args and self.stack:
+                        item = self.stack.pop()
+                        if self._is_null_sentinel(item):
+                            # Skip leaked sentinels from previous loads
+                            continue
+                        raw_args.insert(0, item)
+                        collected += 1
+                    final_args = [self._normalize_val(v) for v in raw_args]
+                    raw_args = raw_args
 
-                kw_vals: List[Any] = []
-                for _ in range(num_kw):
-                    kw_vals.insert(0, self.stack.pop() if self.stack else "?")
-                pos_vals: List[Any] = []
-                for _ in range(num_pos):
-                    pos_vals.insert(0, self.stack.pop() if self.stack else "?")
-
-                # We keep them as Potential Tuples for now, to handle 3.9 deco/class
-                # Convert to string ONLY for the final reconstruction
-                final_args_raw = pos_vals + kw_vals
-                final_args = [
-                    (f"{k}={self._normalize_val(v)}") if i >= num_pos else self._normalize_val(v)
-                    for i, (k, v) in enumerate(zip([""] * num_pos + kw_names, final_args_raw))
-                ]
-                # Special cases need the raw args
-                raw_args = final_args_raw
-            else:
-                raw_args = []
-                for _ in range(num_args):
-                    if self.stack:
-                        raw_args.insert(0, self.stack.pop())
-                final_args = [self._normalize_val(v) for v in raw_args]
-
-        func_val = self.stack.pop() if self.stack else "unknown_func"
+        # Standard functional name is the first pop (or Pattern 2 sentinel).
+        func_val = self.stack.pop() if self.stack else "func"
 
         # Handle NULL sentinels (e.g. from PUSH_NULL in Python 3.11+).
-        if str(func_val) == "None" and self.stack:
-            func_val = self.stack.pop()
+        # Pattern 1 (3.11-3.12): Sentinel is BELOW functional name: [obj/NULL, func, args]
+        # Pattern 2 (3.14+):      Sentinel is ABOVE functional name: [func, NULL, args]
+        is_method_call = False
+        def _get_sentinel(v):
+            if v is None: return None
+            if getattr(v, '__class__', None).__name__ == 'StackNULL': return v
+            if str(v) == "__SENTINEL_NULL__": return StackNULL(is_method=False)
+            return None
+
+        sentinel = _get_sentinel(func_val)
+        if sentinel:
+            # Pattern 2: Popped sentinel as callable. Real callable is on stack.
+            func_val = self.stack.pop() if self.stack else "unknown_func"
+            if sentinel.is_method and self.stack:
+                obj = self.stack.pop()
+                func_val = f"{obj}.{func_val}"
+                is_method_call = True
+        elif self.stack:
+            # Pattern 1: Popped name as callable. Sentinel might be on stack.
+            sentinel = _get_sentinel(self.stack[-1])
+            if sentinel:
+                self.stack.pop() # pop sentinel
+                if sentinel.is_method and self.stack:
+                    obj = self.stack.pop()
+                    func_val = f"{obj}.{func_val}"
+                    is_method_call = True
+            elif opname in ("CALL", "CALL_KW"):
+                # Missing NULL sentinel in bound calls (genexprs/lambdas).
+                if isinstance(func_val, (str, tuple)) and not self._is_null_sentinel(func_val):
+                    first_arg = func_val
+                    func_val = self.stack.pop()
+                    raw_args.insert(0, first_arg)
+                    final_args.insert(0, self._normalize_val(first_arg))
 
         orig_func_val = func_val
         func = self._normalize_val(func_val)
 
         # ── Decorator pattern detection ───────────────────────────────
-        # Pattern A (3.11+): decorator pushed, then MAKE_FUNCTION pushes func, then CALL
-        #   Stack: [..., decorator, ('func', body)] ; CALL 1
-        #   func_val = ('func', body), actor = decorator
-        # Pattern B (3.9): LOAD decorator, MAKE_FUNCTION pushes ('func', body), then CALL 1
-        #   Stack: [..., decorator, ('func', body)] ; CALL 1
         #   func_val = decorator, raw_args = [('func', body)]
 
         # Pattern A (3.11+ / Generic fallback)
@@ -4031,30 +4120,44 @@ class DecompilerGeneric(DecompilerBase):
         # ── f-strings ──────────────────────────────────────────────────
 
     def _op_fstring(self, instr: BytecodeInstruction):
-        opname = instr.opname
-        if self.stack:
-            val = self.stack.pop()
-            self.stack.append(f"{{{val}}}")
+        val = self.stack.pop() if self.stack else "{expr}"
+        
+        # arg bitmask: 0x01=str(), 0x02=repr(), 0x03=ascii(), 0x04=format_spec
+        arg = int(instr.arg) if instr.arg is not None else 0
+        conversion = ""
+        if (arg & 0x03) == 1: conversion = "!s"
+        elif (arg & 0x03) == 2: conversion = "!r"
+        elif (arg & 0x03) == 3: conversion = "!a"
+        
+        format_spec = ""
+        if (arg & 0x04):
+            # The format spec follows the value on the stack
+            spec = self.stack.pop() if self.stack else ""
+            spec_str = str(spec).strip("'\"")
+            format_spec = f":{spec_str}"
+            
+        self.stack.append(f"{{{val}{conversion}{format_spec}}}")
 
     def _op_build_string(self, instr: BytecodeInstruction):
-        opname = instr.opname
+        count = int(instr.arg) if instr.arg is not None else 0
         parts = []
-        num = int(instr.arg) if instr.arg is not None else 0
-        for _ in range(num):
+        for _ in range(count):
             if self.stack:
-                parts.insert(0, self.stack.pop())
-        has_fmt = any("{" in str(p) for p in parts)
-        content = "".join(
-            str(p).strip("'\"") if has_fmt else str(p) for p in parts
-        )
-        if has_fmt:
-            if "\n" in content:
-                wrapper = "'''" if '"""' in content else '"""'
-            else:
-                wrapper = "'" if '"' in content and "'" not in content else '"'
-            self.stack.append(f"f{wrapper}{content}{wrapper}")
-        else:
-            self.stack.append(f'"{content}"')
+                p_val = self.stack.pop()
+                # Skip sentinels that might have leaked to the stack
+                if (p_val is None or str(p_val) == "__SENTINEL_NULL__" or 
+                    getattr(p_val, '__class__', None).__name__ == 'StackNULL'):
+                    continue
+                p = str(p_val)
+                # Use ast.literal_eval for safe unquoting of literal fragments
+                try:
+                    import ast
+                    p = str(ast.literal_eval(p))
+                except:
+                    pass
+                parts.insert(0, p)
+        res = "".join(parts)
+        self.stack.append(f"f\"{res}\"")
         # ── jumps / control flow ───────────────────────────────────────
 
     def _op_jump(self, instr: BytecodeInstruction):
@@ -4595,21 +4698,31 @@ class DecompilerGeneric(DecompilerBase):
                     peek_pc += 1
                 if peek_pc < len(self.instructions):
                     next_instr = self.instructions[peek_pc]
-                    if next_instr.opname in ("STORE_NAME", "STORE_FAST"):
-                        var_name = str(next_instr.argval)
+                    if next_instr.opname in ("STORE_NAME", "STORE_FAST", 
+                                             "STORE_FAST_STORE_FAST", "STORE_FAST_LOAD_FAST"):
+                        if "STORE_FAST_STORE_FAST" in next_instr.opname:
+                            var_name = ", ".join([str(v) for v in next_instr.argval])
+                            self.pc = peek_pc + 1
+                        else:
+                            var_name = str(next_instr.argval)
                     elif next_instr.opname == "UNPACK_SEQUENCE":
                         count = int(next_instr.arg) if next_instr.arg else 2
                         names = []
                         look = peek_pc + 1
                         while look < len(self.instructions) and len(names) < count:
                             li = self.instructions[look]
-                            if li.opname in ("STORE_NAME", "STORE_FAST"):
-                                names.append(str(li.argval))
-                                look += 1
+                            if li.opname in ("STORE_NAME", "STORE_FAST", 
+                                             "STORE_FAST_STORE_FAST", "STORE_FAST_LOAD_FAST"):
+                                if "STORE_FAST_STORE_FAST" in li.opname:
+                                    names.extend([str(v) for v in li.argval])
+                                    look += 1
+                                else:
+                                    names.append(str(li.argval))
+                                    look += 1
                             else:
                                 break
-                        if len(names) == count:
-                            var_name = ", ".join(names)
+                        if len(names) >= count:
+                            var_name = ", ".join(names[:count])
                             self.pc = look  # skip the stores we peeked
             self._append_reconstructed(f"for {var_name} in {iterator}:")
             self.indent_level += 1
@@ -4667,37 +4780,28 @@ class DecompilerGeneric(DecompilerBase):
         self.stack.append(slice_str)
 
     def _op_build_const_key_map(self, instr: BytecodeInstruction):
-        # Python 3.6+: BUILD_CONST_KEY_MAP(count)
-        # Top of stack is a tuple of keys. Below that are 'count' values.
-        count = instr.arg
-        keys = self.stack.pop()
-
+        keys_val = self.stack.pop() if self.stack else "()"
+        count = int(instr.arg) if instr.arg is not None else 0
+        
+        # keys_val is e.g. "('a', 'b')" or "(0, 1)"
+        try:
+            import ast
+            keys = ast.literal_eval(keys_val)
+        except:
+            keys = [k.strip("'\"") for k in str(keys_val).strip("() ").split(",") if k.strip()]
+            
         values = []
         for _ in range(count):
             if self.stack:
-                values.append(self.stack.pop())
-            else:
-                # Stack underflow: append None as placeholder
-                values.append(None)
-                if getattr(self, 'debug', False):
-                    print(f'Warning: stack underflow in BUILD_CONST_KEY_MAP at offset {instr.offset}')
-        values.reverse()
-
-        # keys can be a tuple object (if loaded via LOAD_CONST)
-        # or a string representation (if reconstructed).
-        if isinstance(keys, str) and keys.startswith("(") and keys.endswith(")"):
-            # Very basic string-tuple parsing for reconstructed keys
-            k_list = [k.strip().strip("'\"") for k in keys[1:-1].split(",") if k.strip()]
-        elif isinstance(keys, tuple):
-            k_list = list(keys)
-        else:
-            k_list = [f"key{i}" for i in range(count)]
-
+                values.insert(0, self.stack.pop())
+                
         items = []
-        for k, v in zip(k_list, values):
-            k_repr = repr(k) if not isinstance(k, str) else f"'{k}'"
+        for i, k in enumerate(keys):
+            v = values[i] if i < len(values) else "None"
+            # Preserve integer keys; only quote strings
+            k_repr = repr(k) if isinstance(k, (int, float, bool)) else f"'{k}'"
             items.append(f"{k_repr}: {v}")
-        self.stack.append("{" + ", ".join(items) + "}")
+        self.stack.append(f"{{{', '.join(items)}}}")
 
     def _op_list_extend(self, instr: BytecodeInstruction):
         opname = instr.opname
@@ -4763,14 +4867,22 @@ class DecompilerGeneric(DecompilerBase):
         else:
             self.stack.append(str(instr.argval))
 
+    def _op_push_null(self, instr: BytecodeInstruction):
+        self.stack.append(StackNULL(is_method=False))
+
     def _op_load_attr(self, instr: BytecodeInstruction):
-        opname = instr.opname
-        obj = self.stack.pop() if self.stack else "obj"
-        name = str(instr.argval)
-        if " + " in name:
-            name = name.split(" + ")[0]
-        s_obj = str(obj).strip("'\"") if str(obj) in ("self", "cls") else str(obj)
-        self.stack.append(f"{s_obj}.{name}")
+        if not self.stack: return
+        obj = self.stack.pop()
+        
+        # 3.12+ LOAD_ATTR arg is a bitmask. Bit 0 (0x01) means push NULL/self sentinel.
+        # This is used for method calls: stack becomes [obj, NULL, func]
+        arg = int(instr.arg) if instr.arg is not None else 0
+        if (arg & 1):
+            self.stack.append(obj)
+            self.stack.append(StackNULL(is_method=True))
+            self.stack.append(str(instr.argval))
+        else:
+            self.stack.append(f"{obj}.{instr.argval}")
 
     def _op_load_super_attr(self, instr: BytecodeInstruction):
         opname = instr.opname
@@ -6069,7 +6181,11 @@ class Decompiler39(DecompilerGeneric):
                             ret_val = self._format_val(ret_instr.argval)
                         else:
                             # The return value was loaded before the ROT_FOUR and sits on stack
-                            ret_val = str(self.stack.pop()) if self.stack else "None"
+                            v = self.stack.pop()
+                            if sys.version_info >= (3, 11):
+                                while self._is_null_sentinel(v) and self.stack:
+                                    v = self.stack.pop()
+                            ret_val = str(v)
                         is_compiler_gen = (ret_val == "None"
                                            and self.is_compiler_generated_return(look))
                         if not is_compiler_gen:
