@@ -1683,7 +1683,7 @@ class DecompilerGeneric(DecompilerBase):
             # -----------------------------------------------------------
             parts: list = []  # list of (cond_str, is_or_connector, next_t)
 
-            sub = _pick_decompiler_class(self)(self.code_obj, self.indent_level, self.beautification_level)
+            sub = _pick_decompiler_class(self)(self.code_obj, self.indent_level, self.beautification_level, target_version=self.target_version)
 
             for _, jinstr, expr_instrs, _ in group:
                 for xi in expr_instrs:

@@ -151,7 +151,7 @@ class TestComprehensions(unittest.TestCase):
         out = decompile(src)
         if sys.version_info >= (3, 12):
             self.assertIn(".append((x * 2))", out)
-            self.assertNotIn("yield", out)
+            self.assertNotRegex(out, r"\byield\b")
         else:
             self.assertTrue("[x * 2 for x in items if x > 0]" in out or "[(x * 2) for x in items if x > 0]" in out)
 
@@ -160,7 +160,7 @@ class TestComprehensions(unittest.TestCase):
         out = decompile(src)
         if sys.version_info >= (3, 12):
             self.assertIn("_res[k] = v", out)
-            self.assertNotIn("yield", out)
+            self.assertNotRegex(out, r"\byield\b")
         else:
             self.assertIn("{k: v for k, v in items}", out)
 
@@ -169,7 +169,7 @@ class TestComprehensions(unittest.TestCase):
         out = decompile(src)
         if sys.version_info >= (3, 12):
             self.assertIn(".add(x)", out)
-            self.assertNotIn("yield", out)
+            self.assertNotRegex(out, r"\byield\b")
         else:
             self.assertIn("{x for x in items}", out)
 

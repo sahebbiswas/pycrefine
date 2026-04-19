@@ -95,11 +95,14 @@ class TestRegressionsApril(unittest.TestCase):
         # Issue 6: list comprehension in ordinary function
         src = 'def f(items):\n    res = [x.upper() for x in items]\n    return res\n'
         out = decompile(src)
-        # In 3.12+ this is inlined. Our fix should prevent 'yield' and use '.append'
+        # Positive sanity check: loop structure should be present on all versions
+        self.assertIn("in items", out)
+        self.assertIn("for ", out)
+        # In 3.12+ this is inlined. Our fix should prevent 'yield'
         if sys.version_info >= (3, 12):
-            self.assertNotIn("yield", out)
-        # It might be reconstructed as a loop or a comprehension depending on beautification
-        # But it should definitely NOT be a generator.
+            self.assertNotRegex(out, r"\byield\b")
+            # It might be reconstructed as a loop or a comprehension depending on beautification
+            # but it should definitely NOT be a generator.
     def test_super_method_call(self):
         # Issue 13: super().method() was corrupted
         src = 'class A:\n    def f(self):\n        return super().f()\n'
