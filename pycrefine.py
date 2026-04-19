@@ -2893,7 +2893,7 @@ class DecompilerGeneric(DecompilerBase):
             "CALL_FUNCTION_KW": self._op_call, "CALL_FUNCTION_EX": self._op_call,
             "CALL_METHOD": self._op_call, "CALL_KW": self._op_call,
             "KW_NAMES": self._op_kw_names,
-            "PUSH_NULL": self._op_push_null,
+            "PUSH_NULL": self._op_push_null, "CACHE": self._op_cache,
 
             # Pops
             "POP_TOP": self._op_pop_top,
@@ -3876,6 +3876,10 @@ class DecompilerGeneric(DecompilerBase):
     def _op_kw_names(self, instr: BytecodeInstruction):
         """Consume a keyword-names tuple (Python 3.11+ KW_NAMES opcode)."""
         self._kw_names = instr.argval
+
+    def _op_cache(self, instr: BytecodeInstruction):
+        """Ignore CACHE padding instructions."""
+        pass
 
     def _op_push_null(self, instr: BytecodeInstruction):
         self.stack.append(StackNULL(is_method=False))
@@ -4872,8 +4876,13 @@ class DecompilerGeneric(DecompilerBase):
             
             is_comp = self.code_obj.co_name in ("<listcomp>", "<setcomp>", "<dictcomp>", "<genexpr>")
             if not is_comp:
-                # Ordinary function: use .append()
-                if target == "[]" or target == "_item" or target.startswith("[") or target.startswith("("):
+                # Ordinary function: use .append(). We must ensure _res is initialized
+                # and the stack slot is remapped to the name so subsequent code
+                # (like the final return) uses the temp.
+                if target != "_res":
+                    init_val = target if target != "_item" else "[]"
+                    self._append_reconstructed(f"_res = {init_val}")
+                    self.stack[-i] = "_res"
                     target = "_res"
                 self._append_reconstructed(f"{target}.append({val})")
                 return
@@ -4897,7 +4906,10 @@ class DecompilerGeneric(DecompilerBase):
 
             is_comp = self.code_obj.co_name in ("<listcomp>", "<setcomp>", "<dictcomp>", "<genexpr>")
             if not is_comp:
-                if target == "set()" or target == "{}" or target.startswith("{") or target.startswith("("):
+                if target != "_res":
+                    init_val = target if target != "_item" else "set()"
+                    self._append_reconstructed(f"_res = {init_val}")
+                    self.stack[-i] = "_res"
                     target = "_res"
                 self._append_reconstructed(f"{target}.add({val})")
                 return
@@ -4944,7 +4956,10 @@ class DecompilerGeneric(DecompilerBase):
 
             is_comp = self.code_obj.co_name in ("<listcomp>", "<setcomp>", "<dictcomp>", "<genexpr>")
             if not is_comp:
-                if target == "{}" or target.startswith("{") or target.startswith("("):
+                if target != "_res":
+                    init_val = target if target != "_item" else "{}"
+                    self._append_reconstructed(f"_res = {init_val}")
+                    self.stack[-i] = "_res"
                     target = "_res"
                 self._append_reconstructed(f"{target}[{key}] = {val}")
                 return
@@ -4968,9 +4983,6 @@ class DecompilerGeneric(DecompilerBase):
                 self.stack.append(str(n))
         else:
             self.stack.append(str(instr.argval))
-
-    def _op_push_null(self, instr: BytecodeInstruction):
-        self.stack.append(StackNULL(is_method=False))
 
     def _op_load_attr(self, instr: BytecodeInstruction):
         if not self.stack: return
@@ -5602,18 +5614,26 @@ class Decompiler39(DecompilerGeneric):
                            "CACHE", "RESUME", "NOP", "NOT_TAKEN", "ROT_TWO"
                 )):
                     next_pc += 1
-                if (next_pc < len(self.instructions)
-                        and self.instructions[next_pc].opname in (
-                            "STORE_NAME", "STORE_FAST", "STORE_GLOBAL", "STORE_ATTR", "STORE_DEREF"
-                )):
-                    store_name = str(self.instructions[next_pc].argval)
-                    left_name = str(left).split(".")[-1]
-                    if store_name == left_name or str(left) == store_name or str(left).endswith("." + store_name):
-                        if self.instructions[next_pc].opname == "STORE_ATTR" and self.stack:
-                            self.stack.pop() # pop defensive receiver
-                        self._append_reconstructed(f"{left} {op} {right}")
-                        self.pc = next_pc + 1  # consume the STORE
-                        return
+                    if (next_pc < len(self.instructions)
+                            and self.instructions[next_pc].opname in (
+                                "STORE_NAME", "STORE_FAST", "STORE_GLOBAL", "STORE_ATTR", "STORE_DEREF", "STORE_SUBSCR"
+                    )):
+                        instr_store = self.instructions[next_pc]
+                        if instr_store.opname == "STORE_SUBSCR":
+                            # For subscripts, we don't have a name in argval. 
+                            # But if the left side looks like a subscript access, it's a match.
+                            is_match = "[" in str(left) and str(left).endswith("]")
+                        else:
+                            store_name = str(instr_store.argval)
+                            left_name = str(left).split(".")[-1]
+                            is_match = (store_name == left_name or str(left) == store_name or str(left).endswith("." + store_name))
+                            
+                        if is_match:
+                            if instr_store.opname == "STORE_ATTR" and self.stack:
+                                self.stack.pop() # pop defensive receiver
+                            self._append_reconstructed(f"{left} {op} {right}")
+                            self.pc = next_pc + 1  # consume the STORE
+                            return
                 # Fallback: push as expression for STORE to handle
                 # Wrap operands in parens when they contain a ternary
                 r_str = str(right)
@@ -6389,19 +6409,27 @@ class Decompiler311Plus(DecompilerGeneric):
                     next_pc = self.pc  # pc already past current instr
                     while (next_pc < len(self.instructions) and
                            self.instructions[next_pc].opname in ("CACHE", "RESUME", "NOT_TAKEN", "SWAP")):
-                        # Allow SWAP 2 between BINARY_OP and STORE_*
-                        if self.instructions[next_pc].opname == "SWAP" and self.instructions[next_pc].arg != 2:
+                        # Allow SWAP between BINARY_OP and STORE_* (e.g. for STORE_SUBSCR)
+                        if self.instructions[next_pc].opname == "SWAP" and self.instructions[next_pc].arg not in (2, 3):
                             break
                         next_pc += 1
+
                     if (next_pc < len(self.instructions) and
                             self.instructions[next_pc].opname in (
-                                "STORE_NAME", "STORE_FAST", "STORE_GLOBAL", "STORE_ATTR", "STORE_DEREF"
+                                "STORE_NAME", "STORE_FAST", "STORE_GLOBAL", "STORE_ATTR", "STORE_DEREF", "STORE_SUBSCR"
                     )):
-                        store_name = str(self.instructions[next_pc].argval)
-                        left_name = str(left).split(".")[-1]  # handle attr access
-                        if store_name == left_name or str(left) == store_name or str(left).endswith("." + store_name):
+                        instr_store = self.instructions[next_pc]
+                        if instr_store.opname == "STORE_SUBSCR":
+                             # For subscripts, assume match if left looks like a subscript
+                             is_match = "[" in str(left) and str(left).endswith("]")
+                        else:
+                             store_name = str(instr_store.argval)
+                             left_name = str(left).split(".")[-1]  # handle attr access
+                             is_match = (store_name == left_name or str(left) == store_name or str(left).endswith("." + store_name))
+
+                        if is_match:
                             # Emit augmented assignment, skip the STORE
-                            if self.instructions[next_pc].opname == "STORE_ATTR" and self.stack:
+                            if instr_store.opname == "STORE_ATTR" and self.stack:
                                 self.stack.pop() # pop defensive receiver
                             self._append_reconstructed(f"{left} {inplace_op} {right}")
                             self.pc = next_pc + 1  # consume the STORE
@@ -6932,7 +6960,7 @@ def get_decompiler(filepath: str, beautification_level: str = 'core') -> Decompi
         dec = Decompiler311Plus(code_obj, beautification_level=beautification_level, target_version=target_version)
     else:
         # Fallback for very old or unrecognised versions
-        dec = DecompilerGeneric(code_obj, target_version=target_version)
+        dec = DecompilerGeneric(code_obj, target_version=target_version, beautification_level=beautification_level)
         
     return dec
 

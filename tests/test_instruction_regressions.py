@@ -40,11 +40,11 @@ class TestRegressionsApril(unittest.TestCase):
 
     def test_complex_fstring(self):
         # Issue 3: f"({expr})({', '.join(str(a) for a in args)})"
-        # Using a raw string or triple quotes to avoid quote confusion in the test source
-        src = 'def f(expr, args):\n    return f"({expr})({\', \'.join(str(a) for a in args)})"\n'
+        # Avoid escaped quotes in f-string expressions for <3.12 compatibility
+        src = "def f(expr, args):\n    return f'({expr})({\", \".join(str(a) for a in args)})'\n"
         out = decompile(src)
         # Verify parentheses and join structure
-        self.assertIn('f"({expr})({', out)
+        self.assertIn('({expr})({', out)
         self.assertIn('join(', out)
         self.assertNotIn(")(, '.join", out)
 
