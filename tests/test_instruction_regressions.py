@@ -11,12 +11,14 @@ class TestRegressionsApril(unittest.TestCase):
     - Complex f-string garbling
     - Dict integer keys stringification
     - Loop unpacking with 3.14 combined opcodes
+    - Chained augmented assignment (Issue 1)
+    - Negative integer attribute access (Issue 2)
     """
     
     @classmethod
     def setUpClass(cls):
-        if sys.version_info < (3, 11):
-            raise unittest.SkipTest("Bytecode-dependent decompilation tests only run on Python 3.11+")
+        if sys.version_info < (3, 9):
+            raise unittest.SkipTest("Bytecode-dependent decompilation tests only run on Python 3.9+")
 
 
     def test_ternary_fstring(self):
@@ -62,6 +64,26 @@ class TestRegressionsApril(unittest.TestCase):
         if "for a, b in instrs:" not in out:
             self.assertIn("for (a, b) in instrs:", out, f"Neither 'for a, b in instrs:' nor 'for (a, b) in instrs:' found in out:\n{out}")
         self.assertFalse(bool(re.search(r'\b_item\b', out)), f"Unexpected literal '_item' in output for tests/test_instruction_regressions.py:\n{out}")
+
+    def test_augmented_assign_attr(self):
+        # Issue 1: self.x += 1; self.y -= 1
+        src = 'class C:\n    def f(self):\n        self.x += 1\n        self.y -= 1\n'
+        out = decompile(src)
+        # Verify both statements are separate and not chained
+        self.assertIn("self.x += 1", out)
+        self.assertIn("self.y -= 1", out)
+        self.assertNotIn("(self.x += 1)", out)
+
+    def test_negative_literal_attr(self):
+        # Issue 2: x = [-1].offset
+        src = 'def f(instrs):\n    return instrs[-1].offset\n'
+        out = decompile(src)
+        # Verify parentheses are present for literal -1 but not necessarily for variable index
+        self.assertIn("[-1].offset", out)
+
+        src2 = 'def f():\n    return (-1).offset\n'
+        out2 = decompile(src2)
+        self.assertIn("(-1).offset", out2)
 
 if __name__ == "__main__":
     unittest.main()

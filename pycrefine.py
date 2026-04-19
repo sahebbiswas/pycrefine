@@ -1877,7 +1877,10 @@ class DecompilerGeneric(DecompilerBase):
             elif op in ("GET_ATTR", "LOAD_ATTR", "LOAD_METHOD"):
                 if mini_stack:
                     obj = mini_stack.pop()
-                    mini_stack.append(f"{obj}.{ins.argval}")
+                    obj_str = str(obj)
+                    if obj_str.startswith("-") and obj_str[1:].replace(".", "", 1).isdigit():
+                        obj_str = f"({obj_str})"
+                    mini_stack.append(f"{obj_str}.{ins.argval}")
             elif op in ("CALL", "CALL_FUNCTION", "CALL_METHOD"):
                 num = int(ins.arg) if ins.arg is not None else 0
                 args = []
@@ -1921,7 +1924,10 @@ class DecompilerGeneric(DecompilerBase):
                     mini_stack.append(f"not {mini_stack.pop()}")
             elif op in ("UNARY_NEGATIVE",):
                 if mini_stack:
-                    mini_stack.append(f"-{mini_stack.pop()}")
+                    val = mini_stack.pop()
+                    # Wrap the operand in parentheses if it's already an expression
+                    # to keep it safe for subsequent attribute access in the pre-scan.
+                    mini_stack.append(f"(-{val})")
             elif op == "BUILD_SLICE":
                 # Python 3.9: BUILD_SLICE N pops stop,start (and optionally step)
                 argc = ins.arg if ins.arg is not None else 2
@@ -2894,6 +2900,7 @@ class DecompilerGeneric(DecompilerBase):
             # Jumps
             "JUMP_FORWARD": self._op_jump, "JUMP_BACKWARD": self._op_jump,
             "JUMP_ABSOLUTE": self._op_jump,
+            "SWAP": self._op_stack_manip,
             "POP_JUMP_IF_FALSE": self._op_conditional_jump,
             "POP_JUMP_IF_TRUE": self._op_conditional_jump,
             "JUMP_IF_FALSE_OR_POP": self._op_jump_if_false_or_pop,
@@ -4119,6 +4126,12 @@ class DecompilerGeneric(DecompilerBase):
             c = self.stack.pop()
             d = self.stack.pop()
             self.stack.extend([a, d, c, b])
+        elif opname == "SWAP":
+            n = int(instr.arg) if instr.arg is not None else 0
+            if n > 1 and len(self.stack) >= n:
+                # SWAP n: swap TOS with the n-th element (TOS is 1st)
+                # CPython 3.11 implementation: swap stack[-(1)] with stack[-(n)]
+                self.stack[-1], self.stack[-n] = self.stack[-n], self.stack[-1]
 
     def _op_dup_top(self, instr: BytecodeInstruction):
         opname = instr.opname
@@ -4888,12 +4901,15 @@ class DecompilerGeneric(DecompilerBase):
         # 3.12+ LOAD_ATTR arg is a bitmask. Bit 0 (0x01) means push NULL/self sentinel.
         # This is used for method calls: stack becomes [obj, NULL, func]
         arg = int(instr.arg) if instr.arg is not None else 0
-        if (arg & 1):
+        if (arg & 1) and getattr(self, "target_version", sys.version_info) >= (3, 12):
             self.stack.append(obj)
             self.stack.append(StackNULL(is_method=True))
             self.stack.append(str(instr.argval))
         else:
-            self.stack.append(f"{obj}.{instr.argval}")
+            obj_str = str(obj)
+            if obj_str.startswith("-") and obj_str[1:].replace(".", "", 1).isdigit():
+                obj_str = f"({obj_str})"
+            self.stack.append(f"{obj_str}.{instr.argval}")
 
     def _op_load_super_attr(self, instr: BytecodeInstruction):
         opname = instr.opname
@@ -5498,12 +5514,12 @@ class Decompiler39(DecompilerGeneric):
                 next_pc = self.pc
                 while (next_pc < len(self.instructions)
                        and self.instructions[next_pc].opname in (
-                           "CACHE", "RESUME", "NOP", "NOT_TAKEN"
+                           "CACHE", "RESUME", "NOP", "NOT_TAKEN", "ROT_TWO"
                 )):
                     next_pc += 1
                 if (next_pc < len(self.instructions)
                         and self.instructions[next_pc].opname in (
-                            "STORE_NAME", "STORE_FAST", "STORE_GLOBAL",
+                            "STORE_NAME", "STORE_FAST", "STORE_GLOBAL", "STORE_ATTR", "STORE_DEREF"
                 )):
                     store_name = str(self.instructions[next_pc].argval)
                     left_name = str(left).split(".")[-1]
@@ -6285,15 +6301,18 @@ class Decompiler311Plus(DecompilerGeneric):
                     # to the same name so we can emit `left op= right` directly.
                     next_pc = self.pc  # pc already past current instr
                     while (next_pc < len(self.instructions) and
-                           self.instructions[next_pc].opname in ("CACHE", "RESUME", "NOT_TAKEN")):
+                           self.instructions[next_pc].opname in ("CACHE", "RESUME", "NOT_TAKEN", "SWAP")):
+                        # Allow SWAP 2 between BINARY_OP and STORE_*
+                        if self.instructions[next_pc].opname == "SWAP" and self.instructions[next_pc].arg != 2:
+                            break
                         next_pc += 1
                     if (next_pc < len(self.instructions) and
                             self.instructions[next_pc].opname in (
-                                "STORE_NAME", "STORE_FAST", "STORE_GLOBAL", "STORE_ATTR"
+                                "STORE_NAME", "STORE_FAST", "STORE_GLOBAL", "STORE_ATTR", "STORE_DEREF"
                     )):
                         store_name = str(self.instructions[next_pc].argval)
                         left_name = str(left).split(".")[-1]  # handle attr access
-                        if store_name == left_name or str(left).endswith(store_name):
+                        if store_name == left_name or str(left) == store_name or str(left).endswith("." + store_name):
                             # Emit augmented assignment, skip the STORE
                             self._append_reconstructed(f"{left} {inplace_op} {right}")
                             self.pc = next_pc + 1  # consume the STORE
