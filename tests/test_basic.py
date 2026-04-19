@@ -150,8 +150,8 @@ class TestComprehensions(unittest.TestCase):
         src = "def f(items):\n    return [x * 2 for x in items if x > 0]\n"
         out = decompile(src)
         if sys.version_info >= (3, 12):
-            self.assertIn("yield (x * 2)", out)
-            self.assertNotIn("append", out)
+            self.assertIn(".append((x * 2))", out)
+            self.assertNotIn("yield", out)
         else:
             self.assertTrue("[x * 2 for x in items if x > 0]" in out or "[(x * 2) for x in items if x > 0]" in out)
 
@@ -159,7 +159,8 @@ class TestComprehensions(unittest.TestCase):
         src = "def h(items):\n    return {k: v for k, v in items}\n"
         out = decompile(src)
         if sys.version_info >= (3, 12):
-            self.assertTrue("yield k: v" in out or "yield (k: v)" in out)
+            self.assertIn("_res[k] = v", out)
+            self.assertNotIn("yield", out)
         else:
             self.assertIn("{k: v for k, v in items}", out)
 
@@ -167,7 +168,8 @@ class TestComprehensions(unittest.TestCase):
         src = "def g(items):\n    return {x for x in items}\n"
         out = decompile(src)
         if sys.version_info >= (3, 12):
-            self.assertTrue("yield x" in out)
+            self.assertIn(".add(x)", out)
+            self.assertNotIn("yield", out)
         else:
             self.assertIn("{x for x in items}", out)
 

@@ -2865,7 +2865,7 @@ class DecompilerGeneric(DecompilerBase):
             # Exceptions
             "RAISE_VARARGS": self._op_raise_varargs, "PUSH_EXC_INFO": self._op_push_exc_info,
             "CHECK_EXC_MATCH": self._op_check_exc_match, "POP_EXCEPT": self._op_cleanup,
-            "RERAISE": self._op_cleanup, "COPY": self._op_cleanup,
+            "RERAISE": self._op_cleanup,
             "SETUP_FINALLY": self._op_setup_finally, "SETUP_EXCEPT": self._op_setup_finally,
             "SETUP_WITH": self._op_setup_with, "BEFORE_WITH": self._op_before_with,
             "WITH_EXCEPT_START": self._op_with_except_start, "BEGIN_FINALLY": self._op_with_except_start,
@@ -2891,6 +2891,7 @@ class DecompilerGeneric(DecompilerBase):
 
             # Stack manip
             "ROT_TWO": self._op_stack_manip, "ROT_THREE": self._op_stack_manip, "ROT_FOUR": self._op_stack_manip,
+            "COPY": self._op_stack_manip, "SWAP": self._op_stack_manip,
             "DUP_TOP": self._op_dup_top, "DUP_TOP_TWO": self._op_dup_top,
 
             # Strings
@@ -2900,7 +2901,6 @@ class DecompilerGeneric(DecompilerBase):
             # Jumps
             "JUMP_FORWARD": self._op_jump, "JUMP_BACKWARD": self._op_jump,
             "JUMP_ABSOLUTE": self._op_jump,
-            "SWAP": self._op_stack_manip,
             "POP_JUMP_IF_FALSE": self._op_conditional_jump,
             "POP_JUMP_IF_TRUE": self._op_conditional_jump,
             "JUMP_IF_FALSE_OR_POP": self._op_jump_if_false_or_pop,
@@ -4132,6 +4132,11 @@ class DecompilerGeneric(DecompilerBase):
                 # SWAP n: swap TOS with the n-th element (TOS is 1st)
                 # CPython 3.11 implementation: swap stack[-(1)] with stack[-(n)]
                 self.stack[-1], self.stack[-n] = self.stack[-n], self.stack[-1]
+        elif opname == "COPY":
+            n = int(instr.arg) if instr.arg is not None else 0
+            if n >= 1 and len(self.stack) >= n:
+                # COPY n: push a copy of the n-th element to TOS
+                self.stack.append(self.stack[-n])
 
     def _op_dup_top(self, instr: BytecodeInstruction):
         opname = instr.opname
@@ -4838,11 +4843,52 @@ class DecompilerGeneric(DecompilerBase):
                 self.stack.append(f"[*{lst}, *{it}]")
 
     def _op_list_append(self, instr: BytecodeInstruction):
-        val = self.stack.pop() if self.stack else "None"
+        val = str(self.stack.pop()) if self.stack else "None"
+        i = int(instr.arg) if instr.arg is not None else 1
+        in_loop = any(b[1] in ("for", "while") for b in self.blocks)
+        
+        if len(self.stack) >= i:
+            target = str(self.stack[-i])
+            if not in_loop:
+                if target == "[]":
+                    self.stack[-i] = f"[{val}]"
+                    return
+                elif target.startswith("[") and target.endswith("]"):
+                    inner = target[1:-1]
+                    self.stack[-i] = f"[{inner + (', ' if inner else '') + val}]"
+                    return
+            
+            is_comp = self.code_obj.co_name in ("<listcomp>", "<setcomp>", "<dictcomp>", "<genexpr>")
+            if not is_comp and not (self.code_obj.co_flags & 0x20):
+                # Ordinary function: use .append()
+                if target == "[]" or target == "_item" or target.startswith("[") or target.startswith("("):
+                    target = "_res"
+                self._append_reconstructed(f"{target}.append({val})")
+                return
         self._append_reconstructed(f"yield {val}")
 
     def _op_set_add(self, instr: BytecodeInstruction):
-        val = self.stack.pop() if self.stack else "None"
+        val = str(self.stack.pop()) if self.stack else "None"
+        i = int(instr.arg) if instr.arg is not None else 1
+        in_loop = any(b[1] in ("for", "while") for b in self.blocks)
+
+        if len(self.stack) >= i:
+            target = str(self.stack[-i])
+            if not in_loop:
+                if target == "set()" or target == "{}":
+                    self.stack[-i] = f"{{{val}}}"
+                    return
+                elif target.startswith("{") and target.endswith("}"):
+                    inner = target[1:-1]
+                    self.stack[-i] = f"{{{inner + (', ' if inner else '') + val}}}"
+                    return
+
+            is_comp = self.code_obj.co_name in ("<listcomp>", "<setcomp>", "<dictcomp>", "<genexpr>")
+            if not is_comp and not (self.code_obj.co_flags & 0x20):
+                if target == "set()" or target == "{}" or target.startswith("{") or target.startswith("("):
+                    target = "_res"
+                self._append_reconstructed(f"{target}.add({val})")
+                return
         self._append_reconstructed(f"yield {val}")
 
     def _op_set_update(self, instr: BytecodeInstruction):
@@ -4868,8 +4914,28 @@ class DecompilerGeneric(DecompilerBase):
                 self.stack.append(val)
 
     def _op_map_add(self, instr: BytecodeInstruction):
-        val = self.stack.pop() if self.stack else "None"
-        key = self.stack.pop() if self.stack else "None"
+        val = str(self.stack.pop()) if self.stack else "None"
+        key = str(self.stack.pop()) if self.stack else "None"
+        i = int(instr.arg) if instr.arg is not None else 1
+        in_loop = any(b[1] in ("for", "while") for b in self.blocks)
+        
+        if len(self.stack) >= i:
+            target = str(self.stack[-i])
+            if not in_loop:
+                if target == "{}":
+                    self.stack[-i] = f"{{{key}: {val}}}"
+                    return
+                elif target.startswith("{") and target.endswith("}"):
+                    inner = target[1:-1]
+                    self.stack[-i] = f"{{{inner + (', ' if inner else '') + key}: {val}}}"
+                    return
+
+            is_comp = self.code_obj.co_name in ("<listcomp>", "<setcomp>", "<dictcomp>", "<genexpr>")
+            if not is_comp and not (self.code_obj.co_flags & 0x20):
+                if target == "{}" or target.startswith("{") or target.startswith("("):
+                    target = "_res"
+                self._append_reconstructed(f"{target}[{key}] = {val}")
+                return
         self._append_reconstructed(f"yield {key}: {val}")
 
     def _op_dict_merge(self, instr: BytecodeInstruction):
@@ -4912,11 +4978,21 @@ class DecompilerGeneric(DecompilerBase):
             self.stack.append(f"{obj_str}.{instr.argval}")
 
     def _op_load_super_attr(self, instr: BytecodeInstruction):
-        opname = instr.opname
+        # LOAD_SUPER_ATTR pops 3: [global_super, class, self/class]
+        for _ in range(3):
+            if self.stack:
+                self.stack.pop()
+        
         name = str(instr.argval)
         if " + " in name:
             name = name.split(" + ")[0]
-        self.stack.append(f"super().{name}")
+        
+        if instr.arg is not None and (instr.arg & 1):
+             # Method call: push sentinel then the method name
+             self.stack.append("__SENTINEL_NULL__")
+             self.stack.append(f"super().{name}")
+        else:
+             self.stack.append(f"super().{name}")
 
     def _op_load_from_dict_or_globals(self, instr: BytecodeInstruction):
         opname = instr.opname

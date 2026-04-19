@@ -85,5 +85,22 @@ class TestRegressionsApril(unittest.TestCase):
         out2 = decompile(src2)
         self.assertIn("(-1).offset", out2)
 
+    def test_inline_listcomp(self):
+        # Issue 6: list comprehension in ordinary function
+        src = 'def f(items):\n    res = [x.upper() for x in items]\n    return res\n'
+        out = decompile(src)
+        # In 3.12+ this is inlined. Our fix should prevent 'yield' and use '.append'
+        self.assertNotIn("yield", out)
+        # It might be reconstructed as a loop or a comprehension depending on beautification
+        # But it should definitely NOT be a generator.
+    def test_super_method_call(self):
+        # Issue 13: super().method() was corrupted
+        src = 'def f(self):\n    return super().f()\n'
+        # super() outside class works for compilation if we don't run it
+        out = decompile(src)
+        self.assertIn("super().f()", out)
+        self.assertNotIn("self(super().f", out)
+
+
 if __name__ == "__main__":
     unittest.main()
