@@ -143,8 +143,8 @@ class TestOperators(unittest.TestCase):
 
 
 class TestComprehensions(unittest.TestCase):
-    """Verifies that comprehensions decompile as expected using the yield representation
-    for LIST_APPEND, SET_ADD, MAP_ADD inside inline comprehensions."""
+    """Verifies that comprehensions decompile as expected using explicit mutator calls
+    (.append, .add, [k]=v) for inlined comprehensions on Python 3.12+."""
 
     def test_list_comprehension_yield(self):
         src = "def f(items):\n    return [x * 2 for x in items if x > 0]\n"

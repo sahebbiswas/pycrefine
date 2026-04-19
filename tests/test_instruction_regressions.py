@@ -85,17 +85,24 @@ class TestRegressionsApril(unittest.TestCase):
         out2 = decompile(src2)
         self.assertIn("(-1).offset", out2)
 
+    def test_negative_literal_method(self):
+        # (-1).method()
+        src = 'def f(x):\n    return (-1).bit_length()\n'
+        out = decompile(src)
+        self.assertIn("(-1).bit_length()", out)
+
     def test_inline_listcomp(self):
         # Issue 6: list comprehension in ordinary function
         src = 'def f(items):\n    res = [x.upper() for x in items]\n    return res\n'
         out = decompile(src)
         # In 3.12+ this is inlined. Our fix should prevent 'yield' and use '.append'
-        self.assertNotIn("yield", out)
+        if sys.version_info >= (3, 12):
+            self.assertNotIn("yield", out)
         # It might be reconstructed as a loop or a comprehension depending on beautification
         # But it should definitely NOT be a generator.
     def test_super_method_call(self):
         # Issue 13: super().method() was corrupted
-        src = 'def f(self):\n    return super().f()\n'
+        src = 'class A:\n    def f(self):\n        return super().f()\n'
         # super() outside class works for compilation if we don't run it
         out = decompile(src)
         self.assertIn("super().f()", out)

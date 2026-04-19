@@ -17,50 +17,32 @@ These issues prevent the decompiled file from being parsed by Python at all.
 
 ---
 
-### Issue 1 — Chained augmented-assign expression (37 sites)
-**Track B | Priority: P0-C**
+### Issue 1 — Chained augmented-assign expression (FIXED)
+**Track B | Priority: P0-C** *(Historical context)*
 
-Consecutive `self.x += n` / `self.y -= n` statements are fused into a single chained attribute-mutation expression. Python does not allow augmented assignment as an expression.
+Consecutive augmented assignment statements were fused into single invalid expressions.
 
-**Source:**
-```python
-self.indent_level -= 1
-self._append_reconstructed("else:")
-self.indent_level += 1
-self.blocks.append((else_end, "else"))
-```
+**Current Status:** FIXED in v2. The decompiler now correctly detects when an augmented assignment result is the end of a statement (followed by a store) and emits it as a standalone statement, advancing the program counter past the store. Defensive stack-popping for `STORE_ATTR` prevents residual receivers from leaking into subsequent lines.
 
-**Decompiled output:**
+**Historical Decompiled output:**
 ```python
 self._append_reconstructed('else:')
 (self.indent_level += 1).indent_level = (self.indent_level -= 1)
-self.blocks.append((else_end, 'else'))
 ```
-
-**Root cause:** When `INPLACE_ADD`/`INPLACE_SUBTRACT` produces a value that is left on the virtual stack and a subsequent `STORE_ATTR` consumes it, the decompiler treats the augmented-assign result as an object to attribute-store into rather than discarding it with `POP_TOP`.
-
-**Impact:** `SyntaxError` at 37 sites across `_handle_instruction`, `_op_conditional_jump`, `_op_with`, `_op_for_iter`, and related methods. Every affected method fails to compile.
 
 ---
 
-### Issue 2 — Negative integer attribute access (2 sites)
-**Track B | Priority: P2-B**
+### Issue 2 — Negative integer attribute access (FIXED)
+**Track B | Priority: P2-B** *(Historical context)*
 
-Attribute access on a negative integer literal is rendered as a float literal, producing an `invalid decimal literal` syntax error.
+Attribute access on negative numeric literals produced invalid decimal literals like `-1.offset`.
 
-**Source:**
-```python
-end_off = instrs[-1].offset + 2
-```
+**Current Status:** FIXED. Implementation in `_op_load_attr` and `_op_call` now uses `_wrap_negative_literal()` to ensure negative literals are parenthesized: `(-1).offset` or `(-1).method()`.
 
-**Decompiled output:**
+**Historical Decompiled output:**
 ```python
 end_off = -1.offset + 2
 ```
-
-**Root cause:** The decompiler reconstructs `UNARY_NEGATIVE` applied to `LOAD_CONST 1` followed by `BINARY_SUBSCR` and `LOAD_ATTR offset` as a single token `-1.offset` rather than wrapping the subscript: `(instrs[-1]).offset`.
-
-**Impact:** `SyntaxError: invalid decimal literal` at lines 1511 and 1554. Both are inside `_prescan_try_structure`, corrupting all try/except structure pre-scanning.
 
 ---
 
@@ -160,36 +142,26 @@ msg += f"""
 
 ---
 
-### Issue 6 — `yield` in non-generator functions (145 sites)
-**Track A | Priority: P0-A** *(source bug faithfully reproduced)*
+### Issue 6 — `yield` in non-generator functions (FIXED)
+**Track A | Priority: P0-A** *(Historical context)*
 
-`LIST_APPEND`, `SET_ADD`, and `MAP_ADD` handlers unconditionally emit `yield val` / `yield key: val`. In Python 3.12 these opcodes appear inline in ordinary methods (not in nested code objects), converting every method that contains a comprehension or a large dict literal into a generator.
+`LIST_APPEND`, `SET_ADD`, and `MAP_ADD` handlers used to unconditionally emit `yield val`. In Python 3.12 these opcodes appear inline in ordinary methods, causing silent semantic corruption.
 
-**Source handler (`_op_list_append` in pycrefine_v2.py):**
-```python
-def _op_list_append(self, instr):
-    val = self.stack.pop() if self.stack else "None"
-    self._append_reconstructed(f"yield {val}")   # ← always yields
-```
+**Current Status:** FIXED. The handlers now correctly distinguish between inline comprehensions (in non-generator functions) and actual generator code objects. The `CO_GENERATOR` flag check was removed from the non-comprehension path, allowing regular Functions with inlined comprehensions to use `.append()` / `.add()` / `[]=` correctly.
 
-**Effect on a method containing `[x for x in items]`:**
+**Historical Effect on a method containing `[x for x in items]`:**
 ```python
 # Original method (regular function)
 def greet(name):
     items = [x.upper() for x in name.split()]
     return ", ".join(items)
 
-# Decompiled output (converted to generator)
+# Decompiled output (PRE-FIX: converted to generator)
 def greet(name):
-    for x in []:          # empty — BUILD_LIST(0) misread
-        yield x.upper()   # LIST_APPEND → yield
-    items = name.split()  # restores last loop variable, not the list
-    return ', '.join(items)
+    for x in []:
+        yield x.upper()
+    # items = ...
 ```
-
-**Root cause:** Python 3.12 inlines comprehensions into the parent function's bytecode using `BUILD_LIST(0)` + `LOAD_FAST_AND_CLEAR` + `SWAP` as a setup sequence, with `LIST_APPEND`/`SET_ADD`/`MAP_ADD` per iteration. The handlers were written for Python 3.9 where comprehensions compile to separate code objects containing `YIELD_VALUE`. The handlers need to detect whether the enclosing context is an inline comprehension frame and accumulate instead of yielding.
-
-**Impact:** 13 methods in `DecompilerGeneric`, 3 in subclasses, and 2 in `MarshalParser` are converted to generators. Callers receive generator objects instead of return values, breaking every call site silently. 25 list comps, 9 set comps, and 3 dict comps are destroyed.
 
 ---
 
@@ -326,34 +298,19 @@ _OPCODES_39 = {**{**{**{**{**{**{**{}, **{}}, **{}}, **{}}, **{}}, **{}}, **{}},
 
 ---
 
-### Issue 11 — All `super()` method calls corrupted (12 sites)
-**Track B | Priority: B1**
+### Issue 11 — All `super()` method calls corrupted (FIXED)
+**Track B | Priority: B1** *(Historical context)*
 
-Every `super().method(args)` call is reconstructed as `self(super().method, args)` — passing the method as an argument to `self` rather than calling it.
+`super().method(args)` calls were incorrectly reconstructed as `self(super().method, args)`.
 
-**Source:**
-```python
-class Decompiler39(DecompilerGeneric):
-    def __init__(self, code_obj, indent_level=0, beautification_level='core'):
-        super().__init__(code_obj, indent_level, beautification_level)
+**Current Status:** FIXED. Added specialized `_op_load_super_attr` handler and updated `_op_call` to correctly handle the stack layout of `LOAD_SUPER_ATTR` (including NULL sentinels). Reconstructions now correctly yield `super().method(args)`.
 
-    def _prescan_try_structure(self):
-        super()._prescan_try_structure()
-```
-
-**Decompiled output:**
+**Historical Decompiled output:**
 ```python
 class Decompiler39(DecompilerGeneric):
     def __init__(self, code_obj, indent_level=0, beautification_level='core'):
         self(super().__init__, code_obj, indent_level, beautification_level)
-
-    def _prescan_try_structure(self):
-        self(super()._prescan_try_structure)
 ```
-
-**Root cause:** `LOAD_SUPER_ATTR` loads both `super()` and the looked-up bound method onto the stack. The decompiler reconstructs this as a `CALL` where `self` is the callable and `super().method` is the first argument, rather than recognising the `LOAD_SUPER_ATTR` pattern and emitting `super().method(...)` directly.
-
-**Impact:** `TypeError: 'DecompilerXxx' object is not callable` on instantiation of `Decompiler39`, `Decompiler311Plus`, and `Decompiler314`. Only `DecompilerGeneric` (the base class) can be instantiated — Python 3.9 and 3.11–3.14 decompilation paths are completely unavailable.
 
 ---
 
@@ -1568,10 +1525,14 @@ Only emit a `while` header when the backward jump target is recorded in `self._w
 
 When `CONTAINS_OP` is applied to a value that was produced by loading a `dict`-type variable, emit `k in d`. Do not conflate with `for k, v in d.items()`.
 
-#### B7: Parenthesise negative integer subscripts
+#### B7: Parenthesize numeric literal attribute access and negative subscripts
 
-When `UNARY_NEGATIVE` is applied to an integer and the result is used as a `BINARY_SUBSCR` index, emit `(expr[-n])` with the subscript wrapped in parentheses before any attribute access:
-- `instrs[-1].offset` → emit as `(instrs[-1]).offset`
+Attribute access on negative numeric literals (integers or floats) or complex subscript expressions requires parentheses to avoid SyntaxError:
+- `(-1).offset`
+- `(-1).method()`
+- `(instrs[-1]).offset`
+
+*   **Fix:** Implementations in `_op_load_attr` and `_op_call` now explicitly check for negative numeric literals and wrap them. Subscript-parenthesization is handled by ensuring expressions containing unary operators are wrapped before attribute access.
 
 #### B8: `SETUP_ANNOTATIONS` + `STORE_ANNOTATION` → dataclass field
 

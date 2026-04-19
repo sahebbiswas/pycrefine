@@ -711,17 +711,18 @@ class StackNULL:
     def __str__(self): return "__SENTINEL_NULL__"
 
 class DecompilerBase:
-    def __init__(self, code_obj: types.CodeType, indent_level: int = 0, beautification_level: str = 'core'):
+    def __init__(self, code_obj: types.CodeType, indent_level: int = 0, beautification_level: str = 'core', target_version: Optional[Tuple[int, int]] = None):
         self.code_obj = code_obj
         self.instructions: List[BytecodeInstruction] = []
         self.reconstructed: List[str] = []
         self.indent_level = indent_level
-        self.stack = []
+        self.stack: List[Any] = []
         self.instructions = list(code_obj.instructions) if hasattr(code_obj, 'instructions') else []
         self.starts_as_function = indent_level > 0
         self.blocks: List[Tuple[int, str]] = []  # stack of (end_offset, type)
         self.pc = 0
         self.beautification_level = beautification_level
+        self.target_version = target_version or sys.version_info[:2]
 
     def _disassemble(self):
         """Convert code object bytecode into a list of BytecodeInstruction."""
@@ -788,6 +789,17 @@ class DecompilerBase:
             return False
         return True
 
+    def _wrap_negative_literal(self, value: Any) -> str:
+        """
+        Wrap negative numeric literals in parentheses to ensure valid syntax for attribute access or method calls.
+        
+        Example: -1 -> (-1). bit_length()
+        """
+        s = str(value)
+        if s.startswith("-") and s[1:].replace(".", "", 1).isdigit():
+            return f"({s})"
+        return s
+
     def is_compiler_generated_return(self, instr_index: int) -> bool:
         """
         Determine whether the RETURN at the given instruction index is the implicit compiler-inserted `return None`.
@@ -839,7 +851,7 @@ class DecompilerGeneric(DecompilerBase):
     def __init_subclass__(cls, **kw):
         super().__init_subclass__(**kw)
 
-    def __init__(self, code_obj: types.CodeType, indent_level: int = 0, beautification_level: str = 'core'):
+    def __init__(self, code_obj: types.CodeType, indent_level: int = 0, beautification_level: str = 'core', target_version: Optional[Tuple[int, int]] = None):
         """
         Initialize the decompiler state for generic Python bytecode reconstruction.
 
@@ -871,7 +883,7 @@ class DecompilerGeneric(DecompilerBase):
             _pending_finally_merge (Optional[int]): Merge offset currently pending emission, if any.
             _nop_to_push_exc (dict): Mapping from try-entry NOP offsets to the following PUSH_EXC_INFO offset (populated by prescan).
         """
-        super().__init__(code_obj, indent_level, beautification_level)
+        super().__init__(code_obj, indent_level, beautification_level, target_version)
         self.has_doc = False
         # Tracks offsets of while-loop body starts so we can suppress the
         # duplicated condition check emitted at the bottom of 3.11+ while loops.
@@ -2775,7 +2787,7 @@ class DecompilerGeneric(DecompilerBase):
         # Create a sub-instance that shares our code_obj but gets a fresh state
         sub = dec_class.__new__(dec_class)
         # Minimal __init__ — borrow from DecompilerGeneric
-        DecompilerGeneric.__init__(sub, self.code_obj, indent_level=0)
+        DecompilerGeneric.__init__(sub, self.code_obj, indent_level=0, beautification_level=self.beautification_level, target_version=self.target_version)
         # Install the same prescan results so sentinel detection works
         sub._try_nop_offsets = set()
         sub._suppress_push_exc_offsets = set()
@@ -3656,7 +3668,7 @@ class DecompilerGeneric(DecompilerBase):
                 params.append(varkw_name)
 
             dec_class = _pick_decompiler_class(self)
-            dec = dec_class(inner_code, indent_level=1, beautification_level=self.beautification_level)
+            dec = dec_class(inner_code, indent_level=1, beautification_level=self.beautification_level, target_version=self.target_version)
             body = dec.decompile()
             sig = f"def {inner_code.co_name}({', '.join(params)}):"
             
@@ -3993,7 +4005,7 @@ class DecompilerGeneric(DecompilerBase):
             func_val = self.stack.pop() if self.stack else "func"
             if sentinel.is_method and self.stack:
                 obj = self.stack.pop()
-                func_val = f"{obj}.{func_val}"
+                func_val = f"{self._wrap_negative_literal(obj)}.{func_val}"
                 is_method_call = True
         elif self.stack:
             # Pattern 1: Popped name as callable. Sentinel might be on stack.
@@ -4002,7 +4014,7 @@ class DecompilerGeneric(DecompilerBase):
                 self.stack.pop() # pop sentinel
                 if sentinel.is_method and self.stack:
                     obj = self.stack.pop()
-                    func_val = f"{obj}.{func_val}"
+                    func_val = f"{self._wrap_negative_literal(obj)}.{func_val}"
                     is_method_call = True
             elif opname in ("CALL", "CALL_KW"):
                 # Missing NULL sentinel in bound calls (genexprs/lambdas).
@@ -4859,7 +4871,7 @@ class DecompilerGeneric(DecompilerBase):
                     return
             
             is_comp = self.code_obj.co_name in ("<listcomp>", "<setcomp>", "<dictcomp>", "<genexpr>")
-            if not is_comp and not (self.code_obj.co_flags & 0x20):
+            if not is_comp:
                 # Ordinary function: use .append()
                 if target == "[]" or target == "_item" or target.startswith("[") or target.startswith("("):
                     target = "_res"
@@ -4884,7 +4896,7 @@ class DecompilerGeneric(DecompilerBase):
                     return
 
             is_comp = self.code_obj.co_name in ("<listcomp>", "<setcomp>", "<dictcomp>", "<genexpr>")
-            if not is_comp and not (self.code_obj.co_flags & 0x20):
+            if not is_comp:
                 if target == "set()" or target == "{}" or target.startswith("{") or target.startswith("("):
                     target = "_res"
                 self._append_reconstructed(f"{target}.add({val})")
@@ -4931,7 +4943,7 @@ class DecompilerGeneric(DecompilerBase):
                     return
 
             is_comp = self.code_obj.co_name in ("<listcomp>", "<setcomp>", "<dictcomp>", "<genexpr>")
-            if not is_comp and not (self.code_obj.co_flags & 0x20):
+            if not is_comp:
                 if target == "{}" or target.startswith("{") or target.startswith("("):
                     target = "_res"
                 self._append_reconstructed(f"{target}[{key}] = {val}")
@@ -4967,15 +4979,12 @@ class DecompilerGeneric(DecompilerBase):
         # 3.12+ LOAD_ATTR arg is a bitmask. Bit 0 (0x01) means push NULL/self sentinel.
         # This is used for method calls: stack becomes [obj, NULL, func]
         arg = int(instr.arg) if instr.arg is not None else 0
-        if (arg & 1) and getattr(self, "target_version", sys.version_info) >= (3, 12):
+        if (arg & 1) and self.target_version >= (3, 12):
             self.stack.append(obj)
             self.stack.append(StackNULL(is_method=True))
             self.stack.append(str(instr.argval))
         else:
-            obj_str = str(obj)
-            if obj_str.startswith("-") and obj_str[1:].replace(".", "", 1).isdigit():
-                obj_str = f"({obj_str})"
-            self.stack.append(f"{obj_str}.{instr.argval}")
+            self.stack.append(f"{self._wrap_negative_literal(obj)}.{instr.argval}")
 
     def _op_load_super_attr(self, instr: BytecodeInstruction):
         # LOAD_SUPER_ATTR pops 3: [global_super, class, self/class]
@@ -5600,6 +5609,8 @@ class Decompiler39(DecompilerGeneric):
                     store_name = str(self.instructions[next_pc].argval)
                     left_name = str(left).split(".")[-1]
                     if store_name == left_name or str(left) == store_name or str(left).endswith("." + store_name):
+                        if self.instructions[next_pc].opname == "STORE_ATTR" and self.stack:
+                            self.stack.pop() # pop defensive receiver
                         self._append_reconstructed(f"{left} {op} {right}")
                         self.pc = next_pc + 1  # consume the STORE
                         return
@@ -6390,6 +6401,8 @@ class Decompiler311Plus(DecompilerGeneric):
                         left_name = str(left).split(".")[-1]  # handle attr access
                         if store_name == left_name or str(left) == store_name or str(left).endswith("." + store_name):
                             # Emit augmented assignment, skip the STORE
+                            if self.instructions[next_pc].opname == "STORE_ATTR" and self.stack:
+                                self.stack.pop() # pop defensive receiver
                             self._append_reconstructed(f"{left} {inplace_op} {right}")
                             self.pc = next_pc + 1  # consume the STORE
                             return
@@ -6904,22 +6917,22 @@ def get_decompiler(filepath: str, beautification_level: str = 'core') -> Decompi
             msg += f" (Inferred version: Python {input_ver})"
         raise ValueError(msg)
 
-    # corrected dispatch table
-    if 3410 <= version_id <= 3429:      # 3.9
-        dec = Decompiler39(code_obj, beautification_level=beautification_level)
-    elif version_id >= 3560:            # 3.14+
-        dec = Decompiler314(code_obj, beautification_level=beautification_level)
-    elif version_id >= 3430:            # 3.10, 3.11, 3.12, 3.13
-        dec = Decompiler311Plus(code_obj, beautification_level=beautification_level)
-    else:
-        # Fallback for very old or unrecognised versions
-        dec = DecompilerGeneric(code_obj)
-        
     tv_str = _get_python_version_from_magic(version_id)
     if tv_str:
-        dec.target_version = tuple(map(int, tv_str.replace('+', '').split('.')))
+        target_version = tuple(map(int, tv_str.replace('+', '').split('.')))
     else:
-        dec.target_version = sys.version_info[:2]
+        target_version = sys.version_info[:2]
+
+    # corrected dispatch table
+    if 3410 <= version_id <= 3429:      # 3.9
+        dec = Decompiler39(code_obj, beautification_level=beautification_level, target_version=target_version)
+    elif version_id >= 3560:            # 3.14+
+        dec = Decompiler314(code_obj, beautification_level=beautification_level, target_version=target_version)
+    elif version_id >= 3430:            # 3.10, 3.11, 3.12, 3.13
+        dec = Decompiler311Plus(code_obj, beautification_level=beautification_level, target_version=target_version)
+    else:
+        # Fallback for very old or unrecognised versions
+        dec = DecompilerGeneric(code_obj, target_version=target_version)
         
     return dec
 
