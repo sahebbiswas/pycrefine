@@ -5987,9 +5987,29 @@ class Decompiler39(DecompilerGeneric):
                             is_finally_pop = True
 
                 _closing_exc_cleanup = self.blocks[-1][1] == "exc_cleanup"
+
+                # ── Empty try body: emit `pass` if needed ────────────────────
+                # Python 3.9 compiles `try: pass` to SETUP_FINALLY → POP_BLOCK with
+                # no intervening instructions. The decompiler has opened the block
+                # (emitted "try:") but never emitted a body line — the output would
+                # be a bare "try:" with no body, which is a SyntaxError. Detect this
+                # by checking whether the last non-blank reconstructed line is still
+                # a block-opening header and we are about to close the block.
+                if not _closing_exc_cleanup:
+                    last_non_blank = next(
+                        (self.reconstructed[li] for li in range(len(self.reconstructed) - 1, -1, -1)
+                         if self.reconstructed[li].strip()),
+                        ""
+                    ).strip()
+                    # Block headers that need at least one body statement
+                    _BLOCK_HEADERS = ("try:", "if ", "elif ", "else:", "for ", "while ", "finally:", "with ")
+                    if last_non_blank.endswith(":") and any(last_non_blank.startswith(h) for h in _BLOCK_HEADERS):
+                        self._append_reconstructed("pass")
+
                 self.blocks.pop()
                 if not _closing_exc_cleanup:
                     self.indent_level -= 1
+
 
             elif self.blocks and self.blocks[-1][1] == "finally_wrapper":
                 finally_target = self.blocks[-1][0]
