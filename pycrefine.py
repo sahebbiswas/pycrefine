@@ -1540,6 +1540,25 @@ class DecompilerGeneric(DecompilerBase):
         """Heuristic: Return True if any instruction loads a string constant containing a literal newline."""
         return any("CONST" in x.opname and isinstance(x.argval, str) and "\n" in x.argval for x in instrs)
 
+    def _format_fstring_part(self, p: str) -> str:
+        """Unwrap a string fragment (which might be a literal) and escape it for inclusion in an f-string."""
+        is_literal = False
+        if p.startswith('"""') and p.endswith('"""') and len(p) >= 6:
+            p = p[3:-3]
+            is_literal = True
+        elif p.startswith("'''") and p.endswith("'''") and len(p) >= 6:
+            p = p[3:-3]
+            is_literal = True
+        elif len(p) >= 2 and p[0] == p[-1] and p[0] in ("'", '"'):
+            p = p[1:-1]
+            is_literal = True
+            
+        if is_literal:
+            p = p.replace("{", "{{").replace("}", "}}")
+            p = p.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+            p = p.replace('"', '\\"')
+        return p
+
     # ------------------------------------------------------------------
     # Compound boolean condition pre-scan
     # ------------------------------------------------------------------
@@ -1895,23 +1914,7 @@ class DecompilerGeneric(DecompilerBase):
                     for _ in range(count):
                         if mini_stack:
                             p_val = mini_stack.pop()
-                            p = str(p_val)
-                            # Only unquote and escape if it was a string literal
-                            is_literal = False
-                            if p.startswith('"""') and p.endswith('"""') and len(p) >= 6:
-                                p = p[3:-3]
-                                is_literal = True
-                            elif p.startswith("'''") and p.endswith("'''") and len(p) >= 6:
-                                p = p[3:-3]
-                                is_literal = True
-                            elif len(p) >= 2 and p[0] == p[-1] and p[0] in ("'", '"'):
-                                p = p[1:-1]
-                                is_literal = True
-                                
-                            if is_literal:
-                                p = p.replace("{", "{{").replace("}", "}}")
-                                p = p.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
-                                p = p.replace('"', '\\"')
+                            p = self._format_fstring_part(str(p_val))
                             parts.insert(0, p)
                     mini_stack.append(f'f"{"".join(parts)}"')
                 elif op in ("BUILD_MAP", "BUILD_CONST_KEY_MAP"):
@@ -2212,6 +2215,10 @@ class DecompilerGeneric(DecompilerBase):
 
         The routine uses available exception-table data when present and falls back to heuristics on older hosts to identify these regions.
         """
+        self._for_iter_targets = {
+            self._get_jump_target(fi) for fi in self.instructions if fi.opname == "FOR_ITER"
+        }
+        
         instrs = self.instructions
         n = len(instrs)
 
@@ -4227,15 +4234,7 @@ class DecompilerGeneric(DecompilerBase):
                 if (p_val is None or str(p_val) == "__SENTINEL_NULL__" or 
                     getattr(p_val, '__class__', None).__name__ == 'StackNULL'):
                     continue
-                p = str(p_val)
-                # Use ast.literal_eval for safe unquoting of literal fragments
-                try:
-                    import ast
-                    p = str(ast.literal_eval(p))
-                    p = p.replace("\\", "\\\\").replace("{", "{{").replace("}", "}}").replace('"', '\\"')
-                    p = p.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
-                except:
-                    pass
+                p = self._format_fstring_part(str(p_val))
                 parts.insert(0, p)
         res = "".join(parts)
         self.stack.append(f"f\"{res}\"")
@@ -5420,7 +5419,7 @@ class Decompiler39(DecompilerGeneric):
                         
                         # Guard: If else_start is the end of a FOR_ITER loop (indicating a `break` out of a loop),
                         # then it is NOT an else clause.
-                        is_break = else_start in _for_iter_targets
+                        is_break = else_start in self._for_iter_targets
                         
                         if else_start > target and not is_break:
                             post_except_targets = []
