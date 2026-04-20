@@ -832,6 +832,7 @@ class TestChainedComparisonSentinel(unittest.TestCase):
         )
         out = decompile(src)
         self.assertNotIn("?", out, "Found leaked ? sentinel in chained comparison")
+        # Ensure it's not emitting multiple duplicated conditions if it can be chained
         self.assertTrue(
             "3410 <= version_id <= 3429" in out or
             ("3410 <= version_id" in out and "version_id <= 3429" in out),
