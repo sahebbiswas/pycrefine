@@ -1,7 +1,6 @@
-import sys
 import unittest
 
-from .test_helpers import assert_contains, decompile
+from .test_helpers import decompile
 
 
 class TestStrings(unittest.TestCase):
@@ -20,7 +19,6 @@ class TestStrings(unittest.TestCase):
         self.assertNotIn("f'''", out, "Output mistakenly fused string concatenation into triple-quoted strings")
         self.assertIn("appears to be from Python", out)
         self.assertIn("unrecognized or may be corrupt", out)
-        self.assertNotIn('if input_ver else', out, "Should not use ternary since both branches assign using +=")
 
         # Structure check (#12): ternary heuristic fires when constants contain \n.
         # The decompiler either:

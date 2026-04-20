@@ -3382,6 +3382,7 @@ class DecompilerGeneric(DecompilerBase):
             self.stack.append("_exc_info")
             return  # defer header to CHECK_EXC_MATCH
         # Bare except (no type check)
+        self.indent_level = indent
         self._append_reconstructed("except:")
         self.indent_level += 1
 
@@ -5071,7 +5072,7 @@ class DecompilerGeneric(DecompilerBase):
         
         if instr.arg is not None and (instr.arg & 1):
              # Method call: push sentinel then the method name
-             self.stack.append(StackNULL(is_method=True))
+             self.stack.append(StackNULL(is_method=False))
              self.stack.append(f"super().{name}")
         else:
              self.stack.append(f"super().{name}")
@@ -5690,6 +5691,9 @@ class Decompiler39(DecompilerGeneric):
                     if self._match_augassign_store(str(left), instr_store):
                         if instr_store.opname == "STORE_ATTR" and self.stack:
                             self.stack.pop()  # pop defensive receiver
+                        if instr_store.opname == "STORE_SUBSCR" and len(self.stack) >= 2:
+                            self.stack.pop()
+                            self.stack.pop()
                         self._append_reconstructed(f"{left} {op} {right}")
                         self.pc = next_pc + 1  # consume the STORE
                         return
@@ -6502,6 +6506,9 @@ class Decompiler311Plus(DecompilerGeneric):
                             # Emit augmented assignment, skip the STORE
                             if instr_store.opname == "STORE_ATTR" and self.stack:
                                 self.stack.pop()  # pop defensive receiver
+                            if instr_store.opname == "STORE_SUBSCR" and len(self.stack) >= 2:
+                                self.stack.pop()
+                                self.stack.pop()
                             self._append_reconstructed(f"{left} {inplace_op} {right}")
                             self.pc = next_pc + 1  # consume the STORE
                             return

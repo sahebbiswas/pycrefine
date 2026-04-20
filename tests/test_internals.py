@@ -717,10 +717,7 @@ class TestSwapCopyStackManip(unittest.TestCase):
         dec = self._make_dec()
         dec.stack = ["only_one"]
         instr = BytecodeInstruction(0, "SWAP", 3, 3, 0, None, False)
-        try:
-            dec._op_stack_manip(instr)
-        except Exception as e:
-            self.fail(f"SWAP with short stack raised unexpectedly: {e}")
+        dec._op_stack_manip(instr)
 
     # ── COPY ────────────────────────────────────────────────────────────────
 
@@ -757,10 +754,7 @@ class TestSwapCopyStackManip(unittest.TestCase):
         dec = self._make_dec()
         dec.stack = ["only_one"]
         instr = BytecodeInstruction(0, "COPY", 3, 3, 0, None, False)
-        try:
-            dec._op_stack_manip(instr)
-        except Exception as e:
-            self.fail(f"COPY with short stack raised unexpectedly: {e}")
+        dec._op_stack_manip(instr)
         # Stack must be unchanged (guard condition fails silently)
         self.assertEqual(dec.stack, ["only_one"])
 
