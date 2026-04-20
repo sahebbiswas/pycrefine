@@ -1145,6 +1145,36 @@ class TestReturnInsideForInsideTry(unittest.TestCase):
             f"'return None' appeared where True was expected:\n{out}")
 
 
+class TestForLoopNestedTrySpuriousElse(unittest.TestCase):
+    def test_for_try_no_spurious_else(self):
+        src = (
+            "def f(inside, depth, balanced):\n"
+            "    for char in inside:\n"
+            "        if char == '(':\n"
+            "            depth += 1\n"
+            "        elif char == ')':\n"
+            "            depth -= 1\n"
+            "        balanced = False\n"
+            "        break\n"
+            "    if balanced and depth == 0:\n"
+            "        try:\n"
+            "            node = ast.parse(inside, mode='eval')\n"
+            "            if not isinstance(node.body, ast.Tuple):\n"
+            "                inner = inside\n"
+            "        except Exception:\n"
+            "            pass\n"
+        )
+        out = decompile(src)
+        self.assertNotIn("else:", [ln.strip() for ln in out.splitlines()], "Spurious else: found in output")
+        # Ensure try/except are correctly aligned
+        lines = out.splitlines()
+        try_lines = [ln for ln in lines if ln.lstrip() == "try:"]
+        except_lines = [ln for ln in lines if ln.lstrip().startswith("except ")]
+        self.assertTrue(try_lines)
+        self.assertTrue(except_lines)
+        try_indent = len(try_lines[-1]) - len(try_lines[-1].lstrip())
+        except_indent = len(except_lines[-1]) - len(except_lines[-1].lstrip())
+        self.assertEqual(try_indent, except_indent, "try/except indentation mismatch")
+
 if __name__ == "__main__":
     unittest.main()
-

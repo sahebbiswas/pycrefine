@@ -54,7 +54,7 @@ _COMPOUND_EXPR_OPS = frozenset((
     "UNARY_NOT", "UNARY_NEGATIVE", "UNARY_POSITIVE", "UNARY_INVERT",
     "BUILD_TUPLE", "BUILD_LIST", "BUILD_SET", "BUILD_MAP",
     "TO_BOOL", "FORMAT_VALUE", "FORMAT_SIMPLE", "BUILD_STRING", "BINARY_SUBSCR", "BINARY_SLICE", "BUILD_SLICE",
-    "DUP_TOP", "DUP_TOP_TWO", "ROT_TWO", "ROT_THREE", "ROT_FOUR",
+    "DUP_TOP", "DUP_TOP_TWO", "ROT_TWO", "ROT_THREE", "ROT_FOUR", "SWAP", "COPY",
     # Python 3.9 binary opcodes:
     "BINARY_ADD", "BINARY_SUBTRACT", "BINARY_MULTIPLY", "BINARY_TRUE_DIVIDE",
     "BINARY_FLOOR_DIVIDE", "BINARY_MODULO", "BINARY_POWER", "BINARY_LSHIFT",
@@ -1336,6 +1336,10 @@ class DecompilerGeneric(DecompilerBase):
                         if not aug_op and "INPLACE_" in lt.opname and lt.opname == le.opname:
                             aug_op = _INPLACE_ASSIGN_MAP.get(lt.opname)
                         if aug_op:
+                            # Heuristic: Avoid merging string concatenations containing newlines
+                            if any("CONST" in x.opname and isinstance(x.argval, str) and "\n" in x.argval
+                                   for x in actual_then_expr + else_instrs):
+                                continue
                             actual_then_expr.pop()
                             else_instrs.pop()
 
@@ -1452,6 +1456,9 @@ class DecompilerGeneric(DecompilerBase):
                     if not aug_op and "INPLACE_" in lt.opname and lt.opname == le.opname:
                         aug_op = _INPLACE_ASSIGN_MAP.get(lt.opname)
                     if aug_op:
+                        if any("CONST" in x.opname and isinstance(x.argval, str) and "\n" in x.argval
+                               for x in before_jf + else_instrs):
+                            continue
                         before_jf.pop()
                         else_instrs.pop()
 
@@ -1511,6 +1518,9 @@ class DecompilerGeneric(DecompilerBase):
                 if not aug_op and "INPLACE_" in lt.opname and lt.opname == le.opname:
                     aug_op = _INPLACE_ASSIGN_MAP.get(lt.opname)
                 if aug_op:
+                    if any("CONST" in x.opname and isinstance(x.argval, str) and "\n" in x.argval
+                           for x in before_store + else_instrs):
+                        continue
                     before_store.pop()
                     else_instrs.pop()
 
@@ -1874,10 +1884,15 @@ class DecompilerGeneric(DecompilerBase):
                     parts = []
                     for _ in range(count):
                         if mini_stack:
-                            p = str(mini_stack.pop())
-                            # Try to strip literal quotes if they exist
-                            if (p.startswith("'") and p.endswith("'")) or (p.startswith('"') and p.endswith('"')):
-                                p = p[1:-1]
+                            p_val = mini_stack.pop()
+                            p = str(p_val)
+                            try:
+                                import ast
+                                p_clean = str(ast.literal_eval(p))
+                                p_clean = p_clean.replace("\\", "\\\\").replace("{", "{{").replace("}", "}}").replace('"', '\\"')
+                                p = p_clean.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+                            except Exception:
+                                pass
                             parts.insert(0, p)
                     mini_stack.append(f'f"{"".join(parts)}"')
                 elif op in ("BUILD_MAP", "BUILD_CONST_KEY_MAP"):
@@ -3298,7 +3313,8 @@ class DecompilerGeneric(DecompilerBase):
             self.indent_level -= 1
 
         # Record the indent at which except headers should be emitted
-        self._except_header_indents.append(self.indent_level)
+        indent = getattr(self, "_pei_indents", {}).get(instr.offset, self.indent_level)
+        self._except_header_indents.append(indent)
         # Peek: is there a LOAD + CHECK_EXC_MATCH coming?
         look = self.pc
         while look < len(self.instructions) and self.instructions[look].opname in (
@@ -4428,6 +4444,10 @@ class DecompilerGeneric(DecompilerBase):
                 already_in_try = any(b[1] in ("try_body",) for b in self.blocks)
                 if not already_in_try or instr.is_jump_target or instr.offset != 2:
                     self._append_reconstructed("try:")
+                    if not hasattr(self, "_pei_indents"):
+                        self._pei_indents = {}
+                    if next_pei > 0:
+                        self._pei_indents[next_pei] = self.indent_level
                     self.indent_level += 1
                     if next_pei > 0:
                         # Use the finally-merge label as block end when present
@@ -5394,11 +5414,22 @@ class Decompiler39(DecompilerGeneric):
                     try_jump = self.instructions[try_end_idx]
                     if try_jump.opname in ("JUMP_FORWARD", "JUMP_ABSOLUTE"):
                         else_start = getattr(self, "_get_jump_target")(try_jump)
-                        if else_start > target:
+                        
+                        # Guard: If else_start is the end of a FOR_ITER loop (indicating a `break` out of a loop),
+                        # then it is NOT an else clause.
+                        is_break = False
+                        for fi in self.instructions:
+                            if fi.opname == "FOR_ITER" and fi.offset < try_jump.offset:
+                                if getattr(self, "_get_jump_target")(fi) == else_start:
+                                    is_break = True
+                                    break
+                        
+                        if else_start > target and not is_break:
                             post_except_targets = []
                             for k in range(try_end_idx + 1, len(self.instructions)):
                                 if self.instructions[k].offset >= else_start:
                                     break
+
                                 inner_ins = self.instructions[k]
                                 if inner_ins.opname in ("JUMP_FORWARD", "JUMP_ABSOLUTE"):
                                     jt = getattr(self, "_get_jump_target")(inner_ins)

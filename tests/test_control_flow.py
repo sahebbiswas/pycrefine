@@ -822,6 +822,21 @@ class TestNestedTryInLoop(unittest.TestCase):
             self.assertFalse(ln.startswith("except"), f"except must not be at function level:\n{out}")
 
 
+class TestChainedComparisonSentinel(unittest.TestCase):
+    def test_chained_comparison_no_sentinel(self):
+        src = (
+            "def _get_python_version_from_magic(version_id):\n"
+            "    if 3410 <= version_id <= 3429:\n"
+            "        return '3.9'\n"
+            "    return None\n"
+        )
+        out = decompile(src)
+        self.assertNotIn("?", out, "Found leaked ? sentinel in chained comparison")
+        self.assertTrue(
+            "3410 <= version_id <= 3429" in out or
+            ("3410 <= version_id" in out and "version_id <= 3429" in out),
+            "Failed to preserve chained comparison logic"
+        )
+
 if __name__ == "__main__":
     unittest.main()
-
