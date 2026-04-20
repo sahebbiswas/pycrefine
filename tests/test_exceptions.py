@@ -56,13 +56,22 @@ class TestExceptions(unittest.TestCase):
         assert_contains(out, "raise ValueError")
 
     def test_raise_in_function(self):
-        out = decompile("def f(x):\n    if x < 0:\n        raise ValueError('bad')\n    return x\n")
+        src = "def f(x):\n    if x < 0:\n        raise ValueError('bad')\n    return x\n"
+        out = decompile(src)
         assert_contains(out, "raise ValueError")
+        try:
+            compile(out, '<test>', 'exec')
+        except SyntaxError as e:
+            self.fail(f"Decompiled raise-in-function output is not valid Python: {e}\n{out}")
 
     def test_raise_from(self):
-        src = "try:\n    pass\nexcept Exception as e:\n    raise RuntimeError('wrap') from e\n"
+        src = "def f():\n    try:\n        pass\n    except Exception as e:\n        raise RuntimeError('wrap') from e\n"
         out = decompile(src)
         assert_contains(out, "raise RuntimeError", "from e")
+        try:
+            compile(out, '<test>', 'exec')
+        except SyntaxError as e:
+            self.fail(f"Decompiled raise-from output is not valid Python: {e}\n{out}")
 
     def test_try_except_finally(self):
         src = (
@@ -1175,6 +1184,11 @@ class TestForLoopNestedTrySpuriousElse(unittest.TestCase):
         try_indent = len(try_lines[-1]) - len(try_lines[-1].lstrip())
         except_indent = len(except_lines[-1]) - len(except_lines[-1].lstrip())
         self.assertEqual(try_indent, except_indent, "try/except indentation mismatch")
+        # Verify output is at minimum syntactically valid Python (#15)
+        try:
+            compile(out, '<test>', 'exec')
+        except SyntaxError as e:
+            self.fail(f"Decompiled for+try output is not valid Python: {e}\n{out}")
 
 if __name__ == "__main__":
     unittest.main()

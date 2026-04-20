@@ -671,5 +671,99 @@ class TestChainedComparisons(unittest.TestCase):
         )
 
 
+class TestSwapCopyStackManip(unittest.TestCase):
+    """Direct unit tests for SWAP and COPY stack-manipulation opcodes (#16).
+
+    These verify the exact post-instruction stack state using a synthetic
+    Decompiler311Plus instance, independent of any higher-level reconstruction.
+    """
+
+    def _make_dec(self):
+        code = compile("pass", "<test>", "exec")
+        return Decompiler311Plus(code)
+
+    # ── SWAP ────────────────────────────────────────────────────────────────
+
+    def test_swap_2_swaps_tos_and_second(self):
+        """SWAP 2 swaps TOS with TOS1 (the 2nd element from top)."""
+        dec = self._make_dec()
+        dec.stack = ["a", "b", "c"]   # TOS = "c", TOS1 = "b"
+        instr = BytecodeInstruction(0, "SWAP", 2, 2, 0, None, False)
+        dec._op_stack_manip(instr)
+        # After SWAP 2: TOS should be old TOS1 and vice versa
+        self.assertEqual(dec.stack, ["a", "c", "b"],
+                         "SWAP 2 must exchange TOS with stack[-2]")
+
+    def test_swap_3_swaps_tos_and_third(self):
+        """SWAP 3 swaps TOS with the 3rd element from the top."""
+        dec = self._make_dec()
+        dec.stack = ["a", "b", "c", "d"]  # TOS = "d", 3rd = "b"
+        instr = BytecodeInstruction(0, "SWAP", 3, 3, 0, None, False)
+        dec._op_stack_manip(instr)
+        self.assertEqual(dec.stack, ["a", "d", "c", "b"],
+                         "SWAP 3 must exchange TOS with stack[-3]")
+
+    def test_swap_1_is_noop(self):
+        """SWAP 1 (swapping TOS with itself) is a no-op."""
+        dec = self._make_dec()
+        dec.stack = ["x", "y"]
+        instr = BytecodeInstruction(0, "SWAP", 1, 1, 0, None, False)
+        dec._op_stack_manip(instr)
+        # SWAP 1: n == 1, condition `n > 1` is False, so no change
+        self.assertEqual(dec.stack, ["x", "y"], "SWAP 1 should be a no-op")
+
+    def test_swap_with_insufficient_stack_is_safe(self):
+        """SWAP n with fewer than n elements must not raise."""
+        dec = self._make_dec()
+        dec.stack = ["only_one"]
+        instr = BytecodeInstruction(0, "SWAP", 3, 3, 0, None, False)
+        try:
+            dec._op_stack_manip(instr)
+        except Exception as e:
+            self.fail(f"SWAP with short stack raised unexpectedly: {e}")
+
+    # ── COPY ────────────────────────────────────────────────────────────────
+
+    def test_copy_1_duplicates_tos(self):
+        """COPY 1 pushes a duplicate of TOS (same as DUP_TOP)."""
+        dec = self._make_dec()
+        dec.stack = ["p", "q"]
+        instr = BytecodeInstruction(0, "COPY", 1, 1, 0, None, False)
+        dec._op_stack_manip(instr)
+        self.assertEqual(dec.stack, ["p", "q", "q"],
+                         "COPY 1 must push a copy of TOS")
+
+    def test_copy_2_duplicates_second(self):
+        """COPY 2 pushes a copy of the 2nd element from the top."""
+        dec = self._make_dec()
+        dec.stack = ["a", "b", "c"]  # stack[-2] = "b"
+        instr = BytecodeInstruction(0, "COPY", 2, 2, 0, None, False)
+        dec._op_stack_manip(instr)
+        self.assertEqual(dec.stack, ["a", "b", "c", "b"],
+                         "COPY 2 must push a copy of stack[-2]")
+
+    def test_copy_does_not_mutate_original(self):
+        """COPY must not alter the position of the copied element."""
+        dec = self._make_dec()
+        dec.stack = ["x", "y", "z"]
+        instr = BytecodeInstruction(0, "COPY", 2, 2, 0, None, False)
+        dec._op_stack_manip(instr)
+        # Element at position -2 ("y") must still be there
+        self.assertEqual(dec.stack[-3], "y",
+                         "COPY must not remove the source element")
+
+    def test_copy_with_insufficient_stack_is_safe(self):
+        """COPY n with fewer than n elements must not raise."""
+        dec = self._make_dec()
+        dec.stack = ["only_one"]
+        instr = BytecodeInstruction(0, "COPY", 3, 3, 0, None, False)
+        try:
+            dec._op_stack_manip(instr)
+        except Exception as e:
+            self.fail(f"COPY with short stack raised unexpectedly: {e}")
+        # Stack must be unchanged (guard condition fails silently)
+        self.assertEqual(dec.stack, ["only_one"])
+
+
 if __name__ == "__main__":
     unittest.main()

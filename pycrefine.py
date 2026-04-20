@@ -710,6 +710,20 @@ class StackNULL:
     def __repr__(self): return "__SENTINEL_NULL__"
     def __str__(self): return "__SENTINEL_NULL__"
 
+class _CollectionAccumSentinel:
+    """Internal sentinel placed on the stack to mark a decompiler-managed collection accumulator.
+
+    Using a typed sentinel (rather than the raw string ``"_res"``) prevents false
+    matches when user code happens to have a variable literally named ``_res``.
+    ``str()`` of the sentinel returns the accumulator name that will appear in the
+    reconstructed source, so downstream ``f"{target}.append(...)"`` calls still
+    produce readable output.
+    """
+    _NAME = "_res"
+
+    def __str__(self): return self._NAME
+    def __repr__(self): return self._NAME
+
 class DecompilerBase:
     def __init__(self, code_obj: types.CodeType, indent_level: int = 0, beautification_level: str = 'core', target_version: Optional[Tuple[int, int]] = None):
         self.code_obj = code_obj
@@ -1558,6 +1572,21 @@ class DecompilerGeneric(DecompilerBase):
             p = p.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
             p = p.replace('"', '\\"')
         return p
+
+    def _match_augassign_store(self, left: str, instr_store: "BytecodeInstruction") -> bool:
+        """Return True if *instr_store* writes back to the same target as *left*.
+
+        Handles all store variants:
+        - ``STORE_SUBSCR``: left must look like a subscript expression ``x[...]``.
+        - All named stores (``STORE_FAST``, ``STORE_NAME``, ``STORE_GLOBAL``,
+          ``STORE_ATTR``, ``STORE_DEREF``): store name must equal the last
+          component of *left* (handles plain names and attribute chains).
+        """
+        if instr_store.opname == "STORE_SUBSCR":
+            return "[" in left and left.endswith("]")
+        store_name = str(instr_store.argval)
+        left_tail = left.split(".")[-1]
+        return store_name == left_tail or left == store_name or left.endswith("." + store_name)
 
     # ------------------------------------------------------------------
     # Compound boolean condition pre-scan
@@ -4904,9 +4933,12 @@ class DecompilerGeneric(DecompilerBase):
 
         i = int(instr.arg) if instr.arg is not None else 1
         in_loop = any(b[1] in ("for", "while") for b in self.blocks)
-        
+
         if len(self.stack) >= i:
-            target = str(self.stack[-i])
+            raw_target = self.stack[-i]
+            target = str(raw_target)
+            already_accum = isinstance(raw_target, _CollectionAccumSentinel)
+
             if not in_loop:
                 if kind == "list":
                     if target == "[]":
@@ -4935,14 +4967,21 @@ class DecompilerGeneric(DecompilerBase):
 
             is_comp = self.code_obj.co_name in ("<listcomp>", "<setcomp>", "<dictcomp>", "<genexpr>")
             if not is_comp:
-                if target != "_res":
-                    if kind == "list": init_val = target if target != "_item" else "[]"
-                    elif kind == "set": init_val = target if target != "_item" else "set()"
-                    else: init_val = target if target != "_item" else "{}"
-                    self._append_reconstructed(f"_res = {init_val}")
-                    self.stack[-i] = "_res"
-                    target = "_res"
-                
+                if not already_accum:
+                    # target is the *user*'s iterable variable, not our accumulator.
+                    # Check whether it was '_item' (the decompiler-generated loop placeholder):
+                    # if so, initialise with an empty literal; otherwise seed from the iterable.
+                    if kind == "list":
+                        init_val = "[]" if target == "_item" else target
+                    elif kind == "set":
+                        init_val = "set()" if target == "_item" else target
+                    else:
+                        init_val = "{}" if target == "_item" else target
+                    sentinel = _CollectionAccumSentinel()
+                    self._append_reconstructed(f"{sentinel} = {init_val}")
+                    self.stack[-i] = sentinel
+                    target = str(sentinel)
+
                 if kind == "list":
                     self._append_reconstructed(f"{target}.append({val})")
                 elif kind == "set":
@@ -4950,7 +4989,7 @@ class DecompilerGeneric(DecompilerBase):
                 else:
                     self._append_reconstructed(f"{target}[{key}] = {val}")
                 return
-                
+
         if kind == "map":
             self._append_reconstructed(f"yield {key}: {val}")
         else:
@@ -5648,16 +5687,9 @@ class Decompiler39(DecompilerGeneric):
                             "STORE_NAME", "STORE_FAST", "STORE_GLOBAL", "STORE_ATTR", "STORE_DEREF", "STORE_SUBSCR"
                 )):
                     instr_store = self.instructions[next_pc]
-                    if instr_store.opname == "STORE_SUBSCR":
-                        is_match = "[" in str(left) and str(left).endswith("]")
-                    else:
-                        store_name = str(instr_store.argval)
-                        left_name = str(left).split(".")[-1]
-                        is_match = (store_name == left_name or str(left) == store_name or str(left).endswith("." + store_name))
-                        
-                    if is_match:
+                    if self._match_augassign_store(str(left), instr_store):
                         if instr_store.opname == "STORE_ATTR" and self.stack:
-                            self.stack.pop() # pop defensive receiver
+                            self.stack.pop()  # pop defensive receiver
                         self._append_reconstructed(f"{left} {op} {right}")
                         self.pc = next_pc + 1  # consume the STORE
                         return
@@ -6446,17 +6478,10 @@ class Decompiler311Plus(DecompilerGeneric):
                                 "STORE_NAME", "STORE_FAST", "STORE_GLOBAL", "STORE_ATTR", "STORE_DEREF", "STORE_SUBSCR"
                     )):
                         instr_store = self.instructions[next_pc]
-                        if instr_store.opname == "STORE_SUBSCR":
-                             is_match = "[" in str(left) and str(left).endswith("]")
-                        else:
-                             store_name = str(instr_store.argval)
-                             left_name = str(left).split(".")[-1]  # handle attr access
-                             is_match = (store_name == left_name or str(left) == store_name or str(left).endswith("." + store_name))
-
-                        if is_match:
+                        if self._match_augassign_store(str(left), instr_store):
                             # Emit augmented assignment, skip the STORE
                             if instr_store.opname == "STORE_ATTR" and self.stack:
-                                self.stack.pop() # pop defensive receiver
+                                self.stack.pop()  # pop defensive receiver
                             self._append_reconstructed(f"{left} {inplace_op} {right}")
                             self.pc = next_pc + 1  # consume the STORE
                             return
