@@ -1176,15 +1176,17 @@ class TestForLoopNestedTrySpuriousElse(unittest.TestCase):
         out = decompile(src)
         lines = out.splitlines()
         for_idx = next((i for i, ln in enumerate(lines) if ln.strip() == "for char in inside:"), -1)
-        if for_idx != -1:
-            for_indent = len(lines[for_idx]) - len(lines[for_idx].lstrip())
-            loop_body = []
-            for ln in lines[for_idx+1:]:
-                if not ln.strip(): continue
-                idx = len(ln) - len(ln.lstrip())
-                if idx <= for_indent: break
-                loop_body.append(ln.strip())
-            self.assertNotIn("else:", loop_body, "Spurious else: found in output loop body")
+        self.assertNotEqual(for_idx, -1, "expected 'for char in inside:' header in output")
+        for_indent = len(lines[for_idx]) - len(lines[for_idx].lstrip())
+        loop_body = []
+        for ln in lines[for_idx+1:]:
+            if not ln.strip():
+                continue
+            idx = len(ln) - len(ln.lstrip())
+            if idx <= for_indent:
+                break
+            loop_body.append(ln.strip())
+        self.assertNotIn("else:", loop_body, "Spurious else: found in output loop body")
         # Ensure try/except are correctly aligned
         lines = out.splitlines()
         try_lines = [ln for ln in lines if ln.lstrip() == "try:"]

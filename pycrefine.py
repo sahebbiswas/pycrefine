@@ -806,16 +806,17 @@ class DecompilerBase:
     def _wrap_negative_literal(self, value: Any) -> str:
         """
         Wrap negative numeric literals in parentheses to ensure valid syntax for attribute access or method calls.
-        
+
         Example: -1 -> (-1). bit_length()
         """
         s = str(value)
         if s.startswith("-"):
-            s_clean = s[1:].replace(".", "", 1)
-            # handle 'e' notation or 'j' complex
-            s_clean = s_clean.replace("e", "0").replace("E", "0").replace("j", "0")
-            if s_clean.isdigit():
-                return f"({s})"
+            try:
+                evaluated = ast.literal_eval(s)
+                if isinstance(evaluated, (int, float, complex)):
+                    return f"({s})"
+            except (ValueError, SyntaxError):
+                pass
         # Also wrap variables with explicit unary minus like (-x) if needed?
         # Only focus on numeric/complex literals that break attr access:
         if s.startswith("(-") and s.endswith(")"):
