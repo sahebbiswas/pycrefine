@@ -719,10 +719,11 @@ class _CollectionAccumSentinel:
     reconstructed source, so downstream ``f"{target}.append(...)"`` calls still
     produce readable output.
     """
-    _NAME = "_res"
+    def __init__(self, name: str = "_res"):
+        self._name = name
 
-    def __str__(self): return self._NAME
-    def __repr__(self): return self._NAME
+    def __str__(self): return self._name
+    def __repr__(self): return self._name
 
 class DecompilerBase:
     def __init__(self, code_obj: types.CodeType, indent_level: int = 0, beautification_level: str = 'core', target_version: Optional[Tuple[int, int]] = None):
@@ -737,6 +738,7 @@ class DecompilerBase:
         self.pc = 0
         self.beautification_level = beautification_level
         self.target_version = target_version or sys.version_info[:2]
+        self._accum_counter = 0
 
     def _disassemble(self):
         """Convert code object bytecode into a list of BytecodeInstruction."""
@@ -760,6 +762,32 @@ class DecompilerBase:
             source (str): Reconstructed Python source for the decompiled code object.
         """
         raise NotImplementedError("Subclasses must implement decompile()")
+
+    def _fresh_accum_name(self) -> str:
+        """
+        Generate a fresh accumulator variable name that doesn't collide with existing names.
+
+        Returns:
+            str: A unique accumulator name like "_res", "_res1", "_res2", etc.
+        """
+        base_name = "_res"
+        # Collect all existing names from the code object
+        existing_names = set()
+        if hasattr(self.code_obj, 'co_varnames'):
+            existing_names.update(self.code_obj.co_varnames)
+        if hasattr(self.code_obj, 'co_names'):
+            existing_names.update(self.code_obj.co_names)
+
+        # Try base name first
+        if base_name not in existing_names:
+            return base_name
+
+        # Otherwise use counter to generate unique name
+        while True:
+            candidate = f"{base_name}{self._accum_counter}"
+            self._accum_counter += 1
+            if candidate not in existing_names:
+                return candidate
 
     def _get_jump_target(self, instr: BytecodeInstruction) -> int:
         """
@@ -1957,8 +1985,8 @@ class DecompilerGeneric(DecompilerBase):
                 if mini_stack:
                     obj = mini_stack.pop()
                     obj_str = str(obj)
-                    if obj_str.startswith("-") and obj_str[1:].replace(".", "", 1).isdigit():
-                        obj_str = f"({obj_str})"
+                    if obj_str.startswith("-"):
+                        obj_str = self._wrap_negative_literal(obj_str)
                     mini_stack.append(f"{obj_str}.{ins.argval}")
             elif op in ("CALL", "CALL_FUNCTION", "CALL_METHOD"):
                 num = int(ins.arg) if ins.arg is not None else 0
@@ -4979,7 +5007,8 @@ class DecompilerGeneric(DecompilerBase):
                         init_val = "set()" if target == "_item" else target
                     else:
                         init_val = "{}" if target == "_item" else target
-                    sentinel = _CollectionAccumSentinel()
+                    fresh_name = self._fresh_accum_name()
+                    sentinel = _CollectionAccumSentinel(fresh_name)
                     self._append_reconstructed(f"{sentinel} = {init_val}")
                     self.stack[-i] = sentinel
                     target = str(sentinel)
