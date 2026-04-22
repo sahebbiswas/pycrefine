@@ -54,7 +54,7 @@ _COMPOUND_EXPR_OPS = frozenset((
     "UNARY_NOT", "UNARY_NEGATIVE", "UNARY_POSITIVE", "UNARY_INVERT",
     "BUILD_TUPLE", "BUILD_LIST", "BUILD_SET", "BUILD_MAP",
     "TO_BOOL", "FORMAT_VALUE", "FORMAT_SIMPLE", "BUILD_STRING", "BINARY_SUBSCR", "BINARY_SLICE", "BUILD_SLICE",
-    "DUP_TOP", "DUP_TOP_TWO", "ROT_TWO", "ROT_THREE", "ROT_FOUR",
+    "DUP_TOP", "DUP_TOP_TWO", "ROT_TWO", "ROT_THREE", "ROT_FOUR", "SWAP", "COPY",
     # Python 3.9 binary opcodes:
     "BINARY_ADD", "BINARY_SUBTRACT", "BINARY_MULTIPLY", "BINARY_TRUE_DIVIDE",
     "BINARY_FLOOR_DIVIDE", "BINARY_MODULO", "BINARY_POWER", "BINARY_LSHIFT",
@@ -710,6 +710,21 @@ class StackNULL:
     def __repr__(self): return "__SENTINEL_NULL__"
     def __str__(self): return "__SENTINEL_NULL__"
 
+class _CollectionAccumSentinel:
+    """Internal sentinel placed on the stack to mark a decompiler-managed collection accumulator.
+
+    Using a typed sentinel (rather than the raw string ``"_res"``) prevents false
+    matches when user code happens to have a variable literally named ``_res``.
+    ``str()`` of the sentinel returns the accumulator name that will appear in the
+    reconstructed source, so downstream ``f"{target}.append(...)"`` calls still
+    produce readable output.
+    """
+    def __init__(self, name: str = "_res"):
+        self._name = name
+
+    def __str__(self): return self._name
+    def __repr__(self): return self._name
+
 class DecompilerBase:
     def __init__(self, code_obj: types.CodeType, indent_level: int = 0, beautification_level: str = 'core', target_version: Optional[Tuple[int, int]] = None):
         self.code_obj = code_obj
@@ -723,6 +738,7 @@ class DecompilerBase:
         self.pc = 0
         self.beautification_level = beautification_level
         self.target_version = target_version or sys.version_info[:2]
+        self._accum_counter = 0
 
     def _disassemble(self):
         """Convert code object bytecode into a list of BytecodeInstruction."""
@@ -746,6 +762,32 @@ class DecompilerBase:
             source (str): Reconstructed Python source for the decompiled code object.
         """
         raise NotImplementedError("Subclasses must implement decompile()")
+
+    def _fresh_accum_name(self) -> str:
+        """
+        Generate a fresh accumulator variable name that doesn't collide with existing names.
+
+        Returns:
+            str: A unique accumulator name like "_res", "_res1", "_res2", etc.
+        """
+        base_name = "_res"
+        # Collect all existing names from the code object
+        existing_names = set()
+        if hasattr(self.code_obj, 'co_varnames'):
+            existing_names.update(self.code_obj.co_varnames)
+        if hasattr(self.code_obj, 'co_names'):
+            existing_names.update(self.code_obj.co_names)
+
+        # Try base name first
+        if base_name not in existing_names:
+            return base_name
+
+        # Otherwise use counter to generate unique name
+        while True:
+            candidate = f"{base_name}{self._accum_counter}"
+            self._accum_counter += 1
+            if candidate not in existing_names:
+                return candidate
 
     def _get_jump_target(self, instr: BytecodeInstruction) -> int:
         """
@@ -792,12 +834,21 @@ class DecompilerBase:
     def _wrap_negative_literal(self, value: Any) -> str:
         """
         Wrap negative numeric literals in parentheses to ensure valid syntax for attribute access or method calls.
-        
+
         Example: -1 -> (-1). bit_length()
         """
         s = str(value)
-        if s.startswith("-") and s[1:].replace(".", "", 1).isdigit():
-            return f"({s})"
+        if s.startswith("-"):
+            try:
+                evaluated = ast.literal_eval(s)
+                if isinstance(evaluated, (int, float, complex)):
+                    return f"({s})"
+            except (ValueError, SyntaxError):
+                pass
+        # Also wrap variables with explicit unary minus like (-x) if needed?
+        # Only focus on numeric/complex literals that break attr access:
+        if s.startswith("(-") and s.endswith(")"):
+            return s
         return s
 
     def is_compiler_generated_return(self, instr_index: int) -> bool:
@@ -885,6 +936,7 @@ class DecompilerGeneric(DecompilerBase):
         """
         super().__init__(code_obj, indent_level, beautification_level, target_version)
         self.has_doc = False
+        self._pei_indents: Dict[int, int] = {}
         # Tracks offsets of while-loop body starts so we can suppress the
         # duplicated condition check emitted at the bottom of 3.11+ while loops.
         self._while_body_offsets: set = set()
@@ -1336,6 +1388,9 @@ class DecompilerGeneric(DecompilerBase):
                         if not aug_op and "INPLACE_" in lt.opname and lt.opname == le.opname:
                             aug_op = _INPLACE_ASSIGN_MAP.get(lt.opname)
                         if aug_op:
+                            # Heuristic: Avoid merging string concatenations containing newlines
+                            if self._has_newline_const(actual_then_expr + else_instrs):
+                                continue
                             actual_then_expr.pop()
                             else_instrs.pop()
 
@@ -1452,6 +1507,8 @@ class DecompilerGeneric(DecompilerBase):
                     if not aug_op and "INPLACE_" in lt.opname and lt.opname == le.opname:
                         aug_op = _INPLACE_ASSIGN_MAP.get(lt.opname)
                     if aug_op:
+                        if self._has_newline_const(before_jf + else_instrs):
+                            continue
                         before_jf.pop()
                         else_instrs.pop()
 
@@ -1511,6 +1568,8 @@ class DecompilerGeneric(DecompilerBase):
                 if not aug_op and "INPLACE_" in lt.opname and lt.opname == le.opname:
                     aug_op = _INPLACE_ASSIGN_MAP.get(lt.opname)
                 if aug_op:
+                    if self._has_newline_const(before_store + else_instrs):
+                        continue
                     before_store.pop()
                     else_instrs.pop()
 
@@ -1519,6 +1578,44 @@ class DecompilerGeneric(DecompilerBase):
                 self._ternary_suppress.add(x.offset)
             for x in else_instrs:
                 self._ternary_suppress.add(x.offset)
+
+    def _has_newline_const(self, instrs: List[BytecodeInstruction]) -> bool:
+        """Heuristic: Return True if any instruction loads a string constant containing a literal newline."""
+        return any("CONST" in x.opname and isinstance(x.argval, str) and "\n" in x.argval for x in instrs)
+
+    def _format_fstring_part(self, p: str) -> str:
+        """Unwrap a string fragment (which might be a literal) and escape it for inclusion in an f-string."""
+        is_literal = False
+        if p.startswith('"""') and p.endswith('"""') and len(p) >= 6:
+            p = p[3:-3]
+            is_literal = True
+        elif p.startswith("'''") and p.endswith("'''") and len(p) >= 6:
+            p = p[3:-3]
+            is_literal = True
+        elif len(p) >= 2 and p[0] == p[-1] and p[0] in ("'", '"'):
+            p = p[1:-1]
+            is_literal = True
+            
+        if is_literal:
+            p = p.replace("{", "{{").replace("}", "}}")
+            p = p.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+            p = p.replace('"', '\\"')
+        return p
+
+    def _match_augassign_store(self, left: str, instr_store: "BytecodeInstruction") -> bool:
+        """Return True if *instr_store* writes back to the same target as *left*.
+
+        Handles all store variants:
+        - ``STORE_SUBSCR``: left must look like a subscript expression ``x[...]``.
+        - All named stores (``STORE_FAST``, ``STORE_NAME``, ``STORE_GLOBAL``,
+          ``STORE_ATTR``, ``STORE_DEREF``): store name must equal the last
+          component of *left* (handles plain names and attribute chains).
+        """
+        if instr_store.opname == "STORE_SUBSCR":
+            return "[" in left and left.endswith("]")
+        store_name = str(instr_store.argval)
+        left_tail = left.split(".")[-1]
+        return store_name == left_tail or left == store_name or left.endswith("." + store_name)
 
     # ------------------------------------------------------------------
     # Compound boolean condition pre-scan
@@ -1874,10 +1971,8 @@ class DecompilerGeneric(DecompilerBase):
                     parts = []
                     for _ in range(count):
                         if mini_stack:
-                            p = str(mini_stack.pop())
-                            # Try to strip literal quotes if they exist
-                            if (p.startswith("'") and p.endswith("'")) or (p.startswith('"') and p.endswith('"')):
-                                p = p[1:-1]
+                            p_val = mini_stack.pop()
+                            p = self._format_fstring_part(str(p_val))
                             parts.insert(0, p)
                     mini_stack.append(f'f"{"".join(parts)}"')
                 elif op in ("BUILD_MAP", "BUILD_CONST_KEY_MAP"):
@@ -1890,8 +1985,8 @@ class DecompilerGeneric(DecompilerBase):
                 if mini_stack:
                     obj = mini_stack.pop()
                     obj_str = str(obj)
-                    if obj_str.startswith("-") and obj_str[1:].replace(".", "", 1).isdigit():
-                        obj_str = f"({obj_str})"
+                    if obj_str.startswith("-"):
+                        obj_str = self._wrap_negative_literal(obj_str)
                     mini_stack.append(f"{obj_str}.{ins.argval}")
             elif op in ("CALL", "CALL_FUNCTION", "CALL_METHOD"):
                 num = int(ins.arg) if ins.arg is not None else 0
@@ -2178,6 +2273,10 @@ class DecompilerGeneric(DecompilerBase):
 
         The routine uses available exception-table data when present and falls back to heuristics on older hosts to identify these regions.
         """
+        self._for_iter_targets = {
+            self._get_jump_target(fi) for fi in self.instructions if fi.opname == "FOR_ITER"
+        }
+        
         instrs = self.instructions
         n = len(instrs)
 
@@ -3298,7 +3397,8 @@ class DecompilerGeneric(DecompilerBase):
             self.indent_level -= 1
 
         # Record the indent at which except headers should be emitted
-        self._except_header_indents.append(self.indent_level)
+        indent = getattr(self, "_pei_indents", {}).get(instr.offset, self.indent_level)
+        self._except_header_indents.append(indent)
         # Peek: is there a LOAD + CHECK_EXC_MATCH coming?
         look = self.pc
         while look < len(self.instructions) and self.instructions[look].opname in (
@@ -3311,6 +3411,7 @@ class DecompilerGeneric(DecompilerBase):
             self.stack.append("_exc_info")
             return  # defer header to CHECK_EXC_MATCH
         # Bare except (no type check)
+        self.indent_level = indent
         self._append_reconstructed("except:")
         self.indent_level += 1
 
@@ -4192,15 +4293,7 @@ class DecompilerGeneric(DecompilerBase):
                 if (p_val is None or str(p_val) == "__SENTINEL_NULL__" or 
                     getattr(p_val, '__class__', None).__name__ == 'StackNULL'):
                     continue
-                p = str(p_val)
-                # Use ast.literal_eval for safe unquoting of literal fragments
-                try:
-                    import ast
-                    p = str(ast.literal_eval(p))
-                    p = p.replace("\\", "\\\\").replace("{", "{{").replace("}", "}}").replace('"', '\\"')
-                    p = p.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
-                except:
-                    pass
+                p = self._format_fstring_part(str(p_val))
                 parts.insert(0, p)
         res = "".join(parts)
         self.stack.append(f"f\"{res}\"")
@@ -4428,6 +4521,8 @@ class DecompilerGeneric(DecompilerBase):
                 already_in_try = any(b[1] in ("try_body",) for b in self.blocks)
                 if not already_in_try or instr.is_jump_target or instr.offset != 2:
                     self._append_reconstructed("try:")
+                    if next_pei > 0:
+                        self._pei_indents[next_pei] = self.indent_level
                     self.indent_level += 1
                     if next_pei > 0:
                         # Use the finally-merge label as block end when present
@@ -4858,62 +4953,84 @@ class DecompilerGeneric(DecompilerBase):
             else:
                 self.stack.append(f"[*{lst}, *{it}]")
 
-    def _op_list_append(self, instr: BytecodeInstruction):
-        val = str(self.stack.pop()) if self.stack else "None"
+    def _collection_mutator(self, instr: BytecodeInstruction, kind: str):
+        if kind == "map":
+            val = str(self.stack.pop()) if self.stack else "None"
+            key = str(self.stack.pop()) if self.stack else "None"
+        else:
+            val = str(self.stack.pop()) if self.stack else "None"
+            key = None
+
         i = int(instr.arg) if instr.arg is not None else 1
         in_loop = any(b[1] in ("for", "while") for b in self.blocks)
-        
+
         if len(self.stack) >= i:
-            target = str(self.stack[-i])
+            raw_target = self.stack[-i]
+            target = str(raw_target)
+            already_accum = isinstance(raw_target, _CollectionAccumSentinel)
+
             if not in_loop:
-                if target == "[]":
-                    self.stack[-i] = f"[{val}]"
-                    return
-                elif target.startswith("[") and target.endswith("]"):
-                    inner = target[1:-1]
-                    self.stack[-i] = f"[{inner + (', ' if inner else '') + val}]"
-                    return
-            
+                if kind == "list":
+                    if target == "[]":
+                        self.stack[-i] = f"[{val}]"
+                        return
+                    elif target.startswith("[") and target.endswith("]"):
+                        inner = target[1:-1]
+                        self.stack[-i] = f"[{inner + (', ' if inner else '') + val}]"
+                        return
+                elif kind == "set":
+                    if target in ("set()", "{}"):
+                        self.stack[-i] = f"{{{val}}}"
+                        return
+                    elif target.startswith("{") and target.endswith("}"):
+                        inner = target[1:-1]
+                        self.stack[-i] = f"{{{inner + (', ' if inner else '') + val}}}"
+                        return
+                elif kind == "map":
+                    if target == "{}":
+                        self.stack[-i] = f"{{{key}: {val}}}"
+                        return
+                    elif target.startswith("{") and target.endswith("}"):
+                        inner = target[1:-1]
+                        self.stack[-i] = f"{{{inner + (', ' if inner else '') + key}: {val}}}"
+                        return
+
             is_comp = self.code_obj.co_name in ("<listcomp>", "<setcomp>", "<dictcomp>", "<genexpr>")
             if not is_comp:
-                # Ordinary function: use .append(). We must ensure _res is initialized
-                # and the stack slot is remapped to the name so subsequent code
-                # (like the final return) uses the temp.
-                if target != "_res":
-                    init_val = target if target != "_item" else "[]"
-                    self._append_reconstructed(f"_res = {init_val}")
-                    self.stack[-i] = "_res"
-                    target = "_res"
-                self._append_reconstructed(f"{target}.append({val})")
+                if not already_accum:
+                    # target is the *user*'s iterable variable, not our accumulator.
+                    # Check whether it was '_item' (the decompiler-generated loop placeholder):
+                    # if so, initialise with an empty literal; otherwise seed from the iterable.
+                    if kind == "list":
+                        init_val = "[]" if target == "_item" else target
+                    elif kind == "set":
+                        init_val = "set()" if target == "_item" else target
+                    else:
+                        init_val = "{}" if target == "_item" else target
+                    fresh_name = self._fresh_accum_name()
+                    sentinel = _CollectionAccumSentinel(fresh_name)
+                    self._append_reconstructed(f"{sentinel} = {init_val}")
+                    self.stack[-i] = sentinel
+                    target = str(sentinel)
+
+                if kind == "list":
+                    self._append_reconstructed(f"{target}.append({val})")
+                elif kind == "set":
+                    self._append_reconstructed(f"{target}.add({val})")
+                else:
+                    self._append_reconstructed(f"{target}[{key}] = {val}")
                 return
-        self._append_reconstructed(f"yield {val}")
+
+        if kind == "map":
+            self._append_reconstructed(f"yield {key}: {val}")
+        else:
+            self._append_reconstructed(f"yield {val}")
+
+    def _op_list_append(self, instr: BytecodeInstruction):
+        self._collection_mutator(instr, "list")
 
     def _op_set_add(self, instr: BytecodeInstruction):
-        val = str(self.stack.pop()) if self.stack else "None"
-        i = int(instr.arg) if instr.arg is not None else 1
-        in_loop = any(b[1] in ("for", "while") for b in self.blocks)
-
-        if len(self.stack) >= i:
-            target = str(self.stack[-i])
-            if not in_loop:
-                if target == "set()" or target == "{}":
-                    self.stack[-i] = f"{{{val}}}"
-                    return
-                elif target.startswith("{") and target.endswith("}"):
-                    inner = target[1:-1]
-                    self.stack[-i] = f"{{{inner + (', ' if inner else '') + val}}}"
-                    return
-
-            is_comp = self.code_obj.co_name in ("<listcomp>", "<setcomp>", "<dictcomp>", "<genexpr>")
-            if not is_comp:
-                if target != "_res":
-                    init_val = target if target != "_item" else "set()"
-                    self._append_reconstructed(f"_res = {init_val}")
-                    self.stack[-i] = "_res"
-                    target = "_res"
-                self._append_reconstructed(f"{target}.add({val})")
-                return
-        self._append_reconstructed(f"yield {val}")
+        self._collection_mutator(instr, "set")
 
     def _op_set_update(self, instr: BytecodeInstruction):
         # Python 3.9+ frozenset literals generate: BUILD_SET 0, LOAD_CONST frozenset, SET_UPDATE 1
@@ -4938,32 +5055,7 @@ class DecompilerGeneric(DecompilerBase):
                 self.stack.append(val)
 
     def _op_map_add(self, instr: BytecodeInstruction):
-        val = str(self.stack.pop()) if self.stack else "None"
-        key = str(self.stack.pop()) if self.stack else "None"
-        i = int(instr.arg) if instr.arg is not None else 1
-        in_loop = any(b[1] in ("for", "while") for b in self.blocks)
-        
-        if len(self.stack) >= i:
-            target = str(self.stack[-i])
-            if not in_loop:
-                if target == "{}":
-                    self.stack[-i] = f"{{{key}: {val}}}"
-                    return
-                elif target.startswith("{") and target.endswith("}"):
-                    inner = target[1:-1]
-                    self.stack[-i] = f"{{{inner + (', ' if inner else '') + key}: {val}}}"
-                    return
-
-            is_comp = self.code_obj.co_name in ("<listcomp>", "<setcomp>", "<dictcomp>", "<genexpr>")
-            if not is_comp:
-                if target != "_res":
-                    init_val = target if target != "_item" else "{}"
-                    self._append_reconstructed(f"_res = {init_val}")
-                    self.stack[-i] = "_res"
-                    target = "_res"
-                self._append_reconstructed(f"{target}[{key}] = {val}")
-                return
-        self._append_reconstructed(f"yield {key}: {val}")
+        self._collection_mutator(instr, "map")
 
     def _op_dict_merge(self, instr: BytecodeInstruction):
         opname = instr.opname
@@ -5010,7 +5102,7 @@ class DecompilerGeneric(DecompilerBase):
         
         if instr.arg is not None and (instr.arg & 1):
              # Method call: push sentinel then the method name
-             self.stack.append("__SENTINEL_NULL__")
+             self.stack.append(StackNULL(is_method=False))
              self.stack.append(f"super().{name}")
         else:
              self.stack.append(f"super().{name}")
@@ -5394,11 +5486,17 @@ class Decompiler39(DecompilerGeneric):
                     try_jump = self.instructions[try_end_idx]
                     if try_jump.opname in ("JUMP_FORWARD", "JUMP_ABSOLUTE"):
                         else_start = getattr(self, "_get_jump_target")(try_jump)
-                        if else_start > target:
+                        
+                        # Guard: If else_start is the end of a FOR_ITER loop (indicating a `break` out of a loop),
+                        # then it is NOT an else clause.
+                        is_break = else_start in self._for_iter_targets
+                        
+                        if else_start > target and not is_break:
                             post_except_targets = []
                             for k in range(try_end_idx + 1, len(self.instructions)):
                                 if self.instructions[k].offset >= else_start:
                                     break
+
                                 inner_ins = self.instructions[k]
                                 if inner_ins.opname in ("JUMP_FORWARD", "JUMP_ABSOLUTE"):
                                     jt = getattr(self, "_get_jump_target")(inner_ins)
@@ -5614,26 +5712,21 @@ class Decompiler39(DecompilerGeneric):
                            "CACHE", "RESUME", "NOP", "NOT_TAKEN", "ROT_TWO"
                 )):
                     next_pc += 1
-                    if (next_pc < len(self.instructions)
-                            and self.instructions[next_pc].opname in (
-                                "STORE_NAME", "STORE_FAST", "STORE_GLOBAL", "STORE_ATTR", "STORE_DEREF", "STORE_SUBSCR"
-                    )):
-                        instr_store = self.instructions[next_pc]
-                        if instr_store.opname == "STORE_SUBSCR":
-                            # For subscripts, we don't have a name in argval. 
-                            # But if the left side looks like a subscript access, it's a match.
-                            is_match = "[" in str(left) and str(left).endswith("]")
-                        else:
-                            store_name = str(instr_store.argval)
-                            left_name = str(left).split(".")[-1]
-                            is_match = (store_name == left_name or str(left) == store_name or str(left).endswith("." + store_name))
-                            
-                        if is_match:
-                            if instr_store.opname == "STORE_ATTR" and self.stack:
-                                self.stack.pop() # pop defensive receiver
-                            self._append_reconstructed(f"{left} {op} {right}")
-                            self.pc = next_pc + 1  # consume the STORE
-                            return
+                
+                if (next_pc < len(self.instructions)
+                        and self.instructions[next_pc].opname in (
+                            "STORE_NAME", "STORE_FAST", "STORE_GLOBAL", "STORE_ATTR", "STORE_DEREF", "STORE_SUBSCR"
+                )):
+                    instr_store = self.instructions[next_pc]
+                    if self._match_augassign_store(str(left), instr_store):
+                        if instr_store.opname == "STORE_ATTR" and self.stack:
+                            self.stack.pop()  # pop defensive receiver
+                        if instr_store.opname == "STORE_SUBSCR" and len(self.stack) >= 2:
+                            self.stack.pop()
+                            self.stack.pop()
+                        self._append_reconstructed(f"{left} {op} {right}")
+                        self.pc = next_pc + 1  # consume the STORE
+                        return
                 # Fallback: push as expression for STORE to handle
                 # Wrap operands in parens when they contain a ternary
                 r_str = str(right)
@@ -5928,9 +6021,29 @@ class Decompiler39(DecompilerGeneric):
                             is_finally_pop = True
 
                 _closing_exc_cleanup = self.blocks[-1][1] == "exc_cleanup"
+
+                # ── Empty try body: emit `pass` if needed ────────────────────
+                # Python 3.9 compiles `try: pass` to SETUP_FINALLY → POP_BLOCK with
+                # no intervening instructions. The decompiler has opened the block
+                # (emitted "try:") but never emitted a body line — the output would
+                # be a bare "try:" with no body, which is a SyntaxError. Detect this
+                # by checking whether the last non-blank reconstructed line is still
+                # a block-opening header and we are about to close the block.
+                if not _closing_exc_cleanup:
+                    last_non_blank = next(
+                        (self.reconstructed[li] for li in range(len(self.reconstructed) - 1, -1, -1)
+                         if self.reconstructed[li].strip()),
+                        ""
+                    ).strip()
+                    # Block headers that need at least one body statement
+                    _BLOCK_HEADERS = ("try:", "if ", "elif ", "else:", "for ", "while ", "finally:", "with ")
+                    if last_non_blank.endswith(":") and any(last_non_blank.startswith(h) for h in _BLOCK_HEADERS):
+                        self._append_reconstructed("pass")
+
                 self.blocks.pop()
                 if not _closing_exc_cleanup:
                     self.indent_level -= 1
+
 
             elif self.blocks and self.blocks[-1][1] == "finally_wrapper":
                 finally_target = self.blocks[-1][0]
@@ -6419,18 +6532,13 @@ class Decompiler311Plus(DecompilerGeneric):
                                 "STORE_NAME", "STORE_FAST", "STORE_GLOBAL", "STORE_ATTR", "STORE_DEREF", "STORE_SUBSCR"
                     )):
                         instr_store = self.instructions[next_pc]
-                        if instr_store.opname == "STORE_SUBSCR":
-                             # For subscripts, assume match if left looks like a subscript
-                             is_match = "[" in str(left) and str(left).endswith("]")
-                        else:
-                             store_name = str(instr_store.argval)
-                             left_name = str(left).split(".")[-1]  # handle attr access
-                             is_match = (store_name == left_name or str(left) == store_name or str(left).endswith("." + store_name))
-
-                        if is_match:
+                        if self._match_augassign_store(str(left), instr_store):
                             # Emit augmented assignment, skip the STORE
                             if instr_store.opname == "STORE_ATTR" and self.stack:
-                                self.stack.pop() # pop defensive receiver
+                                self.stack.pop()  # pop defensive receiver
+                            if instr_store.opname == "STORE_SUBSCR" and len(self.stack) >= 2:
+                                self.stack.pop()
+                                self.stack.pop()
                             self._append_reconstructed(f"{left} {inplace_op} {right}")
                             self.pc = next_pc + 1  # consume the STORE
                             return

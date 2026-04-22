@@ -56,13 +56,22 @@ class TestExceptions(unittest.TestCase):
         assert_contains(out, "raise ValueError")
 
     def test_raise_in_function(self):
-        out = decompile("def f(x):\n    if x < 0:\n        raise ValueError('bad')\n    return x\n")
+        src = "def f(x):\n    if x < 0:\n        raise ValueError('bad')\n    return x\n"
+        out = decompile(src)
         assert_contains(out, "raise ValueError")
+        try:
+            compile(out, '<test>', 'exec')
+        except SyntaxError as e:
+            self.fail(f"Decompiled raise-in-function output is not valid Python: {e}\n{out}")
 
     def test_raise_from(self):
-        src = "try:\n    pass\nexcept Exception as e:\n    raise RuntimeError('wrap') from e\n"
+        src = "def f():\n    try:\n        pass\n    except Exception as e:\n        raise RuntimeError('wrap') from e\n"
         out = decompile(src)
         assert_contains(out, "raise RuntimeError", "from e")
+        try:
+            compile(out, '<test>', 'exec')
+        except SyntaxError as e:
+            self.fail(f"Decompiled raise-from output is not valid Python: {e}\n{out}")
 
     def test_try_except_finally(self):
         src = (
@@ -1145,6 +1154,53 @@ class TestReturnInsideForInsideTry(unittest.TestCase):
             f"'return None' appeared where True was expected:\n{out}")
 
 
+class TestForLoopNestedTrySpuriousElse(unittest.TestCase):
+    def test_for_try_no_spurious_else(self):
+        src = (
+            "def f(inside, depth, balanced):\n"
+            "    for char in inside:\n"
+            "        if char == '(':\n"
+            "            depth += 1\n"
+            "        elif char == ')':\n"
+            "            depth -= 1\n"
+            "        balanced = False\n"
+            "        break\n"
+            "    if balanced and depth == 0:\n"
+            "        try:\n"
+            "            node = ast.parse(inside, mode='eval')\n"
+            "            if not isinstance(node.body, ast.Tuple):\n"
+            "                inner = inside\n"
+            "        except Exception:\n"
+            "            pass\n"
+        )
+        out = decompile(src)
+        lines = out.splitlines()
+        for_idx = next((i for i, ln in enumerate(lines) if ln.strip() == "for char in inside:"), -1)
+        self.assertNotEqual(for_idx, -1, "expected 'for char in inside:' header in output")
+        for_indent = len(lines[for_idx]) - len(lines[for_idx].lstrip())
+        loop_body = []
+        for ln in lines[for_idx+1:]:
+            if not ln.strip():
+                continue
+            idx = len(ln) - len(ln.lstrip())
+            if idx <= for_indent:
+                break
+            loop_body.append(ln.strip())
+        self.assertNotIn("else:", loop_body, "Spurious else: found in output loop body")
+        # Ensure try/except are correctly aligned
+        lines = out.splitlines()
+        try_lines = [ln for ln in lines if ln.lstrip() == "try:"]
+        except_lines = [ln for ln in lines if ln.lstrip().startswith("except ")]
+        self.assertTrue(try_lines)
+        self.assertTrue(except_lines)
+        try_indent = len(try_lines[-1]) - len(try_lines[-1].lstrip())
+        except_indent = len(except_lines[-1]) - len(except_lines[-1].lstrip())
+        self.assertEqual(try_indent, except_indent, "try/except indentation mismatch")
+        # Verify output is at minimum syntactically valid Python (#15)
+        try:
+            ast.parse(out)
+        except SyntaxError as e:
+            self.fail(f"Decompiled for+try output is not valid Python: {e}\n{out}")
+
 if __name__ == "__main__":
     unittest.main()
-
