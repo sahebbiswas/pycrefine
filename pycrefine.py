@@ -1005,8 +1005,8 @@ class DecompilerGeneric(DecompilerBase):
                 # Peek at the instruction after it
                 idx = self.instructions.index(first_meaningful)
                 if idx + 1 < len(self.instructions):
-                    next_op = self.instructions[idx + 1].opname
-                    if next_op in ("POP_TOP", "STORE_NAME"):
+                    next_ins = self.instructions[idx + 1]
+                    if next_ins.opname == "POP_TOP" or (next_ins.opname == "STORE_NAME" and next_ins.argval == "__doc__"):
                         is_docstring = True
             if is_docstring:
                 doc = self.code_obj.co_consts[0]
@@ -1167,10 +1167,11 @@ class DecompilerGeneric(DecompilerBase):
         Converts values into a Python-syntax-friendly string: slices become Python slice notation like
         'start:stop' or 'start:stop:step' (omitting parts that are None), multiline strings are wrapped
         in triple quotes using the alternate quote style if the content contains triple double-quotes,
+        repeated patterns in strings or bytes are shorthanded (e.g. '\x00' * 16),
         and all other values are represented using their `repr()`.
 
         Parameters:
-            val: The constant value to format (e.g., slice, str, number, None, etc.).
+            val: The constant value to format (e.g., slice, str, bytes, number, None, etc.).
 
         Returns:
             A string containing the value rendered in a form suitable for emitted Python source.
@@ -1182,6 +1183,17 @@ class DecompilerGeneric(DecompilerBase):
                 return f'{start}:{stop}'
             step = '' if val.step is None else repr(val.step)
             return f'{start}:{stop}:{step}'
+        if self.beautification_level in ('core', 'aggressive') and isinstance(val, (str, bytes)):
+            val_len = len(val)
+            for pat_len in range(1, 5):
+                if val_len >= pat_len * 2 and val_len % pat_len == 0:
+                    pat = val[:pat_len]
+                    repeat_count = val_len // pat_len
+                    if val == pat * repeat_count:
+                        shorthand = f"{repr(pat)} * {repeat_count}"
+                        if len(shorthand) < len(repr(val)):
+                            return shorthand
+                        break
         if isinstance(val, str) and "\n" in val:
             if '"""' in val:
                 return f"'''{val}'''"

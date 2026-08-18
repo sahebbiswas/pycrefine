@@ -748,6 +748,21 @@ class TestVerifyScenesBugs(unittest.TestCase):
             f"Triple-quoted string leaked into aggressive output:\n{out}",
         )
 
+    def test_repeated_pattern_beautification(self):
+        """Verify repeated string and bytes patterns are shorthanded when beautification is core or aggressive."""
+        src = "me = '\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00'\nb = b'\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00'\n"
+        out_core = decompile(src, beautification_level='core')
+        self.assertIn("me = '\\x00' * 16", out_core)
+        self.assertIn("b = b'\\x00' * 8", out_core)
+
+        out_aggr = decompile(src, beautification_level='aggressive')
+        self.assertIn("me = '\\x00' * 16", out_aggr)
+        self.assertIn("b = b'\\x00' * 8", out_aggr)
+
+        out_none = decompile(src, beautification_level='none')
+        self.assertNotIn("* 16", out_none)
+        self.assertNotIn("* 8", out_none)
+
 
 class TestFindingsRefinement(unittest.TestCase):
     def test_blank_separator_nested_logic(self):
