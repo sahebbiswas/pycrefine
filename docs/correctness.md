@@ -35,7 +35,9 @@ would hide regressions inside them. Each `.py` corpus entry is therefore also
 split into **units**, which are checked independently:
 
 * every top-level statement is a unit (`def name`, `class name`, or
-  `<StmtType>@L<line>` for other statements);
+  `<StmtType>: <first source line>` for other statements, e.g.
+  `If: if __name__ == "__main__":`). Ids never contain line numbers, so
+  moving a statement keeps its identity;
 * a top-level class is split further, one unit per body member, wrapped in a
   bare `class Name:` header (`class Name/def method`);
 * module-level `from __future__` imports are prepended to every unit;
@@ -70,13 +72,19 @@ records the status of every entry and every unit.
 | `regressed`  | an entry or unit is on a lower rung than its baseline          | **yes**   |
 | `improved`   | an entry or unit is on a higher rung than its baseline         | no        |
 | `new`        | an entry or unit has no baseline record                        | no        |
-| `missing`    | a baseline record has no corresponding entry or unit           | no        |
+| `missing`    | a baseline record has no corresponding entry or unit           | **yes**   |
 | `unscorable` | either side is `source_error`                                  | no        |
 
-Exit codes: `0` no regressions, `1` at least one regression, `2`
-configuration error (missing or incompatible baseline, bad path).
+Exit codes: `0` pass, `1` at least one `regressed` or `missing` change, `2`
+configuration error (no baseline, a baseline for another Python version or
+schema, bad path).
 
-Only `regressed` fails, so improvements never break CI. Recording them
+`missing` fails because an unmatched record can't be compared. For example,
+editing a statement's first line renames its unit, and without this rule a
+regression in it would pass as `missing` + `new`. Changing the corpus
+therefore needs a baseline update in the same change.
+
+Improvements never break CI. Recording them
 ratchets the baseline upward, so the improvement can't silently regress
 later. When a change improves results, regenerate the baseline on **every** CI
 Python version (3.9, 3.12 and 3.14) and commit the diff:

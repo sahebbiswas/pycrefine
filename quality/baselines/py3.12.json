@@ -18,17 +18,17 @@
       "kind": "source",
       "status": "syntax_error",
       "units": {
-        "Assign@L11": "compiles",
-        "Expr@L1": "compiles",
-        "If@L118": "compile_error",
-        "Import@L6": "compiles",
-        "Import@L7": "compiles",
-        "ImportFrom@L8": "compiles",
-        "class BaseProcessor/Expr@L35": "compiles",
+        "Assign: VERSION = \"1.0.0\"": "compiles",
+        "Expr: \"\"\"": "compiles",
+        "If: if __name__ == \"__main__\":": "compile_error",
+        "Import: import os": "compiles",
+        "Import: import sys": "compiles",
+        "ImportFrom: from typing import List, Optional": "compiles",
+        "class BaseProcessor/Expr: \"\"\"Base class for demonstration.\"\"\"": "compiles",
         "class BaseProcessor/def __init__": "compiles",
         "class BaseProcessor/def process": "compiles",
         "class ComplexException/def __init__": "compiles",
-        "class DataProcessor/Expr@L45": "compiles",
+        "class DataProcessor/Expr: \"\"\"Derived class with more logic.\"\"\"": "compiles",
         "class DataProcessor/def __init__": "compiles",
         "class DataProcessor/def add_item": "compiles",
         "class DataProcessor/def process": "compiles",
@@ -54,8 +54,8 @@
       "kind": "source",
       "status": "compile_error",
       "units": {
-        "Expr@L3": "compiles",
-        "If@L19": "compile_error",
+        "Expr: \"\"\"": "compiles",
+        "If: if __name__==\"__main__\":": "compile_error",
         "def show_info": "compiles"
       }
     },
@@ -63,21 +63,21 @@
       "kind": "source",
       "status": "compiles",
       "units": {
-        "Expr@L5": "compiles",
-        "Expr@L6": "compiles",
-        "Import@L3": "compiles"
+        "Expr: simple.show_info(2)": "compiles",
+        "Expr: simple.show_info(5)": "compiles",
+        "Import: import simple": "compiles"
       }
     },
     "test_files/test_indent2.py": {
       "kind": "source",
       "status": "compiles",
       "units": {
-        "Assign@L84": "compiles",
-        "Expr@L90": "compiles",
-        "Expr@L91": "compiles",
-        "Expr@L92": "compiles",
-        "Expr@L93": "compiles",
-        "Import@L1": "compiles",
+        "Assign: src = \"\"\"def process(items, verbose=False):": "compiles",
+        "Expr: print(\"=== ORIGINAL ===\")": "compiles",
+        "Expr: print(\"=== PROCESSED ===\")": "compiles",
+        "Expr: print(repr(post_process_source(src)))": "compiles",
+        "Expr: print(repr(src))": "compiles",
+        "Import: import re": "compiles",
         "def post_process_source": "compiles"
       }
     },
@@ -85,10 +85,10 @@
       "kind": "source",
       "status": "compiles",
       "units": {
-        "Assign@L86": "compiles",
-        "Expr@L103": "compiles",
-        "Expr@L104": "compiles",
-        "Import@L1": "compiles",
+        "Assign: test_case = \"\"\"": "compiles",
+        "Expr: print(\"OUTPUT:\")": "compiles",
+        "Expr: print(post_process_source(test_case))": "compiles",
+        "Import: import re": "compiles",
         "def post_process_source": "compiles"
       }
     },
@@ -96,27 +96,27 @@
       "kind": "source",
       "status": "compile_error",
       "units": {
-        "Assign@L14": "compiles",
-        "Assign@L16": "compiles",
-        "Assign@L19": "compiles",
-        "Assign@L5": "compiles",
-        "Expr@L13": "compiles",
-        "Expr@L15": "compiles",
-        "Expr@L17": "compiles",
-        "Expr@L18": "compiles",
-        "Expr@L20": "compiles",
-        "Expr@L21": "compiles",
-        "Import@L1": "compiles",
-        "Import@L2": "compiles",
-        "Import@L3": "compiles",
-        "With@L10": "compile_error"
+        "Assign: decompiler = pycrefine.get_decompiler(\"temp.pyc\")": "compiles",
+        "Assign: out = pycrefine.post_process_source(raw)": "compiles",
+        "Assign: raw = \"\\n\".join(str(s) for s in decompiler.reconstructed)...": "compiles",
+        "Assign: source = \"\"\"def f(x):": "compiles",
+        "Expr: decompiler.decompile() # to populate reconstructed": "compiles",
+        "Expr: print(\"=== POST ===\")": "compiles",
+        "Expr: print(\"=== RAW ===\")": "compiles",
+        "Expr: print(out)": "compiles",
+        "Expr: print(raw)": "compiles",
+        "Expr: py_compile.compile(\"temp.py\", cfile=\"temp.pyc\")": "compiles",
+        "Import: import os": "compiles",
+        "Import: import py_compile": "compiles",
+        "Import: import pycrefine": "compiles",
+        "With: with open(\"temp.py\", \"w\") as f:": "compile_error"
       }
     },
     "test_files/verify_scenes.py": {
       "kind": "source",
       "status": "syntax_error",
       "units": {
-        "Assign@L64": "compiles",
+        "Assign: my_map = {": "compiles",
         "def api_1": "compiles",
         "def api_10": "compiles",
         "def api_11": "compiles",

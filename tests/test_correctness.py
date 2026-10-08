@@ -59,13 +59,26 @@ class TestExtractUnits(unittest.TestCase):
     def test_unit_ids(self):
         ids = [u.id for u in cc.extract_units(self.SOURCE)]
         self.assertEqual(ids, [
-            "Import@L2",
+            "Import: import os",
             "def f",
-            "class C/Expr@L9",
+            'class C/Expr: """doc"""',
             "class C/def m",
             "class C/def m#2",
             "class D",
         ])
+
+    def test_unit_ids_do_not_depend_on_line_numbers(self):
+        moved = "\n\n# comment\n" + self.SOURCE.replace("import os\n", "import os\n\n\n")
+        moved = moved.replace("from __future__ import annotations\n", "", 1)
+        moved = "from __future__ import annotations\n" + moved
+        self.assertEqual([u.id for u in cc.extract_units(self.SOURCE)],
+                         [u.id for u in cc.extract_units(moved)])
+
+    def test_long_statement_ids_are_truncated(self):
+        ids = [u.id for u in cc.extract_units("x = " + "1 + " * 40 + "1\n")]
+        self.assertEqual(len(ids), 1)
+        self.assertTrue(ids[0].startswith("Assign: x = 1 + "))
+        self.assertTrue(ids[0].endswith("..."))
 
     def test_units_carry_future_imports_and_decorators(self):
         units = {u.id: u.source for u in cc.extract_units(self.SOURCE)}
@@ -127,7 +140,28 @@ class TestCompare(unittest.TestCase):
             ("c.pyc", None, "new"),
         })
         report = cc.build_report([], changes, None)
-        self.assertEqual(report["result"], "pass")
+        self.assertEqual(report["result"], "fail")  # missing records fail
+
+    def test_new_and_unscorable_do_not_fail(self):
+        base = self._baseline({"a.py": {"kind": "source", "status": "compiles", "units": {}}})
+        changes = cc.compare([self._result("a.py", cc.SOURCE_ERROR, {}),
+                              self._result("c.pyc", "compiles")], base)
+        self.assertEqual(self._changes(changes), {
+            ("a.py", None, "unscorable"),
+            ("c.pyc", None, "new"),
+        })
+        self.assertEqual(cc.build_report([], changes, None)["result"], "pass")
+
+    def test_missing_unit_fails(self):
+        base = self._baseline({"a.py": {"kind": "source", "status": "syntax_error",
+                                        "units": {"If: if x:": "compiles"}}})
+        changes = cc.compare([self._result("a.py", "syntax_error",
+                                           {"If: if y:": "syntax_error"})], base)
+        self.assertEqual(self._changes(changes), {
+            ("a.py", "If: if x:", "missing"),
+            ("a.py", "If: if y:", "new"),
+        })
+        self.assertEqual(cc.build_report([], changes, None)["result"], "fail")
 
 
 class TestEndToEnd(unittest.TestCase):
@@ -144,9 +178,17 @@ class TestEndToEnd(unittest.TestCase):
         with tempfile.TemporaryDirectory() as work:
             r = cc.check_entry(src, work)
         self.assertEqual(r.status, "compiles")
-        self.assertEqual(set(r.units), {"Import@L1", "def f"})
+        self.assertEqual(set(r.units), {"Import: import os", "def f"})
         self.assertTrue(all(u["status"] == "compiles" for u in r.units.values()))
         self.assertTrue(r.units["def f"]["ast_equal"])
+
+    def test_check_entry_honours_coding_cookie(self):
+        src = self.dir / "latin.py"
+        src.write_bytes(b"# -*- coding: latin-1 -*-\nname = '\xe9t\xe9'\n")
+        with tempfile.TemporaryDirectory() as work:
+            r = cc.check_entry(src, work)
+        self.assertEqual(r.status, "compiles")
+        self.assertEqual(set(r.units), {"Assign: name = '\u00e9t\u00e9'"})
 
     def test_check_entry_source_error_is_not_scored(self):
         src = self.dir / "bad.py"
@@ -192,13 +234,24 @@ class TestEndToEnd(unittest.TestCase):
         code, _ = self._run_main(src, "--no-baseline")
         self.assertEqual(code, 0)
 
+    def test_main_rejects_baseline_for_other_python_version(self):
+        src = self.dir / "mod.py"
+        src.write_text("x = 1\n")
+        baseline = self.dir / "baseline.json"
+        self._run_main(src, "--baseline", baseline, "--update-baseline")
+        data = json.loads(baseline.read_text())
+        data["python_version"] = "2.7"
+        baseline.write_text(json.dumps(data))
+        code, _ = self._run_main(src, "--baseline", baseline)
+        self.assertEqual(code, 2)
+
     def test_default_corpus_matches_committed_baseline(self):
         if not cc.default_baseline_path().exists():
             self.skipTest(f"no committed baseline for Python {cc.python_tag()}")
         code, out = self._run_main("--json")
         report = json.loads(out)
-        regressions = [c for c in report["changes"] if c["change"] == "regressed"]
-        self.assertEqual(regressions, [])
+        failures = [c for c in report["changes"] if c["change"] in cc.FAILING_CHANGES]
+        self.assertEqual(failures, [])
         self.assertEqual(code, 0)
 
 

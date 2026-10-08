@@ -19,7 +19,8 @@ grain to catch regressions inside files that do not yet compile as a whole.
 
 The run is compared against a committed per-Python-version baseline
 (quality/baselines/py<major>.<minor>.json). Any file or unit that drops
-to a lower rung than its baseline is a regression and fails the run.
+to a lower rung than its baseline is a regression and fails the run; so
+does a baseline record that no longer matches any entry or unit.
 
 The coherency checker (debug/check_coherency.py) is a readability
 diagnostic only: --coherency adds its score to the report, but it never
@@ -44,9 +45,9 @@ Usage
 
 Exit codes
 ----------
-    0  No regressions against the baseline
-    1  At least one regression
-    2  Configuration error (missing baseline, bad path, ...)
+    0  No regressions or missing records against the baseline
+    1  At least one regression or missing record
+    2  Configuration error (no baseline, wrong-version baseline, bad path)
 """
 
 from __future__ import annotations
@@ -61,6 +62,7 @@ import py_compile
 import signal
 import sys
 import tempfile
+import tokenize
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -84,6 +86,11 @@ LEVELS = ['decompile_error', 'syntax_error', 'compile_error', 'compiles']
 SOURCE_ERROR = 'source_error'
 
 DEFAULT_TIMEOUT = 60
+
+# A ``missing`` entry or unit fails the gate too: a baseline record that can
+# no longer be matched must be acknowledged with --update-baseline, otherwise
+# editing a unit could hide its regression.
+FAILING_CHANGES = ('regressed', 'missing')
 
 
 def level_of(status: str) -> Optional[int]:
@@ -166,11 +173,12 @@ def check_pyc(pyc_path: str, timeout: int = DEFAULT_TIMEOUT) -> Check:
 
 
 def check_source_text(source: str, workdir: str, name: str,
-                      timeout: int = DEFAULT_TIMEOUT) -> Check:
+                      timeout: int = DEFAULT_TIMEOUT, encoding: str = 'utf-8') -> Check:
     """Compile *source* on this interpreter, then decompile and classify it."""
     py_path = os.path.join(workdir, name + '.py')
     pyc_path = os.path.join(workdir, name + '.pyc')
-    with open(py_path, 'w', encoding='utf-8') as f:
+    # *encoding* must match any coding cookie still present in *source*.
+    with open(py_path, 'w', encoding=encoding) as f:
         f.write(source)
     try:
         with warnings.catch_warnings():
@@ -203,12 +211,17 @@ def _segment(lines: List[str], node: ast.stmt) -> str:
     return text if text.endswith('\n') else text + '\n'
 
 
-def _label(node: ast.stmt) -> str:
+def _label(lines: List[str], node: ast.stmt) -> str:
+    # Ids must not depend on line numbers, or moving a statement would turn
+    # it into a missing + new pair instead of comparing its status.
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
         return f'def {node.name}'
     if isinstance(node, ast.ClassDef):
         return f'class {node.name}'
-    return f'{type(node).__name__}@L{node.lineno}'
+    first = lines[node.lineno - 1][node.col_offset:].strip()
+    if len(first) > 60:
+        first = first[:57] + '...'
+    return f'{type(node).__name__}: {first}'
 
 
 def extract_units(source: str) -> List[Unit]:
@@ -242,9 +255,9 @@ def extract_units(source: str) -> List[Unit]:
         if isinstance(node, ast.ClassDef) and node.lineno != node.body[0].lineno:
             header = f'class {node.name}:\n'
             for child in node.body:
-                add(f'class {node.name}/{_label(child)}', header + _segment(lines, child))
+                add(f'class {node.name}/{_label(lines, child)}', header + _segment(lines, child))
         else:
-            add(_label(node), _segment(lines, node))
+            add(_label(lines, node), _segment(lines, node))
     return units
 
 
@@ -336,8 +349,9 @@ def check_entry(path: Path, workdir: str, timeout: int = DEFAULT_TIMEOUT,
         c = check_pyc(str(path), timeout)
         return EntryResult(rel, 'pyc', c.status, c.error)
 
-    source = path.read_text(encoding='utf-8')
-    whole = check_source_text(source, workdir, 'entry', timeout)
+    with tokenize.open(str(path)) as f:     # honours PEP 263 coding cookies
+        source, encoding = f.read(), f.encoding
+    whole = check_source_text(source, workdir, 'entry', timeout, encoding)
     result = EntryResult(rel, 'source', whole.status, whole.error)
     if whole.status == SOURCE_ERROR:
         return result
@@ -392,8 +406,8 @@ def compare(results: List[EntryResult], baseline: dict) -> List[dict]:
     """
     Diff *results* against *baseline*. Each change is a dict with ``path``,
     ``unit`` (None for the whole entry), ``change`` (regressed | improved |
-    unscorable | new | missing), ``before`` and ``after``. Only
-    ``regressed`` fails the gate.
+    unscorable | new | missing), ``before`` and ``after``. Changes listed
+    in FAILING_CHANGES fail the gate.
     """
     changes: List[dict] = []
     base_entries = baseline.get('entries', {})
@@ -455,13 +469,13 @@ def summarize(results: List[EntryResult], changes: Optional[List[dict]]) -> dict
 
 
 def build_report(results, changes, baseline_path) -> dict:
-    regressions = [c for c in changes or [] if c['change'] == 'regressed']
+    failures = [c for c in changes or [] if c['change'] in FAILING_CHANGES]
     return {
         'schema_version': SCHEMA_VERSION,
         'python_version': python_tag(),
         'levels': LEVELS,
         'baseline': _rel(baseline_path) if baseline_path else None,
-        'result': 'fail' if regressions else 'pass',
+        'result': 'fail' if failures else 'pass',
         'summary': summarize(results, changes),
         'changes': changes,
         'entries': [r.to_dict() for r in results],
@@ -506,7 +520,7 @@ def print_text(report: dict, verbose: bool = False) -> None:
         if not items:
             continue
         print(f'  {kind} ({len(items)}):')
-        shown = items if verbose or kind == 'regressed' else items[:10]
+        shown = items if verbose or kind in FAILING_CHANGES else items[:10]
         for c in shown:
             where = c['path'] + (f" :: {c['unit']}" if c['unit'] else '')
             print(f"    {where}: {c['before']} -> {c['after']}")
@@ -514,10 +528,9 @@ def print_text(report: dict, verbose: bool = False) -> None:
             print(f'    ... {len(items) - len(shown)} more (use --verbose)')
     print()
     print('RESULT: ' + report['result'].upper())
-    if any(c['change'] in ('improved', 'new', 'missing') for c in changes) \
-            and report['result'] == 'pass':
-        print('Results differ from the baseline; run with --update-baseline '
-              'on every CI Python version to record them.')
+    if any(c['change'] in ('improved', 'new', 'missing') for c in changes):
+        print('Results differ from the baseline; once the changes are intended, '
+              'run with --update-baseline on every CI Python version to record them.')
 
 
 # ---------------------------------------------------------------------------
@@ -585,6 +598,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         if baseline.get('schema_version') != SCHEMA_VERSION:
             print(f'Error: {_rel(baseline_path)} has schema_version '
                   f"{baseline.get('schema_version')}, expected {SCHEMA_VERSION}",
+                  file=sys.stderr)
+            return 2
+        if baseline.get('python_version') != python_tag():
+            print(f'Error: {_rel(baseline_path)} is for Python '
+                  f"{baseline.get('python_version')}, but this is Python {python_tag()}",
                   file=sys.stderr)
             return 2
         changes = compare(results, baseline)
