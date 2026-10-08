@@ -23,3 +23,13 @@ jobs:
         pip install ".[test]"
     - name: Test with pytest
       run: pytest
+    - name: Correctness gate
+      if: success() || failure()
+      run: python quality/check_correctness.py --coherency --report correctness-report.json
+    - name: Upload correctness report
+      if: success() || failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: correctness-report-py${{ inputs.python-version }}
+        path: correctness-report.json
+        if-no-files-found: ignore

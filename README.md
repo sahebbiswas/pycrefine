@@ -99,9 +99,21 @@ pytest tests/ -v
 
 This test suite strictly verifies the core mechanics of `pycrefine`, asserting its ability to restructure assignments, variables, data structures, exception handling blocks, functions, loops, and conditional chains.
 
+### `check_correctness.py` (Correctness Gate)
+
+Located at `quality/check_correctness.py`, this is the primary quality gate. Each `test_files/` corpus entry, and each top-level unit within it, is decompiled and placed on a correctness ladder: `decompile_error` < `syntax_error` < `compile_error` < `compiles`. The results are compared with a committed per-Python-version baseline in `quality/baselines/`. CI fails when any entry or unit drops below its baseline:
+
+```bash
+python quality/check_correctness.py              # gate against the baseline
+python quality/check_correctness.py --json       # machine-readable report
+python quality/check_correctness.py --update-baseline   # record improvements
+```
+
+See [docs/correctness.md](docs/correctness.md) for the full model, CI semantics, report schema, and current baseline.
+
 ### `check_coherency.py` (Decompilation Coherency Checker)
 
-Located at `debug/check_coherency.py`, this tool is an advanced decompilation coherency checker. It works by compiling an arbitrary Python source file to `.pyc`, decompiling it backward with `pycrefine`, and scoring how faithfully the decompiler reproduced the semantic and syntactic structure of the original source.
+Located at `debug/check_coherency.py`, this tool is an advanced decompilation coherency checker. It measures textual resemblance to the original source, so treat it as a readability diagnostic rather than a correctness check: output can score highly and still fail to compile. It works by compiling an arbitrary Python source file to `.pyc`, decompiling it backward with `pycrefine`, and scoring how faithfully the decompiler reproduced the semantic and syntactic structure of the original source.
 
 It performs a multi-dimensional analysis with scoring based on:
 - Line and Token fidelity/recall

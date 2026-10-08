@@ -3,6 +3,7 @@ trace.log
 __pycache__
 *.txt
 *.json
+!quality/baselines/*.json
 pycrefine.egg-info 
 run_tests.bat 
 KNOWN_ISSUES.md 
