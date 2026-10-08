@@ -132,19 +132,37 @@ class TestCompare(unittest.TestCase):
             "a.py": {"kind": "source", "status": "compiles", "units": {"def gone": "compiles"}},
             "b.pyc": {"kind": "pyc", "status": "compiles"},
         })
-        changes = cc.compare([self._result("a.py", cc.SOURCE_ERROR, {}),
+        changes = cc.compare([self._result("a.py", "compiles", {"def kept": "compiles"}),
                               self._result("c.pyc", "compiles")], base)
         self.assertEqual(self._changes(changes), {
-            ("a.py", None, "unscorable"),
+            ("a.py", "def gone", "missing"),
+            ("a.py", "def kept", "new"),
             ("b.pyc", None, "missing"),
             ("c.pyc", None, "new"),
         })
         report = cc.build_report([], changes, None)
         self.assertEqual(report["result"], "fail")  # missing records fail
 
+    def test_scored_record_becoming_source_error_fails(self):
+        base = self._baseline({"a.py": {"kind": "source", "status": "compiles",
+                                        "units": {"def f": "compiles"}}})
+        changes = cc.compare([self._result("a.py", cc.SOURCE_ERROR, {})], base)
+        self.assertEqual(self._changes(changes), {("a.py", None, "lost")})
+        self.assertEqual(cc.build_report([], changes, None)["result"], "fail")
+
+    def test_duplicate_label_count_change_is_ambiguous(self):
+        # A new "x = 1" inserted before the old one takes over its id.
+        base = self._baseline({"a.py": {"kind": "source", "status": "syntax_error",
+                                        "units": {"Assign: x = 1": "compiles"}}})
+        changes = cc.compare([self._result("a.py", "syntax_error",
+                                           {"Assign: x = 1": "compiles",
+                                            "Assign: x = 1#2": "syntax_error"})], base)
+        self.assertIn(("a.py", "Assign: x = 1", "ambiguous"), self._changes(changes))
+        self.assertEqual(cc.build_report([], changes, None)["result"], "fail")
+
     def test_new_and_unscorable_do_not_fail(self):
-        base = self._baseline({"a.py": {"kind": "source", "status": "compiles", "units": {}}})
-        changes = cc.compare([self._result("a.py", cc.SOURCE_ERROR, {}),
+        base = self._baseline({"a.py": {"kind": "source", "status": cc.SOURCE_ERROR}})
+        changes = cc.compare([self._result("a.py", "compiles", {}),
                               self._result("c.pyc", "compiles")], base)
         self.assertEqual(self._changes(changes), {
             ("a.py", None, "unscorable"),
@@ -189,6 +207,14 @@ class TestEndToEnd(unittest.TestCase):
             r = cc.check_entry(src, work)
         self.assertEqual(r.status, "compiles")
         self.assertEqual(set(r.units), {"Assign: name = '\u00e9t\u00e9'"})
+
+    def test_check_entry_unknown_encoding_is_source_error(self):
+        src = self.dir / "bogus.py"
+        src.write_bytes(b"# -*- coding: no-such-codec -*-\nx = 1\n")
+        with tempfile.TemporaryDirectory() as work:
+            r = cc.check_entry(src, work)
+        self.assertEqual(r.status, cc.SOURCE_ERROR)
+        self.assertEqual(r.error["stage"], "source")
 
     def test_check_entry_source_error_is_not_scored(self):
         src = self.dir / "bad.py"

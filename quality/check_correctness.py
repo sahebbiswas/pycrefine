@@ -20,7 +20,8 @@ grain to catch regressions inside files that do not yet compile as a whole.
 The run is compared against a committed per-Python-version baseline
 (quality/baselines/py<major>.<minor>.json). Any file or unit that drops
 to a lower rung than its baseline is a regression and fails the run; so
-does a baseline record that no longer matches any entry or unit.
+does any change that stops a baseline record from being compared (see
+FAILING_CHANGES).
 
 The coherency checker (debug/check_coherency.py) is a readability
 diagnostic only: --coherency adds its score to the report, but it never
@@ -45,8 +46,8 @@ Usage
 
 Exit codes
 ----------
-    0  No regressions or missing records against the baseline
-    1  At least one regression or missing record
+    0  No failing changes against the baseline
+    1  At least one failing change (regressed, missing, lost, ambiguous)
     2  Configuration error (no baseline, wrong-version baseline, bad path)
 """
 
@@ -59,6 +60,7 @@ import io
 import json
 import os
 import py_compile
+import re
 import signal
 import sys
 import tempfile
@@ -87,10 +89,14 @@ SOURCE_ERROR = 'source_error'
 
 DEFAULT_TIMEOUT = 60
 
-# A ``missing`` entry or unit fails the gate too: a baseline record that can
-# no longer be matched must be acknowledged with --update-baseline, otherwise
-# editing a unit could hide its regression.
-FAILING_CHANGES = ('regressed', 'missing')
+# Besides ``regressed``, every change that stops a baseline record from being
+# compared fails the gate, so it must be acknowledged with --update-baseline
+# instead of hiding a regression:
+#   missing    the record no longer matches any entry or unit
+#   lost       a scored record now has a source_error and can't be scored
+#   ambiguous  the number of units sharing a label changed, so the ``#n``
+#              suffixes may now point at different statements
+FAILING_CHANGES = ('regressed', 'missing', 'lost', 'ambiguous')
 
 
 def level_of(status: str) -> Optional[int]:
@@ -349,8 +355,11 @@ def check_entry(path: Path, workdir: str, timeout: int = DEFAULT_TIMEOUT,
         c = check_pyc(str(path), timeout)
         return EntryResult(rel, 'pyc', c.status, c.error)
 
-    with tokenize.open(str(path)) as f:     # honours PEP 263 coding cookies
-        source, encoding = f.read(), f.encoding
+    try:
+        with tokenize.open(str(path)) as f:     # honours PEP 263 coding cookies
+            source, encoding = f.read(), f.encoding
+    except (SyntaxError, UnicodeDecodeError, LookupError) as exc:
+        return EntryResult(rel, 'source', SOURCE_ERROR, _error('source', exc))
     whole = check_source_text(source, workdir, 'entry', timeout, encoding)
     result = EntryResult(rel, 'source', whole.status, whole.error)
     if whole.status == SOURCE_ERROR:
@@ -393,10 +402,21 @@ def to_baseline(results: List[EntryResult]) -> dict:
             'entries': entries}
 
 
+def _label_counts(unit_ids) -> Dict[str, int]:
+    """Count unit ids per label, folding the ``#n`` duplicate suffixes."""
+    counts: Dict[str, int] = {}
+    for uid in unit_ids:
+        label = re.sub(r'#\d+$', '', uid)
+        counts[label] = counts.get(label, 0) + 1
+    return counts
+
+
 def _change(before: str, after: str) -> Optional[str]:
     if before == after:
         return None
     lb, la = level_of(before), level_of(after)
+    if lb is not None and la is None:
+        return 'lost'
     if lb is None or la is None:
         return 'unscorable'
     return 'regressed' if la < lb else 'improved'
@@ -406,8 +426,8 @@ def compare(results: List[EntryResult], baseline: dict) -> List[dict]:
     """
     Diff *results* against *baseline*. Each change is a dict with ``path``,
     ``unit`` (None for the whole entry), ``change`` (regressed | improved |
-    unscorable | new | missing), ``before`` and ``after``. Changes listed
-    in FAILING_CHANGES fail the gate.
+    lost | unscorable | ambiguous | new | missing), ``before`` and ``after``.
+    Changes listed in FAILING_CHANGES fail the gate.
     """
     changes: List[dict] = []
     base_entries = baseline.get('entries', {})
@@ -425,6 +445,11 @@ def compare(results: List[EntryResult], baseline: dict) -> List[dict]:
         if ch:
             add(r.path, None, ch, b['status'], r.status)
         b_units = b.get('units', {})
+        b_counts, r_counts = _label_counts(b_units), _label_counts(r.units)
+        for label in sorted(set(b_counts) & set(r_counts)):
+            if b_counts[label] != r_counts[label]:
+                add(r.path, label, 'ambiguous',
+                    f'{b_counts[label]} units', f'{r_counts[label]} units')
         for uid, u in r.units.items():
             if uid not in b_units:
                 add(r.path, uid, 'new', None, u['status'])
@@ -515,7 +540,8 @@ def print_text(report: dict, verbose: bool = False) -> None:
         print('\n  baseline: not compared')
         return
     print(f"\n  baseline: {report['baseline']}")
-    for kind in ('regressed', 'improved', 'unscorable', 'new', 'missing'):
+    for kind in ('regressed', 'lost', 'ambiguous', 'missing', 'improved',
+                 'unscorable', 'new'):
         items = [c for c in changes if c['change'] == kind]
         if not items:
             continue
@@ -528,7 +554,7 @@ def print_text(report: dict, verbose: bool = False) -> None:
             print(f'    ... {len(items) - len(shown)} more (use --verbose)')
     print()
     print('RESULT: ' + report['result'].upper())
-    if any(c['change'] in ('improved', 'new', 'missing') for c in changes):
+    if any(c['change'] != 'regressed' for c in changes):
         print('Results differ from the baseline; once the changes are intended, '
               'run with --update-baseline on every CI Python version to record them.')
 

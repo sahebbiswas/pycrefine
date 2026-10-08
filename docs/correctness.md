@@ -73,13 +73,18 @@ records the status of every entry and every unit.
 | `improved`   | an entry or unit is on a higher rung than its baseline         | no        |
 | `new`        | an entry or unit has no baseline record                        | no        |
 | `missing`    | a baseline record has no corresponding entry or unit           | **yes**   |
-| `unscorable` | either side is `source_error`                                  | no        |
+| `lost`       | a scored record now has a `source_error`                       | **yes**   |
+| `ambiguous`  | the number of units sharing one label (`label`, `label#2`, ...) changed | **yes** |
+| `unscorable` | the baseline record was a `source_error`                       | no        |
 
-Exit codes: `0` pass, `1` at least one `regressed` or `missing` change, `2`
+Exit codes: `0` pass, `1` at least one failing change, `2`
 configuration error (no baseline, a baseline for another Python version or
 schema, bad path).
 
-`missing` fails because an unmatched record can't be compared. For example,
+`missing`, `lost` and `ambiguous` fail because the baseline record can no
+longer be compared reliably. (`ambiguous` covers duplicate labels: inserting a
+statement whose first line matches an existing one would otherwise shift the
+`#n` suffixes onto different statements.) For example,
 editing a statement's first line renames its unit, and without this rule a
 regression in it would pass as `missing` + `new`. Changing the corpus
 therefore needs a baseline update in the same change.
