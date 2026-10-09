@@ -163,18 +163,16 @@ Default corpus: 13 entries (7 sources, 6 `.pyc` fixtures) and 77 units.
 | Host Python | Entries compiling | Units compiling | Units AST-equal |
 |-------------|------------------:|----------------:|----------------:|
 | 3.9         | 9 / 13            | 77 / 77         | 58 / 77         |
-| 3.12        | 3 / 13            | 70 / 77         | 45 / 77         |
-| 3.14        | 1 / 13            | 68 / 77         | 44 / 77         |
+| 3.12        | 5 / 13            | 70 / 77         | 45 / 77         |
+| 3.14        | 3 / 13            | 68 / 77         | 44 / 77         |
 
 The coherency composite for every source entry is 90% or higher on every
 version, including the entries that fail to compile.
 
 Main gaps visible in the baseline:
 
-* Cross-version `.pyc` loading fails: a fixture decompiles only when its
-  magic number matches the host interpreter. The others fail with
-  `Could not find valid marshal code object` (4 or 5 of the 6 fixtures,
-  depending on the host).
+* Python 3.10+ `.pyc` fixtures decompile only on a host of the same minor
+  version (#94); Python 3.9 fixtures decompile on every host (#89).
 * On 3.12 and 3.14 the module's implicit final return is emitted as a
   module-level `return None` (`compile_error`).
 * Some exception-handling and conditional constructs produce unparsable

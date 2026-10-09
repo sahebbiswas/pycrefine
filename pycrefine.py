@@ -2746,7 +2746,7 @@ class DecompilerGeneric(DecompilerBase):
             # --- Loading ---
             if op in ("LOAD_CONST", "LOAD_NAME", "LOAD_FAST", "LOAD_GLOBAL",
                       "LOAD_SMALL_INT", "LOAD_GLOBAL_MODULE", "LOAD_DEREF"):
-                if isinstance(ins.argval, types.CodeType):
+                if _is_code(ins.argval):
                     stack.append(("code", ins.argval))
                 else:
                     val = ins.argval
@@ -3149,7 +3149,7 @@ class DecompilerGeneric(DecompilerBase):
 
     def _op_load(self, instr: BytecodeInstruction):
         opname = instr.opname
-        if isinstance(instr.argval, types.CodeType):
+        if _is_code(instr.argval):
             self.stack.append(("code", instr.argval))
         elif opname == "LOAD_CONST" and instr.arg == 0 and isinstance(instr.argval, str) and self.has_doc:
             pass  # already emitted as docstring
@@ -6758,11 +6758,47 @@ class Decompiler314(Decompiler311Plus):
 # Marshal parser  (cross-version .pyc reading)
 # ---------------------------------------------------------------------------
 
+class ForeignCode:
+    """
+    A code object read from a .pyc of a different Python version.
+
+    The host interpreter cannot build a real ``types.CodeType`` from another
+    version's bytecode, so the parsed fields are kept as plain ``co_*``
+    attributes. The decompilers only read those attributes.
+    """
+
+    def __init__(self, **fields: Any):
+        self.__dict__.update(fields)
+
+    def __repr__(self) -> str:
+        return f"<ForeignCode {self.co_name!r}>"
+
+
+def _is_code(obj: Any) -> bool:
+    """True for a host code object or one parsed from another Python version."""
+    return isinstance(obj, (types.CodeType, ForeignCode))
+
+
+# Kinds in a 3.11+ code object's co_localspluskinds (Include/internal/pycore_code.h)
+_CO_FAST_LOCAL = 0x20
+_CO_FAST_CELL = 0x40
+_CO_FAST_FREE = 0x80
+
+
 class MarshalParser:
-    def __init__(self, data: bytes):
+    """
+    Pure-Python reader for the marshal format, used when a .pyc was written
+    by a different Python version than the host.
+
+    *target_version* is the (major, minor) version that wrote the data; it
+    selects the code-object layout, which changed in 3.11.
+    """
+
+    def __init__(self, data: bytes, target_version: Optional[Tuple[int, int]] = None):
         self.data = data
         self.offset = 0
         self.refs: List[Any] = []
+        self.target_version = target_version or sys.version_info[:2]
 
     def _read(self, n: int) -> bytes:
         if self.offset + n > len(self.data):
@@ -6809,23 +6845,55 @@ class MarshalParser:
 
         return result
 
+    def _read_float_str(self) -> float:
+        return float(self._read(self._read_byte()).decode("ascii"))
+
     def _load_inner(self, type_char: str) -> Any:
+        # Type codes from CPython's Python/marshal.c
+        if type_char == "0":
+            return None                        # TYPE_NULL
         if type_char == "N":
             return None
         if type_char == "T":
             return True
         if type_char == "F":
             return False
+        if type_char == "S":
+            return StopIteration
+        if type_char == ".":
+            return Ellipsis
         if type_char == "i":
             return self._read_long()
-        if type_char in ("s", "u", "Z", "a", "z", "A", "t"):
+        if type_char == "I":                   # TYPE_INT64 (pre-3.4 writers)
+            return struct.unpack("<q", self._read(8))[0]
+        if type_char == "l":
+            size = self._read_long()
+            # 3.4+ uses 15-bit digits stored in 2 bytes
+            res = 0
+            for i in range(abs(size)):
+                digit = struct.unpack("<H", self._read(2))[0]
+                res += digit * (2 ** (15 * i))
+            return -res if size < 0 else res
+        if type_char == "g":
+            return struct.unpack("<d", self._read(8))[0]
+        if type_char == "f":
+            return self._read_float_str()
+        if type_char == "y":                   # TYPE_BINARY_COMPLEX
+            real, imag = struct.unpack("<dd", self._read(16))
+            return complex(real, imag)
+        if type_char == "x":
+            real = self._read_float_str()
+            return complex(real, self._read_float_str())
+        if type_char in ("s", "u", "t", "a", "A", "z", "Z"):
             size = self._read_byte() if type_char in ("z", "Z") else self._read_long()
             raw = self._read(size)
             if type_char == "s":
                 return raw
-            return raw.decode("utf-8", "replace")
-        if type_char in ("y", ")", "("):
-            size = self._read_byte() if type_char in ("y", ")") else self._read_long()
+            if type_char in ("a", "A", "z", "Z"):
+                return raw.decode("latin-1")
+            return raw.decode("utf-8", "surrogatepass")
+        if type_char in (")", "("):
+            size = self._read_byte() if type_char == ")" else self._read_long()
             return tuple(self.load() for _ in range(size))
         if type_char == "[":
             size = self._read_long()
@@ -6838,25 +6906,12 @@ class MarshalParser:
                     break
                 res_dict[key] = self.load()
             return res_dict
-        if type_char in ("I", "l"):
-            if type_char == "I":
-                return struct.unpack("<q", self._read(8))[0]
-            size = self._read_long()
-            # 3.4+ uses 15-bit digits stored in 2 bytes
-            n_digits = abs(size)
-            res = 0
-            for i in range(n_digits):
-                digit = struct.unpack("<H", self._read(2))[0]
-                res += digit * (2**(15 * i))
-            return -res if size < 0 else res
-        if type_char == "S":
-            return StopIteration
-        if type_char == "g":
-            return struct.unpack("<d", self._read(8))[0]
         if type_char in ("<", ">"):
             size = self._read_long()
             items = [self.load() for _ in range(size)]
             return set(items) if type_char == "<" else frozenset(items)
+        if type_char == ":":                   # TYPE_SLICE (3.14+)
+            return slice(self.load(), self.load(), self.load())
         if type_char == "c":
             return self._load_code()
 
@@ -6864,119 +6919,98 @@ class MarshalParser:
             f"Unsupported marshal type: {type_char!r} (hex: {hex(ord(type_char))})"
         )
 
-    # version-aware CodeType constructor
-    def _load_code(self) -> types.CodeType:
+    @staticmethod
+    def _names(x: Any) -> Tuple[str, ...]:
+        if not x:
+            return ()
+        return tuple(s.decode("utf-8", "replace") if isinstance(s, bytes) else str(s) for s in x)
+
+    @staticmethod
+    def _bytes(x: Any) -> bytes:
+        if isinstance(x, str):
+            return x.encode("latin-1")
+        return bytes(x) if x else b""
+
+    def _load_code(self) -> ForeignCode:
+        """Read a code object laid out the way *target_version* writes it."""
         argcount = self._read_long()
         posonlyargcount = self._read_long()
         kwonlyargcount = self._read_long()
-        nlocals = self._read_long()
-        stacksize = self._read_long()
-        flags = self._read_long()
-        code = self.load()
-        consts = self.load()
-        names = self.load()
-        varnames = self.load()
-        freevars = self.load()
-        cellvars = self.load()
-        filename = self.load()
-        name = self.load()
-        firstlineno = self._read_long()
-        lnotab = self.load()
 
-        # Python 3.11+ includes exceptiontable after lnotab in the marshal stream
-        # For earlier versions, this field doesn't exist in the stream, so we default to b""
-        # We need to peek at the Python version that created the .pyc to know if it's there
-        # For now, we'll try to read it and default to b"" if it's not present or parsing fails
-        exceptiontable = b""
-        if sys.version_info >= (3, 11):
-            try:
-                exceptiontable = self.load()
-                if isinstance(exceptiontable, str):
-                    exceptiontable = bytes(exceptiontable, 'latin1')
-                elif not isinstance(exceptiontable, bytes):
-                    exceptiontable = bytes(exceptiontable) if exceptiontable else b""
-            except Exception:
-                exceptiontable = b""
-
-        def to_tuple_strings(x):
-            if x is None or isinstance(x, int):
-                return ()
-            return tuple(
-                s.decode("utf-8", "replace") if isinstance(s, bytes) else str(s)
-                for s in x
-            )
-
-        def to_tuple(x):
-            if isinstance(x, tuple):
-                return x
-            if x is None or isinstance(x, int):
-                return ()
-            return tuple(x)
-
-        code = bytes(code, 'latin1') if isinstance(code, str) else bytes(code)
-        consts = to_tuple(consts)
-        names = to_tuple_strings(names)
-        varnames = to_tuple_strings(varnames)
-        freevars = to_tuple_strings(freevars)
-        cellvars = to_tuple_strings(cellvars)
-        lnotab = bytes(lnotab, 'latin1') if isinstance(lnotab, str) else bytes(lnotab)
-        filename = filename.decode("utf-8", "replace") if isinstance(filename, bytes) else str(filename)
-        name = name.decode("utf-8", "replace") if isinstance(name, bytes) else str(name)
-
-        vi = sys.version_info
-
-        # branch on the *host* Python's CodeType signature
-        if vi >= (3, 11):
-            # 3.11+: argcount, posonlyargcount, kwonlyargcount, nlocals,
-            #        stacksize, flags, codestring, constants, names,
-            #        varnames, filename, name, qualname, firstlineno,
-            #        linetable, exceptiontable, freevars, cellvars
-
-            # Map lnotab to linetable (with appropriate padding if needed)
-            # 3.11+ expects an exceptiontable as well.
-            return types.CodeType(
-                argcount, posonlyargcount, kwonlyargcount, nlocals,
-                stacksize, flags, code, consts, names, varnames,
-                filename, name, name,       # qualname
-                firstlineno, lnotab, exceptiontable,   # linetable, exceptiontable
-                freevars, cellvars
-            )
-        elif vi >= (3, 8):
-            # 3.8–3.10: argcount, posonlyargcount, kwonlyargcount, nlocals,
-            #           stacksize, flags, codestring, constants, names,
-            #           varnames, filename, name, firstlineno, lnotab,
-            #           freevars, cellvars
-            return types.CodeType(
-                argcount, posonlyargcount, kwonlyargcount, nlocals,
-                stacksize, flags, code, consts, names, varnames,
-                filename, name,
-                firstlineno, lnotab,
-                freevars, cellvars,
-            )
+        if self.target_version >= (3, 11):
+            # 3.11+: no nlocals; locals, cells and frees share one table
+            # (co_localsplusnames) tagged by co_localspluskinds.
+            stacksize = self._read_long()
+            flags = self._read_long()
+            code = self.load()
+            consts = self.load()
+            names = self.load()
+            localsplusnames = self._names(self.load())
+            localspluskinds = self._bytes(self.load())
+            filename = self.load()
+            name = self.load()
+            qualname = self.load()
+            firstlineno = self._read_long()
+            linetable = self.load()
+            exceptiontable = self.load()
+            kinds = list(zip(localsplusnames, localspluskinds))
+            varnames = tuple(n for n, k in kinds if k & _CO_FAST_LOCAL)
+            cellvars = tuple(n for n, k in kinds if k & _CO_FAST_CELL)
+            freevars = tuple(n for n, k in kinds if k & _CO_FAST_FREE)
+            nlocals = len(varnames)
         else:
-            # 3.7 and below (no posonlyargcount)
-            return types.CodeType(
-                argcount, kwonlyargcount, nlocals,
-                stacksize, flags, code, consts, names, varnames,
-                filename, name,
-                firstlineno, lnotab,
-                freevars, cellvars,
-            )
+            # 3.8 - 3.10
+            nlocals = self._read_long()
+            stacksize = self._read_long()
+            flags = self._read_long()
+            code = self.load()
+            consts = self.load()
+            names = self.load()
+            varnames = self._names(self.load())
+            freevars = self._names(self.load())
+            cellvars = self._names(self.load())
+            filename = self.load()
+            name = self.load()
+            qualname = name
+            firstlineno = self._read_long()
+            linetable = self.load()
+            exceptiontable = b""
+
+        return ForeignCode(
+            co_argcount=argcount,
+            co_posonlyargcount=posonlyargcount,
+            co_kwonlyargcount=kwonlyargcount,
+            co_nlocals=nlocals,
+            co_stacksize=stacksize,
+            co_flags=flags,
+            co_code=self._bytes(code),
+            co_consts=tuple(consts) if consts else (),
+            co_names=self._names(names),
+            co_varnames=varnames,
+            co_freevars=freevars,
+            co_cellvars=cellvars,
+            co_filename=str(filename),
+            co_name=str(name),
+            co_qualname=str(qualname),
+            co_firstlineno=firstlineno,
+            co_linetable=self._bytes(linetable),
+            co_exceptiontable=self._bytes(exceptiontable),
+        )
 
 
 # ---------------------------------------------------------------------------
 # Entry point: load .pyc and pick decompiler
 # ---------------------------------------------------------------------------
 
-# updated magic-number version ranges
-# Python version   magic (& 0xFFFF) range  (approximate — patch releases vary
-#                                           by a few units but stay in band)
-# 3.9              3410 – 3429
+# Magic-number (& 0xFFFF) ranges, from the history in CPython's
+# Lib/importlib/_bootstrap_external.py. Final releases: 3.9 = 3425,
+# 3.10 = 3439, 3.11 = 3495, 3.12 = 3531, 3.13 = 3571, 3.14 = 3627.
+# 3.9              3420 – 3429
 # 3.10             3430 – 3449
-# 3.11             3450 – 3494
-# 3.12             3495 – 3530
-# 3.13             3531 – 3559
-# 3.14             3560+
+# 3.11             3450 – 3499
+# 3.12             3500 – 3549
+# 3.13             3550 – 3599
+# 3.14             3600 – 3649
 
 def _get_python_version_from_magic(version_id: int) -> Optional[str]:
     """Return a Python version string (e.g., '3.12') corresponding to the given magic number."""
@@ -6994,14 +7028,16 @@ def _get_python_version_from_magic(version_id: int) -> Optional[str]:
         return "3.9"
     if 3430 <= version_id <= 3449:
         return "3.10"
-    if 3450 <= version_id <= 3494:
+    if 3450 <= version_id <= 3499:
         return "3.11"
-    if 3495 <= version_id <= 3530:
+    if 3500 <= version_id <= 3549:
         return "3.12"
-    if 3531 <= version_id <= 3559:
+    if 3550 <= version_id <= 3599:
         return "3.13"
-    if version_id >= 3560:
-        return "3.14+"
+    if 3600 <= version_id <= 3649:
+        return "3.14"
+    if version_id >= 3650:
+        return "3.15+"
     return None
 
 
@@ -7034,10 +7070,29 @@ def get_decompiler(filepath: str, beautification_level: str = 'core') -> Decompi
 
         raise ValueError(msg)
 
-    host_magic = int.from_bytes(importlib.util.MAGIC_NUMBER, "little")
+    tv_str = _get_python_version_from_magic(version_id)
+    if tv_str:
+        target_version = tuple(map(int, tv_str.rstrip('+').split('.')))
+    else:
+        target_version = sys.version_info[:2]
+
+    # Only the 3.9 backend decodes bytecode itself; the 3.10+ backends read
+    # instructions through the host's dis module, so they need a host of the
+    # same minor version.
+    if (magic != host_magic and version_id >= 3430
+            and target_version != sys.version_info[:2]):
+        host_ver = f"{sys.version_info[0]}.{sys.version_info[1]}"
+        raise ValueError(
+            f"Cannot decompile Python {tv_str or 'unknown'} bytecode from '{filepath}' "
+            f"under Python {host_ver}: Python 3.10+ bytecode can only be decompiled "
+            f"by the same Python minor version that wrote it. Run pycrefine under "
+            f"Python {tv_str or 'that version'}. (Python 3.9 bytecode works on any host.)"
+        )
 
     code_obj = None
-    if magic == host_magic:
+    # The marshal format only changes between minor versions, so the native
+    # loader also handles e.g. a pre-release .pyc of the host's own version.
+    if magic == host_magic or target_version == sys.version_info[:2]:
         for offset in (16, 12, 8, 4):
             try:
                 obj = marshal.load(io.BytesIO(all_data[offset:]))
@@ -7050,38 +7105,31 @@ def get_decompiler(filepath: str, beautification_level: str = 'core') -> Decompi
     if code_obj is None:
         for offset in (16, 12, 8, 4):
             try:
-                parser = MarshalParser(all_data[offset:])
-                obj = parser.load()
-                if isinstance(obj, types.CodeType):
+                obj = MarshalParser(all_data[offset:], target_version).load()
+                if _is_code(obj):
                     code_obj = obj
                     break
             except Exception:
                 continue
 
-    if not isinstance(code_obj, types.CodeType):
-        input_ver = _get_python_version_from_magic(version_id)
+    if not _is_code(code_obj):
         msg = f"Could not find valid marshal code object in .pyc file '{filepath}'."
-        if input_ver:
-            msg += f" (Inferred version: Python {input_ver})"
+        if tv_str:
+            msg += f" (Inferred version: Python {tv_str})"
         raise ValueError(msg)
 
-    tv_str = _get_python_version_from_magic(version_id)
-    if tv_str:
-        target_version = tuple(map(int, tv_str.replace('+', '').split('.')))
-    else:
-        target_version = sys.version_info[:2]
-
-    # corrected dispatch table
     if 3410 <= version_id <= 3429:      # 3.9
         dec = Decompiler39(code_obj, beautification_level=beautification_level, target_version=target_version)
-    elif version_id >= 3560:            # 3.14+
+    elif version_id >= 3550:            # 3.13+
+        # 3.13 introduced the STORE_FAST_STORE_FAST / LOAD_FAST_LOAD_FAST
+        # superinstructions, which only Decompiler314 understands.
         dec = Decompiler314(code_obj, beautification_level=beautification_level, target_version=target_version)
-    elif version_id >= 3430:            # 3.10, 3.11, 3.12, 3.13
+    elif version_id >= 3430:            # 3.10 - 3.12
         dec = Decompiler311Plus(code_obj, beautification_level=beautification_level, target_version=target_version)
     else:
         # Fallback for very old or unrecognised versions
         dec = DecompilerGeneric(code_obj, target_version=target_version, beautification_level=beautification_level)
-        
+
     return dec
 
 

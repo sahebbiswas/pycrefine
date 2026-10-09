@@ -1,6 +1,6 @@
 # pycrefine 🐍
 
-A Python `.pyc` decompiler that reconstructs readable source code from compiled bytecode. Built to correctly handle `.pyc` files from Python **3.9 and higher**, regardless of which Python version you run the decompiler under. It is currently being actively tested for Python **3.9, 3.12, and 3.14**.
+A Python `.pyc` decompiler that reconstructs readable source code from compiled bytecode. Built to handle `.pyc` files from Python **3.9 and higher**. Python 3.9 bytecode can be decompiled under any supported Python version; 3.10+ bytecode currently needs the same Python minor version that wrote it (see [#94](https://github.com/sahebbiswas/pycrefine/issues/94)). It is currently being actively tested for Python **3.9, 3.12, and 3.14**.
 
 ![ Python 3.9 ](https://github.com/sahebbiswas/pycrefine/actions/workflows/ci-py39.yml/badge.svg)
 ![ Python 3.12 ](https://github.com/sahebbiswas/pycrefine/actions/workflows/ci-py312.yml/badge.svg)
@@ -51,7 +51,7 @@ print(source_code)
 
 ### Features
 *   **Automatic Version Navigation:** Reads the magic number from the `.pyc` header and seamlessly routes execution to the appropriate decompiler logic.
-*   **Cross-Version Parsing:** You can run `pycrefine` on newer Python versions (e.g., 3.12) and perfectly parse a `.pyc` compiled by an older version (e.g., 3.9), avoiding any native bytecode incompatibility issues.
+*   **Cross-Version Parsing:** A built-in marshal reader parses `.pyc` files written by other Python versions, so you can run `pycrefine` on a newer Python (e.g., 3.12) and decompile a `.pyc` compiled by Python 3.9. For 3.10+ bytecode, run `pycrefine` under the Python version that compiled the file.
 *   **PEP 552 Support:** Correctly processes both timestamp-based and hash-based `.pyc` headers introduced dynamically in Python 3.7.
 *   **Dispatch Table Architecture:** The decompiler engine uses a modular opcode dispatch mapping designed to simplify extending and maintaining opcode handlers across newer Python versions.
 

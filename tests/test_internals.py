@@ -2,6 +2,7 @@ import io
 import marshal
 import os
 import struct
+import sys
 import tempfile
 import types
 import unittest
@@ -90,11 +91,26 @@ class TestDecompilerDispatch(unittest.TestCase):
 
     def test_version_dispatch_312(self):
         """Python 3.12 magic range -> Decompiler311Plus."""
-        self._check_version_dispatch(3495, "Decompiler311Plus")
+        self._check_version_dispatch(3531, "Decompiler311Plus")
+
+    def test_version_dispatch_313(self):
+        """Python 3.13 uses the 3.14 backend for its superinstructions."""
+        self._check_version_dispatch(3571, "Decompiler314")
 
     def test_version_dispatch_314(self):
         """Python 3.14 magic range -> Decompiler314."""
-        self._check_version_dispatch(3560, "Decompiler314")
+        self._check_version_dispatch(3627, "Decompiler314")
+
+    def test_magic_to_version(self):
+        from pycrefine import _get_python_version_from_magic as v
+        # Final-release magic numbers of each supported version
+        self.assertEqual(v(3425), "3.9")
+        self.assertEqual(v(3439), "3.10")
+        self.assertEqual(v(3495), "3.11")
+        self.assertEqual(v(3531), "3.12")
+        self.assertEqual(v(3571), "3.13")
+        self.assertEqual(v(3627), "3.14")
+        self.assertEqual(v(3650), "3.15+")
 
 
 class TestMarshalParser(unittest.TestCase):
@@ -140,13 +156,30 @@ class TestMarshalParser(unittest.TestCase):
         self.assertEqual(p.load(), s)
 
     def test_load_small_tuple(self):
-        # TYPE_SMALL_TUPLE 'y', size=2, then N, N
-        p = self._make_parser(b"y\x02NN")
+        # TYPE_SMALL_TUPLE ')', size=2, then N, N
+        p = self._make_parser(b")\x02NN")
         self.assertEqual(p.load(), (None, None))
 
     def test_load_empty_tuple(self):
-        p = self._make_parser(b"y\x00")
+        p = self._make_parser(b")\x00")
         self.assertEqual(p.load(), ())
+
+    def test_matches_native_marshal(self):
+        """Every constant kind marshal can write must read back unchanged."""
+        values = [None, True, False, Ellipsis, 7, -2**70, 2.5, 1.5 - 2j,
+                  b"by", "uni\u00e9", "ascii", (1, (2,)), [1, "a"],
+                  {"k": 1}, {1, 2}, frozenset({3}), StopIteration]
+        for value in values:
+            with self.subTest(value=value):
+                self.assertEqual(MarshalParser(marshal.dumps(value)).load(), value)
+
+    def test_load_null(self):
+        self.assertIsNone(self._make_parser(b"0").load())
+
+    def test_load_slice(self):
+        # TYPE_SLICE (3.14+): start, stop, step
+        p = self._make_parser(b":" + b"i" + struct.pack("<i", 1) + b"NN")
+        self.assertEqual(p.load(), slice(1, None, None))
 
     def test_load_list(self):
         p = self._make_parser(b"[" + struct.pack("<i", 2) + b"TF")
@@ -171,6 +204,51 @@ class TestMarshalParser(unittest.TestCase):
         second = p.load()
         self.assertIsNone(first)
         self.assertIsNone(second)
+
+
+class TestCrossVersionLoading(unittest.TestCase):
+    """Bytecode written by another Python version (issue #89)."""
+
+    FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "test_files")
+
+    def _fixture(self, name):
+        return os.path.join(self.FIXTURES, name)
+
+    def test_39_fixture_decompiles_on_any_host(self):
+        out = get_decompiler(self._fixture("simple.cpython-39.pyc")).decompile()
+        self.assertIn("def show_info(x):", out)
+        compile(out, "<decompiled>", "exec")
+
+    def test_39_code_layout(self):
+        with open(self._fixture("simple.cpython-39.pyc"), "rb") as f:
+            data = f.read()[16:]
+        code = MarshalParser(data, (3, 9)).load()
+        func = next(c for c in code.co_consts if hasattr(c, "co_code"))
+        self.assertEqual(func.co_name, "show_info")
+        self.assertEqual(func.co_argcount, 1)
+        self.assertEqual(func.co_varnames, ("x", "i"))
+
+    @unittest.skipIf(sys.version_info < (3, 11), "needs a 3.11+ host to write 3.11+ marshal data")
+    def test_311_code_layout_matches_host(self):
+        src = "def outer(a):\n    b = 1\n    def inner():\n        return a + b\n    return inner\n"
+        native = compile(src, "<t>", "exec")
+        parsed = MarshalParser(marshal.dumps(native), sys.version_info[:2]).load()
+        n_outer = next(c for c in native.co_consts if isinstance(c, types.CodeType))
+        p_outer = next(c for c in parsed.co_consts if hasattr(c, "co_code"))
+        for attr in ("co_name", "co_qualname", "co_argcount", "co_varnames",
+                     "co_cellvars", "co_freevars", "co_names", "co_code",
+                     "co_exceptiontable", "co_firstlineno", "co_flags"):
+            with self.subTest(attr=attr):
+                self.assertEqual(getattr(p_outer, attr), getattr(n_outer, attr))
+        n_inner = next(c for c in n_outer.co_consts if isinstance(c, types.CodeType))
+        p_inner = next(c for c in p_outer.co_consts if hasattr(c, "co_code"))
+        self.assertEqual(p_inner.co_freevars, n_inner.co_freevars)
+
+    def test_foreign_310_plus_bytecode_gives_clear_error(self):
+        name = ("simple.cpython-313.pyc" if sys.version_info[:2] != (3, 13)
+                else "simple.cpython-314.pyc")
+        with self.assertRaisesRegex(ValueError, "can only be decompiled by the same Python minor version"):
+            get_decompiler(self._fixture(name))
 
 
 class TestMarshalParserCodeType(unittest.TestCase):
