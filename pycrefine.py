@@ -6779,6 +6779,9 @@ def _is_code(obj: Any) -> bool:
     return isinstance(obj, (types.CodeType, ForeignCode))
 
 
+# TYPE_NULL: terminates a marshalled dict, distinct from a None key
+_MARSHAL_NULL = object()
+
 # Kinds in a 3.11+ code object's co_localspluskinds (Include/internal/pycore_code.h)
 _CO_FAST_LOCAL = 0x20
 _CO_FAST_CELL = 0x40
@@ -6851,7 +6854,7 @@ class MarshalParser:
     def _load_inner(self, type_char: str) -> Any:
         # Type codes from CPython's Python/marshal.c
         if type_char == "0":
-            return None                        # TYPE_NULL
+            return _MARSHAL_NULL               # TYPE_NULL
         if type_char == "N":
             return None
         if type_char == "T":
@@ -6902,7 +6905,7 @@ class MarshalParser:
             res_dict: Dict[Any, Any] = {}
             while True:
                 key = self.load()
-                if key is None:
+                if key is _MARSHAL_NULL:       # end of dict; a None key is 'N'
                     break
                 res_dict[key] = self.load()
             return res_dict

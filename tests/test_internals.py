@@ -168,13 +168,12 @@ class TestMarshalParser(unittest.TestCase):
         """Every constant kind marshal can write must read back unchanged."""
         values = [None, True, False, Ellipsis, 7, -2**70, 2.5, 1.5 - 2j,
                   b"by", "uni\u00e9", "ascii", (1, (2,)), [1, "a"],
-                  {"k": 1}, {1, 2}, frozenset({3}), StopIteration]
+                  {"k": 1}, {None: 1, "after": 2}, {1, 2}, frozenset({3}),
+                  StopIteration]
         for value in values:
             with self.subTest(value=value):
                 self.assertEqual(MarshalParser(marshal.dumps(value)).load(), value)
 
-    def test_load_null(self):
-        self.assertIsNone(self._make_parser(b"0").load())
 
     def test_load_slice(self):
         # TYPE_SLICE (3.14+): start, stop, step
