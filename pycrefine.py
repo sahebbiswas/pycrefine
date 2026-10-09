@@ -851,6 +851,25 @@ class DecompilerBase:
             return s
         return s
 
+    def _module_level_return_none(self) -> bool:
+        """
+        Handle a `return None` in code that is not a function body.
+
+        Module and class bodies cannot contain a `return` statement, so every
+        `return None` there is compiler-generated: 3.12+ copies the implicit
+        final return to the end of each branch, and compiles a `break` out of a
+        loop at the end of the module as `return None`. Emits `break` inside a
+        loop and nothing elsewhere.
+
+        Returns:
+            True if the return was handled here, False for function bodies.
+        """
+        if getattr(self.code_obj, "co_flags", 0) & 0x1:   # CO_OPTIMIZED: a function
+            return False
+        if any(btype in ("for", "while") for _, btype in getattr(self, "blocks", [])):
+            self._append_reconstructed("break")
+        return True
+
     def is_compiler_generated_return(self, instr_index: int) -> bool:
         """
         Determine whether the RETURN at the given instruction index is the implicit compiler-inserted `return None`.
@@ -3849,6 +3868,8 @@ class DecompilerGeneric(DecompilerBase):
         if self.stack:
             val = self.stack.pop()
             val_str = str(val)
+            if val_str == "None" and self._module_level_return_none():
+                return
             # Use the new predicate for smarter suppression
             is_compiler_gen = val_str == "None" and self.is_compiler_generated_return(self.pc - 1)
 
@@ -3877,6 +3898,8 @@ class DecompilerGeneric(DecompilerBase):
         #   - Inside a 'while True:' (NOP-driven, unconditional) block: it's `break`
         #   - Everywhere else: compiler-generated exit sentinel — suppress if effectively last
         if instr.argval is None:
+            if self._module_level_return_none():
+                return
             in_while_true = any(
                 b[1] == "while" and b[0] in getattr(self, "_while_true_ends", set())
                 for b in self.blocks

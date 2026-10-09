@@ -8,7 +8,7 @@
     },
     "test_files/comprehensive.cpython-314.pyc": {
       "kind": "pyc",
-      "status": "compile_error"
+      "status": "compiles"
     },
     "test_files/comprehensive.cpython-39.pyc": {
       "kind": "pyc",
@@ -20,7 +20,7 @@
       "units": {
         "Assign: VERSION = \"1.0.0\"": "compiles",
         "Expr: \"\"\"": "compiles",
-        "If: if __name__ == \"__main__\":": "compile_error",
+        "If: if __name__ == \"__main__\":": "compiles",
         "Import: import os": "compiles",
         "Import: import sys": "compiles",
         "ImportFrom: from typing import List, Optional": "compiles",
@@ -44,7 +44,7 @@
     },
     "test_files/simple.cpython-314.pyc": {
       "kind": "pyc",
-      "status": "compile_error"
+      "status": "compiles"
     },
     "test_files/simple.cpython-39.pyc": {
       "kind": "pyc",
@@ -52,10 +52,10 @@
     },
     "test_files/simple.py": {
       "kind": "source",
-      "status": "compile_error",
+      "status": "compiles",
       "units": {
         "Expr: \"\"\"": "compiles",
-        "If: if __name__==\"__main__\":": "compile_error",
+        "If: if __name__==\"__main__\":": "compiles",
         "def show_info": "compiles"
       }
     },
@@ -94,7 +94,7 @@
     },
     "test_files/test_simple.py": {
       "kind": "source",
-      "status": "compile_error",
+      "status": "compiles",
       "units": {
         "Assign: decompiler = pycrefine.get_decompiler(\"temp.pyc\")": "compiles",
         "Assign: out = pycrefine.post_process_source(raw)": "compiles",
@@ -109,7 +109,7 @@
         "Import: import os": "compiles",
         "Import: import py_compile": "compiles",
         "Import: import pycrefine": "compiles",
-        "With: with open(\"temp.py\", \"w\") as f:": "compile_error"
+        "With: with open(\"temp.py\", \"w\") as f:": "compiles"
       }
     },
     "test_files/verify_scenes.py": {
