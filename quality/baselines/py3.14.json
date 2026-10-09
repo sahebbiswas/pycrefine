@@ -12,7 +12,7 @@
     },
     "test_files/comprehensive.cpython-39.pyc": {
       "kind": "pyc",
-      "status": "decompile_error"
+      "status": "compiles"
     },
     "test_files/comprehensive.py": {
       "kind": "source",
@@ -48,7 +48,7 @@
     },
     "test_files/simple.cpython-39.pyc": {
       "kind": "pyc",
-      "status": "decompile_error"
+      "status": "compiles"
     },
     "test_files/simple.py": {
       "kind": "source",

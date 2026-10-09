@@ -143,12 +143,12 @@ class TestErrorHandling(unittest.TestCase):
         """ValueError for corrupted marshal data includes the inferred version name."""
         import struct
         with tempfile.NamedTemporaryFile(suffix=".pyc", delete=False) as f:
-            f.write(struct.pack("<I", 3495))
+            f.write(struct.pack("<I", 3425))   # 3.9: readable on any host
             f.write(b"\x00" * 12)
             f.write(b"GARBAGE")
             path = f.name
         try:
-            with self.assertRaisesRegex(ValueError, "Inferred version: Python 3.12"):
+            with self.assertRaisesRegex(ValueError, "Inferred version: Python 3.9"):
                 from pycrefine import get_decompiler
                 get_decompiler(path)
         finally:
