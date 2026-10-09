@@ -163,8 +163,8 @@ Default corpus: 13 entries (7 sources, 6 `.pyc` fixtures) and 77 units.
 | Host Python | Entries compiling | Units compiling | Units AST-equal |
 |-------------|------------------:|----------------:|----------------:|
 | 3.9         | 9 / 13            | 77 / 77         | 58 / 77         |
-| 3.12        | 8 / 13            | 73 / 77         | 48 / 77         |
-| 3.14        | 7 / 13            | 71 / 77         | 47 / 77         |
+| 3.12        | 8 / 13            | 73 / 77         | 49 / 77         |
+| 3.14        | 9 / 13            | 73 / 77         | 48 / 77         |
 
 The coherency composite for every source entry is 90% or higher on every
 version, including the entries that fail to compile.

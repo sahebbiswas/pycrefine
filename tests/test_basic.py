@@ -1,3 +1,4 @@
+import ast
 import sys
 import unittest
 
@@ -143,35 +144,50 @@ class TestOperators(unittest.TestCase):
 
 
 class TestComprehensions(unittest.TestCase):
-    """Verifies that comprehensions decompile as expected using explicit mutator calls
-    (.append, .add, [k]=v) for inlined comprehensions on Python 3.12+."""
+    """Comprehensions decompile back to comprehension syntax on every version,
+    including the inlined (PEP 709) form used since Python 3.12."""
+
+    def _assert_roundtrip(self, src, *equivalents):
+        """The output must parse to the AST of *src* or of an equivalent spelling."""
+        out = decompile(src)
+        expected = {ast.dump(ast.parse(s)) for s in (src,) + equivalents}
+        self.assertIn(ast.dump(ast.parse(out)), expected, out)
+        self.assertNotRegex(out, r"\byield\b|_res\b")
 
     def test_list_comprehension_yield(self):
-        src = "def f(items):\n    return [x * 2 for x in items if x > 0]\n"
-        out = decompile(src)
-        if sys.version_info >= (3, 12):
-            self.assertIn(".append((x * 2))", out)
-            self.assertNotRegex(out, r"\byield\b")
-        else:
-            self.assertTrue("[x * 2 for x in items if x > 0]" in out or "[(x * 2) for x in items if x > 0]" in out)
+        self._assert_roundtrip("def f(items):\n    return [x * 2 for x in items if x > 0]\n")
 
     def test_dict_comprehension_yield(self):
-        src = "def h(items):\n    return {k: v for k, v in items}\n"
-        out = decompile(src)
-        if sys.version_info >= (3, 12):
-            self.assertIn("_res[k] = v", out)
-            self.assertNotRegex(out, r"\byield\b")
-        else:
-            self.assertIn("{k: v for k, v in items}", out)
+        self._assert_roundtrip("def h(items):\n    return {k: v for k, v in items}\n")
 
     def test_set_comprehension_yield(self):
-        src = "def g(items):\n    return {x for x in items}\n"
-        out = decompile(src)
-        if sys.version_info >= (3, 12):
-            self.assertIn(".add(x)", out)
-            self.assertNotRegex(out, r"\byield\b")
-        else:
-            self.assertIn("{x for x in items}", out)
+        self._assert_roundtrip("def g(items):\n    return {x for x in items}\n")
+
+    def test_inlined_comprehension_shapes(self):
+        cases = [
+            "def f(xs):\n    y = [x for x in xs]\n    return y\n",
+            "def f(xs):\n    [print(x) for x in xs]\n",
+            "def f(m):\n    return [[c for c in row] for row in m]\n",
+            "def f(a, b):\n    return [(x, y) for x in a for y in b if x != y]\n",
+            ("def f(xs):\n    return [x for x in xs if x if x > 2]\n",
+             # chained filters are an `and`; the 3.9 code-object path prints that
+             "def f(xs):\n    return [x for x in xs if x and x > 2]\n"),
+            "def f(xs):\n    return [x for x in xs if x is not None]\n",
+            "def f(xs, n):\n    return {k: [v] * n for k, v in xs.items() if not k.startswith('_')}\n",
+            "def f(xs):\n    return [a + b for (a, b), c in xs]\n",
+            "def f(xs):\n    return sum([x for x in xs]) + len({y for y in xs})\n",
+            "def f(xs):\n    return [x if x else 0 for x in xs]\n",
+            "def f(xs):\n    return {k: (v if v > 0 else -v) for k, v in xs}\n",
+            "def f(xs, d):\n    return [d.get(x, 'a' if x else 'b') for x in xs]\n",
+            "total = [i * i for i in range(10)]\n",
+            # genexprs are still separate code objects; 3.13+ starts their
+            # loop body with a STORE_FAST_LOAD_FAST superinstruction
+            "def f(xs):\n    return sum(d.w for d in xs)\n",
+        ]
+        for case in cases:
+            src, *equivalents = case if isinstance(case, tuple) else (case,)
+            with self.subTest(src=src):
+                self._assert_roundtrip(src, *equivalents)
 
     def test_negative_comprehension_no_yield_in_normal_loop(self):
         # A normal loop calling list.append should NOT emit yield

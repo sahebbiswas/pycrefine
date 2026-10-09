@@ -626,8 +626,7 @@ def _render_func_tuple(body_text: str, args: List[str]) -> str:
         else:  # genexpr
             wrapper_open, wrapper_close = "(", ")"
 
-        for_clause = None
-        if_clause = None
+        clauses: List[str] = []   # for/if clauses in source order
         yield_expr = None
 
         for line in lines[1:]:
@@ -637,28 +636,31 @@ def _render_func_tuple(body_text: str, args: List[str]) -> str:
                 continue
             if line.startswith("for "):
                 fc = line.rstrip(":")
-                # Replace the implicit .0 parameter with the actual iterable arg
-                if args:
+                # Only the outermost for-clause iterates the implicit .0
+                # parameter; replace it with the actual iterable arg.
+                if args and not clauses:
                     # Strip a trailing "()" suffix that may have been added by a
                     # preceding CALL-0 misfire (GET_ITER treated as a no-arg call).
-                    # Use removesuffix rather than rstrip so we only strip exactly
-                    # one trailing "()" and never mangle expressions like range(10).
-                    actual_iter = str(args[0])
-                    if actual_iter.endswith("()"):
-                        actual_iter = actual_iter[:-2]
-                    fc = fc.replace(".0", actual_iter)
-                for_clause = fc
+                    # Strip exactly one trailing "()" so expressions like
+                    # range(10) are never mangled.
+                    fc = fc.replace(".0", str(args[0]))
+                clauses.append(fc)
             elif line.startswith("if "):
-                if_clause = line.rstrip(":")
+                clauses.append(line.rstrip(":"))
+            elif clauses and clauses[-1].startswith("for "):
+                # Nested unpacking is decompiled as `for _item in it:` followed
+                # by `(a, b), c = _item`; fold it back into the for-target.
+                m_unpack = re.match(r"^(.+?) = (\w+)$", line)
+                m_for = re.match(r"^for (\w+) in (.+)$", clauses[-1])
+                if m_unpack and m_for and m_unpack.group(2) == m_for.group(1):
+                    clauses[-1] = f"for {m_unpack.group(1)} in {m_for.group(2)}"
+                elif line.startswith("yield "):
+                    yield_expr = line[6:].strip()
             elif line.startswith("yield "):
                 yield_expr = line[6:].strip()
 
-        if for_clause and yield_expr is not None:
-            result = wrapper_open + yield_expr + " " + for_clause
-            if if_clause:
-                result += " " + if_clause
-            result += wrapper_close
-            return result
+        if clauses and clauses[0].startswith("for ") and yield_expr is not None:
+            return wrapper_open + yield_expr + " " + " ".join(clauses) + wrapper_close
 
     # ── Case 2: lambda ───────────────────────────────────────────────────
     if "<lambda>" in lines[0]:
@@ -997,6 +999,8 @@ class DecompilerGeneric(DecompilerBase):
             The reconstructed Python source as a single string, post-processed and ending with a single trailing newline.
         """
         self._disassemble()
+        self.instructions = self._split_superinstructions(self.instructions)
+        self._collapse_inlined_comprehensions()
         self.pc = 0
         self.blocks = []
         self._while_header_targets = {}
@@ -1952,6 +1956,342 @@ class DecompilerGeneric(DecompilerBase):
             or "IF_NONE" in opname
             or "IF_NOT_NONE" in opname
         )
+
+    # ── PEP 709 inlined comprehensions (3.12+) ─────────────────────────
+
+    _COMP_KINDS = {"BUILD_LIST": ("[", "]", "LIST_APPEND"),
+                   "BUILD_SET": ("{", "}", "SET_ADD"),
+                   "BUILD_MAP": ("{", "}", "MAP_ADD")}
+    _COMP_SKIP = ("NOP", "CACHE", "NOT_TAKEN", "TO_BOOL")
+
+    def _collapse_inlined_comprehensions(self):
+        """
+        Replace each PEP 709 inlined comprehension with one synthetic
+        INLINED_COMPREHENSION instruction carrying its rendered text.
+
+        Since 3.12 list/set/dict comprehensions are compiled into the enclosing
+        code object instead of a nested <listcomp> function::
+
+            <iterable> GET_ITER
+            LOAD_FAST_AND_CLEAR x ...      save the comprehension variables
+            SWAP; BUILD_LIST 0; SWAP       (3.13 adds a second GET_ITER)
+            FOR_ITER end
+              <target> <filters / nested fors> <element> LIST_APPEND
+              JUMP_BACKWARD
+            end: END_FOR [POP_TOP | POP_ITER]
+            SWAP; STORE_FAST x ...         restore the saved variables
+
+        plus a cleanup handler (SWAP, POP_TOP, SWAP, STORE_FAST..., RERAISE)
+        that the exception table points at. Both the comprehension and its
+        handler are removed from the instruction stream. Shapes that are not
+        fully recognised are left untouched. Innermost comprehensions are
+        collapsed first, so nested ones render recursively.
+        """
+        instrs = self.instructions
+        if not any(ins.opname == "LOAD_FAST_AND_CLEAR" for ins in instrs):
+            return
+        try:
+            entries = list(dis.Bytecode(self.code_obj).exception_entries)
+        except Exception:
+            entries = []
+        i = len(instrs) - 1
+        while i >= 0:
+            if (instrs[i].opname == "LOAD_FAST_AND_CLEAR"
+                    and (i == 0 or instrs[i - 1].opname != "LOAD_FAST_AND_CLEAR")):
+                match = self._match_inlined_comprehension(i)
+                if match is not None:
+                    end, rendered, consumer = match
+                    first, last = instrs[i].offset, instrs[end].offset
+                    synth = BytecodeInstruction(
+                        opcode=-1, opname="INLINED_COMPREHENSION", arg=None,
+                        argval=rendered, offset=first,
+                        starts_line=instrs[i].starts_line,
+                        is_jump_target=instrs[i].is_jump_target,
+                        argrepr=rendered[0] + "..." + rendered[3],
+                    )
+                    instrs[i:end + 1] = [synth] + ([consumer] if consumer else [])
+                    targets = {e.target for e in entries if first <= e.start <= last}
+                    self._drop_comprehension_handlers(targets)
+                    i = min(i, len(instrs) - 1)
+            i -= 1
+
+    def _drop_comprehension_handlers(self, targets):
+        """Remove the SWAP/POP_TOP/SWAP/STORE_FAST.../RERAISE cleanup blocks."""
+        instrs = self.instructions
+        for target in targets:
+            idx = next((k for k, ins in enumerate(instrs) if ins.offset == target), None)
+            if idx is None:
+                continue
+            k = idx
+            while k < len(instrs) and instrs[k].opname in (
+                    "SWAP", "POP_TOP", "STORE_FAST", "STORE_FAST_STORE_FAST"):
+                k += 1
+            if k < len(instrs) and instrs[k].opname == "RERAISE":
+                del instrs[idx:k + 1]
+
+    @staticmethod
+    def _store_names(ins) -> Optional[List[str]]:
+        if ins.opname in ("STORE_FAST", "STORE_DEREF", "STORE_NAME", "STORE_GLOBAL"):
+            return [str(ins.argval)]
+        if ins.opname == "STORE_FAST_STORE_FAST" and isinstance(ins.argval, (tuple, list)):
+            return [str(n) for n in ins.argval]
+        return None
+
+    def _match_inlined_comprehension(self, start: int):
+        """
+        Match an inlined comprehension whose first LOAD_FAST_AND_CLEAR is at
+        *start*. Returns (index of its last instruction, rendered parts) or
+        None. Rendered parts are (open, element, clauses_after_iterable, close,
+        first_target); the iterable itself is already on the stack. The third
+        item is the instruction that consumes the result when the compiler
+        moved it ahead of the restores (else None).
+        """
+        instrs = self.instructions
+        n_ins = len(instrs)
+        k = start
+        saved: List[str] = []
+        while k < n_ins and instrs[k].opname == "LOAD_FAST_AND_CLEAR":
+            saved.append(str(instrs[k].argval))
+            k += 1
+        if not (k + 2 < n_ins and instrs[k].opname == "SWAP"
+                and instrs[k + 1].opname in self._COMP_KINDS and not instrs[k + 1].arg
+                and instrs[k + 2].opname == "SWAP"):
+            return None
+        open_, close, acc_op = self._COMP_KINDS[instrs[k + 1].opname]
+        k += 3
+        if k < n_ins and instrs[k].opname == "GET_ITER":   # 3.13
+            k += 1
+        if k >= n_ins or instrs[k].opname != "FOR_ITER":
+            return None
+        head = instrs[k]
+        end_idx = next((j for j in range(k + 1, n_ins)
+                        if instrs[j].offset == self._get_jump_target(head)), None)
+        if end_idx is None or instrs[end_idx].opname != "END_FOR":
+            return None
+        body = instrs[k + 1:end_idx]
+
+        # Restore sequence: [POP_TOP | POP_ITER] then either SWAP (the result
+        # stays on the stack) or, when the result is consumed at once, the
+        # consuming store / POP_TOP -- followed by STORE_FAST of each saved name.
+        j = end_idx + 1
+        if j < n_ins and instrs[j].opname in ("POP_TOP", "POP_ITER"):
+            j += 1
+        consumer = None
+        if j < n_ins and instrs[j].opname == "SWAP":
+            j += 1
+        elif j < n_ins and (instrs[j].opname == "POP_TOP" or (
+                self._store_names(instrs[j]) is not None
+                and len(self._store_names(instrs[j])) == 1)):
+            consumer = instrs[j]
+            j += 1
+        else:
+            return None
+        restored: List[str] = []
+        while j < n_ins and len(restored) < len(saved):
+            names = self._store_names(instrs[j])
+            if names is None or instrs[j].opname not in ("STORE_FAST", "STORE_FAST_STORE_FAST"):
+                break
+            restored.extend(names)
+            j += 1
+        if sorted(restored) != sorted(saved):
+            return None
+
+        parsed = self._parse_comprehension_body(body, head, acc_op)
+        if parsed is None:
+            return None
+        first_target, clauses, element = parsed
+        return j - 1, (open_, element, clauses, close, first_target), consumer
+
+    def _split_superinstructions(self, body: list) -> list:
+        """
+        Split 3.13+'s STORE_FAST_LOAD_FAST into a STORE_FAST and a LOAD_FAST.
+        The LOAD_FAST gets the odd offset+1, which no jump can target, so
+        offset-keyed lookups keep resolving to the STORE_FAST.
+        """
+        out = []
+        for ins in body:
+            if ins.opname == "STORE_FAST_LOAD_FAST" and isinstance(ins.argval, (tuple, list)):
+                store, load = ins.argval
+                out.append(BytecodeInstruction(ins.opcode, "STORE_FAST", None, store,
+                                               ins.offset, ins.starts_line, ins.is_jump_target))
+                out.append(BytecodeInstruction(ins.opcode, "LOAD_FAST", None, load,
+                                               ins.offset + 1, None, False))
+            else:
+                out.append(ins)
+        return out
+
+    def _parse_comp_target(self, body: list, pos: int):
+        """Parse a for-target (name or tuple unpacking). Returns (text, pos) or None."""
+        if pos >= len(body):
+            return None
+        ins = body[pos]
+        names = self._store_names(ins)
+        if names is not None and len(names) == 1:
+            return names[0], pos + 1
+        if ins.opname == "UNPACK_SEQUENCE" and isinstance(ins.arg, int):
+            parts: List[str] = []
+            pos += 1
+            while len(parts) < ins.arg:
+                if pos >= len(body):
+                    return None
+                multi = self._store_names(body[pos])
+                if multi is not None and len(multi) > 1:
+                    parts.extend(multi)
+                    pos += 1
+                    continue
+                sub = self._parse_comp_target(body, pos)
+                if sub is None:
+                    return None
+                text, pos = sub
+                parts.append(f"({text})" if "," in text else text)
+            if len(parts) != ins.arg:
+                return None
+            return ", ".join(parts), pos
+        return None
+
+    def _eval_comp_slice(self, instrs: list, count: int = 1, consumer=None) -> Optional[List[str]]:
+        """
+        Evaluate an instruction slice to *count* expressions. Jumps are allowed
+        only when they stay inside the slice (conditional expressions), which
+        the ternary prescan then reconstructs. *consumer* is the instruction
+        that uses the values; the prescan sees it as context but it is not run.
+        """
+        if any(ins.opname in ("FOR_ITER", "RETURN_VALUE", "RETURN_CONST",
+                              "RAISE_VARARGS", "RERAISE") for ins in instrs):
+            return None
+        offsets = {ins.offset for ins in instrs}
+        end = consumer.offset if consumer is not None else (instrs[-1].offset + 2 if instrs else 0)
+        has_jumps = False
+        for ins in instrs:
+            if "JUMP" in ins.opname:
+                has_jumps = True
+                if self._get_jump_target(ins) not in offsets and self._get_jump_target(ins) != end:
+                    return None
+        sub = _pick_decompiler_class(self)(self.code_obj, self.indent_level,
+                                          self.beautification_level,
+                                          target_version=self.target_version)
+        try:
+            run = [ins for ins in instrs if ins.opname not in self._COMP_SKIP]
+            sub.instructions = run + ([consumer] if consumer is not None else [])
+            if has_jumps:
+                sub._prescan_ternaries()
+            sub.pc = 0
+            while sub.pc < len(run):
+                ins = sub.instructions[sub.pc]
+                sub.pc += 1
+                sub._handle_instruction(ins)
+        except Exception:
+            return None
+        if sub.reconstructed or len(sub.stack) != count:
+            return None
+        return [str(v) for v in sub.stack]
+
+    def _parse_comprehension_body(self, body: list, head, acc_op: str):
+        """
+        Parse the loop body of an inlined comprehension into
+        (first_target, clauses_text, element_text), or None.
+        """
+        body = list(body)
+        heads = [head.offset]
+        parsed = self._parse_comp_target(body, 0)
+        if parsed is None:
+            return None
+        first_target, pos = parsed
+        clauses: List[str] = []
+        n = len(body)
+
+        def is_back_to_head(ins):
+            return ins.opname.startswith("JUMP_BACKWARD") and self._get_jump_target(ins) == heads[-1]
+
+        def filter_form(k):
+            """'keep' / 'skip' when body[k] is a comprehension filter jump, else None."""
+            target = self._get_jump_target(body[k])
+            m = k + 1
+            while m < n and body[m].opname in self._COMP_SKIP:
+                m += 1
+            if m + 1 < n and is_back_to_head(body[m]) and body[m + 1].offset == target:
+                return "keep"
+            if target == heads[-1] or any(is_back_to_head(x) and x.offset == target for x in body):
+                return "skip"
+            return None   # a jump inside an expression (e.g. a conditional expression)
+
+        while pos < n:
+            # Find the next control instruction from pos.
+            k = pos
+            while k < n and not (
+                    (body[k].opname.startswith("POP_JUMP_IF") and filter_form(k))
+                    or body[k].opname == acc_op
+                    or (body[k].opname == "GET_ITER" and k + 1 < n and body[k + 1].opname == "FOR_ITER")):
+                k += 1
+            if k >= n:
+                return None
+            ctl = body[k]
+            if ctl.opname == acc_op:
+                vals = self._eval_comp_slice(body[pos:k], 2 if acc_op == "MAP_ADD" else 1, ctl)
+                if vals is None:
+                    return None
+                element = f"{vals[0]}: {vals[1]}" if acc_op == "MAP_ADD" else vals[0]
+                # The rest must be the back-jumps closing each nested loop.
+                rest = [x for x in body[k + 1:] if x.opname not in self._COMP_SKIP]
+                expect = list(reversed(heads))
+                closing = []
+                for x in rest:
+                    if x.opname in ("END_FOR", "POP_TOP", "POP_ITER"):
+                        continue
+                    if not x.opname.startswith("JUMP_BACKWARD"):
+                        return None
+                    closing.append(self._get_jump_target(x))
+                if closing != expect:
+                    return None
+                return first_target, "".join(clauses), element
+            if ctl.opname == "GET_ITER":
+                vals = self._eval_comp_slice(body[pos:k])
+                if vals is None:
+                    return None
+                inner_head = body[k + 1]
+                tgt = self._parse_comp_target(body, k + 2)
+                if tgt is None:
+                    return None
+                clauses.append(f" for {tgt[0]} in {vals[0]}")
+                heads.append(inner_head.offset)
+                pos = tgt[1]
+                continue
+            # Filter: cond POP_JUMP_IF_x  [NOT_TAKEN]  JUMP_BACKWARD head
+            vals = self._eval_comp_slice(body[pos:k])
+            if vals is None:
+                return None
+            cond = vals[0]
+            target = self._get_jump_target(ctl)
+            m = k + 1
+            while m < n and body[m].opname in self._COMP_SKIP:
+                m += 1
+            op = ctl.opname
+            jumps_when = {"POP_JUMP_IF_TRUE": f"{cond}", "POP_JUMP_IF_FALSE": f"not ({cond})",
+                          "POP_JUMP_IF_NONE": f"{cond} is None",
+                          "POP_JUMP_IF_NOT_NONE": f"{cond} is not None"}.get(op)
+            if jumps_when is None:
+                return None
+            if (m < n and is_back_to_head(body[m]) and m + 1 < n
+                    and body[m + 1].offset == target):
+                # Jump skips the `continue` back-jump: the jump condition keeps the item.
+                keep = jumps_when
+                pos = m + 1
+            elif target == heads[-1] or any(is_back_to_head(x) and x.offset == target for x in body):
+                # Jump goes straight back to the loop head: it drops the item.
+                keep = {"POP_JUMP_IF_TRUE": f"not ({cond})", "POP_JUMP_IF_FALSE": f"{cond}",
+                        "POP_JUMP_IF_NONE": f"{cond} is not None",
+                        "POP_JUMP_IF_NOT_NONE": f"{cond} is None"}[op]
+                pos = k + 1
+            else:
+                return None
+            keep = keep[5:-1] if keep.startswith("not (not ") and keep.endswith(")") else keep
+            clauses.append(f" if {keep}")
+        return None
+
+    def _op_inlined_comprehension(self, instr: BytecodeInstruction):
+        open_, element, clauses, close, target = instr.argval
+        iterable = str(self.stack.pop()) if self.stack else "?"
+        self.stack.append(f"{open_}{element} for {target} in {iterable}{clauses}{close}")
 
     def _eval_cond_expr(self, instrs: list) -> str:
         """
@@ -3053,6 +3393,7 @@ class DecompilerGeneric(DecompilerBase):
 
             # Iteration
             "FOR_ITER": self._op_for_iter,
+            "INLINED_COMPREHENSION": self._op_inlined_comprehension,
 
             # Collections
             "BUILD_TUPLE": self._op_build_collection, "BUILD_LIST": self._op_build_collection,

@@ -70,7 +70,7 @@
     },
     "test_files/test_indent2.py": {
       "kind": "source",
-      "status": "syntax_error",
+      "status": "compiles",
       "units": {
         "Assign: src = \"\"\"def process(items, verbose=False):": "compiles",
         "Expr: print(\"=== ORIGINAL ===\")": "compiles",
@@ -78,18 +78,18 @@
         "Expr: print(repr(post_process_source(src)))": "compiles",
         "Expr: print(repr(src))": "compiles",
         "Import: import re": "compiles",
-        "def post_process_source": "syntax_error"
+        "def post_process_source": "compiles"
       }
     },
     "test_files/test_post_process.py": {
       "kind": "source",
-      "status": "syntax_error",
+      "status": "compiles",
       "units": {
         "Assign: test_case = \"\"\"": "compiles",
         "Expr: print(\"OUTPUT:\")": "compiles",
         "Expr: print(post_process_source(test_case))": "compiles",
         "Import: import re": "compiles",
-        "def post_process_source": "syntax_error"
+        "def post_process_source": "compiles"
       }
     },
     "test_files/test_simple.py": {
