@@ -1,0 +1,149 @@
+{
+  "schema_version": 1,
+  "python_version": "3.9",
+  "entries": {
+    "test_files/comprehensive.cpython-312.pyc": {
+      "kind": "pyc",
+      "status": "decompile_error"
+    },
+    "test_files/comprehensive.cpython-314.pyc": {
+      "kind": "pyc",
+      "status": "decompile_error"
+    },
+    "test_files/comprehensive.cpython-39.pyc": {
+      "kind": "pyc",
+      "status": "compiles"
+    },
+    "test_files/comprehensive.py": {
+      "kind": "source",
+      "status": "compiles",
+      "units": {
+        "Assign: VERSION = \"1.0.0\"": "compiles",
+        "Expr: \"\"\"": "compiles",
+        "If: if __name__ == \"__main__\":": "compiles",
+        "Import: import os": "compiles",
+        "Import: import sys": "compiles",
+        "ImportFrom: from typing import List, Optional": "compiles",
+        "class BaseProcessor/Expr: \"\"\"Base class for demonstration.\"\"\"": "compiles",
+        "class BaseProcessor/def __init__": "compiles",
+        "class BaseProcessor/def process": "compiles",
+        "class ComplexException/def __init__": "compiles",
+        "class DataProcessor/Expr: \"\"\"Derived class with more logic.\"\"\"": "compiles",
+        "class DataProcessor/def __init__": "compiles",
+        "class DataProcessor/def add_item": "compiles",
+        "class DataProcessor/def process": "compiles",
+        "def complex_logic": "compiles",
+        "def member_decorator": "compiles",
+        "def run_test": "compiles",
+        "def some_decorator": "compiles"
+      }
+    },
+    "test_files/simple.cpython-313.pyc": {
+      "kind": "pyc",
+      "status": "decompile_error"
+    },
+    "test_files/simple.cpython-314.pyc": {
+      "kind": "pyc",
+      "status": "decompile_error"
+    },
+    "test_files/simple.cpython-39.pyc": {
+      "kind": "pyc",
+      "status": "compiles"
+    },
+    "test_files/simple.py": {
+      "kind": "source",
+      "status": "compiles",
+      "units": {
+        "Expr: \"\"\"": "compiles",
+        "If: if __name__==\"__main__\":": "compiles",
+        "def show_info": "compiles"
+      }
+    },
+    "test_files/simple_runner.py": {
+      "kind": "source",
+      "status": "compiles",
+      "units": {
+        "Expr: simple.show_info(2)": "compiles",
+        "Expr: simple.show_info(5)": "compiles",
+        "Import: import simple": "compiles"
+      }
+    },
+    "test_files/test_indent2.py": {
+      "kind": "source",
+      "status": "compiles",
+      "units": {
+        "Assign: src = \"\"\"def process(items, verbose=False):": "compiles",
+        "Expr: print(\"=== ORIGINAL ===\")": "compiles",
+        "Expr: print(\"=== PROCESSED ===\")": "compiles",
+        "Expr: print(repr(post_process_source(src)))": "compiles",
+        "Expr: print(repr(src))": "compiles",
+        "Import: import re": "compiles",
+        "def post_process_source": "compiles"
+      }
+    },
+    "test_files/test_post_process.py": {
+      "kind": "source",
+      "status": "compiles",
+      "units": {
+        "Assign: test_case = \"\"\"": "compiles",
+        "Expr: print(\"OUTPUT:\")": "compiles",
+        "Expr: print(post_process_source(test_case))": "compiles",
+        "Import: import re": "compiles",
+        "def post_process_source": "compiles"
+      }
+    },
+    "test_files/test_simple.py": {
+      "kind": "source",
+      "status": "compiles",
+      "units": {
+        "Assign: decompiler = pycrefine.get_decompiler(\"temp.pyc\")": "compiles",
+        "Assign: out = pycrefine.post_process_source(raw)": "compiles",
+        "Assign: raw = \"\\n\".join(str(s) for s in decompiler.reconstructed)...": "compiles",
+        "Assign: source = \"\"\"def f(x):": "compiles",
+        "Expr: decompiler.decompile() # to populate reconstructed": "compiles",
+        "Expr: print(\"=== POST ===\")": "compiles",
+        "Expr: print(\"=== RAW ===\")": "compiles",
+        "Expr: print(out)": "compiles",
+        "Expr: print(raw)": "compiles",
+        "Expr: py_compile.compile(\"temp.py\", cfile=\"temp.pyc\")": "compiles",
+        "Import: import os": "compiles",
+        "Import: import py_compile": "compiles",
+        "Import: import pycrefine": "compiles",
+        "With: with open(\"temp.py\", \"w\") as f:": "compiles"
+      }
+    },
+    "test_files/verify_scenes.py": {
+      "kind": "source",
+      "status": "compiles",
+      "units": {
+        "Assign: my_map = {": "compiles",
+        "def api_1": "compiles",
+        "def api_10": "compiles",
+        "def api_11": "compiles",
+        "def api_12": "compiles",
+        "def api_20": "compiles",
+        "def api_21": "compiles",
+        "def api_22": "compiles",
+        "def api_23": "compiles",
+        "def api_24": "compiles",
+        "def api_25": "compiles",
+        "def api_26": "compiles",
+        "def api_3": "compiles",
+        "def api_30": "compiles",
+        "def api_31": "compiles",
+        "def api_32": "compiles",
+        "def api_4": "compiles",
+        "def api_40": "compiles",
+        "def api_41": "compiles",
+        "def api_5": "compiles",
+        "def api_6": "compiles",
+        "def api_7": "compiles",
+        "def issue_1": "compiles",
+        "def issue_2": "compiles",
+        "def issue_3": "compiles",
+        "def issue_4": "compiles",
+        "def issue_5": "compiles"
+      }
+    }
+  }
+}
