@@ -153,6 +153,41 @@ class TestControlFlow(unittest.TestCase):
         assert_contains(out, "if x is None:", "if x == 1:", "return False")
 
 
+class TestModuleLevelImplicitReturn(unittest.TestCase):
+    """Module and class bodies never contain `return` (issue #90)."""
+
+    def _check(self, src):
+        out = decompile(src)
+        self.assertNotIn("return", out)
+        compile(out, "<decompiled>", "exec")
+        return out
+
+    def test_trailing_main_guard(self):
+        out = self._check('if __name__ == "__main__":\n    print(1)\n')
+        self.assertIn("print(1)", out)
+
+    def test_trailing_try_except(self):
+        out = self._check("try:\n    import foo\nexcept ImportError:\n    foo = None\n")
+        self.assertIn("foo = None", out)
+
+    def test_trailing_with(self):
+        out = self._check("with open(f) as g:\n    data = g.read()\n")
+        self.assertIn("data = g.read()", out)
+
+    def test_class_body_ending_in_if(self):
+        out = self._check("class A:\n    if X:\n        y = 1\n")
+        self.assertIn("y = 1", out)
+
+    def test_break_out_of_last_loop_is_kept(self):
+        # 3.12+ compiles this break as `return None`.
+        out = self._check("for i in range(3):\n    if i:\n        break\n    print(i)\n")
+        self.assertIn("break", out)
+
+    def test_explicit_return_none_in_function_is_kept(self):
+        out = decompile("def f(a):\n    if a:\n        return None\n    print(a)\n")
+        self.assertIn("return None", out)
+
+
 class TestNoneGuards(unittest.TestCase):
     def test_pjif_none_emits_is_not_none(self):
         out = decompile("x = None\nif x is not None:\n    print(1)\n")
