@@ -2070,11 +2070,13 @@ class DecompilerGeneric(DecompilerBase):
             return None
         body = instrs[k + 1:end_idx]
 
-        # Restore sequence: [POP_TOP | POP_ITER] then either SWAP (the result
+        # Restore sequence: [3.13+: POP_TOP | POP_ITER] then either SWAP (the result
         # stays on the stack) or, when the result is consumed at once, the
         # consuming store / POP_TOP -- followed by STORE_FAST of each saved name.
         j = end_idx + 1
-        if j < n_ins and instrs[j].opname in ("POP_TOP", "POP_ITER"):
+        # 3.12's END_FOR pops the iterator itself; 3.13+ emit a separate pop.
+        if (j < n_ins and self.target_version >= (3, 13)
+                and instrs[j].opname in ("POP_TOP", "POP_ITER")):
             j += 1
         consumer = None
         if j < n_ins and instrs[j].opname == "SWAP":
