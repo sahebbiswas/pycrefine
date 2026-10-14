@@ -8,6 +8,16 @@ A Python `.pyc` decompiler that reconstructs readable source code from compiled 
 
 ---
 
+## Install
+
+Install the published package (Python 3.9 or later):
+
+```bash
+python -m pip install pycrefine
+```
+
+After installation, use the `pycrefine` command from your terminal. To use the source checkout without installing, run `python pycrefine.py` as shown below.
+
 ## Usage
 
 Using `pycrefine` to decompile a Python bytecode `.pyc` file is straightforward for any end-user:
