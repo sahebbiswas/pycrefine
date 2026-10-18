@@ -2,7 +2,7 @@ import os
 import sys
 import unittest
 
-from .test_helpers import _run39_full_impl, assert_contains, decompile
+from .test_helpers import _run39_full_impl, assert_contains, assert_not_contains, decompile
 
 
 class TestControlFlow(unittest.TestCase):
@@ -985,6 +985,27 @@ class TestWhileTrueConditionalBreak(unittest.TestCase):
             "        break\n"
             "print('out')\n"
         )
+
+    @unittest.skipIf(sys.version_info[:2] == (3, 11),
+                     "3.11 mis-decompiles loops containing try blocks (3.11 is not yet supported, see #4)")
+    def test_if_inside_for_try_is_not_turned_into_while(self):
+        # A conditional inside a `for` loop body must stay an `if` even though it
+        # sits after an assignment and before the loop's `continue` back-edge.
+        out = self._assert_same_behavior(
+            "def g(a):\n"
+            "    r = None\n"
+            "    for i in (3, 2, 1):\n"
+            "        try:\n"
+            "            o = a\n"
+            "            if o == 'y':\n"
+            "                r = i\n"
+            "                break\n"
+            "        except Exception:\n"
+            "            continue\n"
+            "    return r\n"
+            "print(g('y'), g('n'))\n"
+        )
+        assert_not_contains(out, "while ")
 
     @unittest.skipIf(sys.version_info[:2] == (3, 11),
                      "3.11 decompiles every `while cond:` loop as an `if` (3.11 is not yet supported, see #4)")

@@ -2533,9 +2533,27 @@ class DecompilerGeneric(DecompilerBase):
             # and the loop body_start without meaning the guard is not a real
             # while-guard (e.g. NOT_TAKEN hint, NOP, RESUME, etc.).
 
+            # A `while True:` loop is headed by a NOP (3.12+): it has no
+            # condition at its head, so no conditional jump after the head can
+            # be its guard. Those are `if ...: break` statements.
+            head_instr = next(
+                (i for i in self.instructions if i.offset == body_start), None
+            )
+            head_is_nop = head_instr is not None and head_instr.opname == "NOP"
+            head_is_for = head_instr is not None and head_instr.opname in _TRY_LOOP_HEADS
+
             guard_offset = -1
             guard_dist = float('inf')   # distance from body_start
             for ins in self.instructions:
+                if head_is_nop and ins.offset > body_start:
+                    continue
+                # A guard after the loop head is the head's own condition only
+                # if nothing but condition-evaluating code precedes it. A plain
+                # store in between (not a walrus) is a body statement, which
+                # makes this conditional an `if` inside the body.
+                if (not head_is_for and ins.offset > body_start
+                        and self._has_body_store_between(body_start, ins.offset)):
+                    continue
                 if not ("POP_JUMP_IF_FALSE" in ins.opname
                         or "POP_JUMP_IF_TRUE" in ins.opname
                         or "JUMP_IF_FALSE" in ins.opname
@@ -2599,6 +2617,23 @@ class DecompilerGeneric(DecompilerBase):
                 if (body_instr and body_instr.is_jump_target
                         and body_instr.opname not in _TRY_LOOP_HEADS):
                     self._while_header_targets[body_start] = -1
+
+    def _has_body_store_between(self, start: int, end: int) -> bool:
+        """
+        Return True if a plain assignment (a STORE_* that is not the store half of a
+        walrus, which duplicates its value first) lies in the offset range [start, end).
+        """
+        prev = None
+        for ins in self.instructions:
+            if ins.offset < start:
+                continue
+            if ins.offset >= end:
+                break
+            if (ins.opname.startswith("STORE_")
+                    and not (prev is not None and prev.opname in ("DUP_TOP", "COPY"))):
+                return True
+            prev = ins
+        return False
 
     def _find_jump_backward_end(self) -> int:
         """
@@ -4981,6 +5016,56 @@ class DecompilerGeneric(DecompilerBase):
                     self.blocks.append((end_offset, "while"))
                     self._while_true_ends.add(end_offset)
 
+    @staticmethod
+    def _negate_condition(cond: str) -> str:
+        """
+        Return source text for the logical negation of a condition expression.
+
+        Only a leading `not` is stripped; comparisons are never rewritten to their
+        "opposite" operator, because that is not semantics-preserving in general.
+        """
+        try:
+            node = ast.parse(cond.strip(), mode="eval").body
+        except SyntaxError:
+            return f"not ({cond})"
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            return cond.strip()[len("not"):].strip()
+        if isinstance(node, (ast.Name, ast.Attribute, ast.Call, ast.Subscript, ast.Constant)):
+            return f"not {cond.strip()}"
+        return f"not ({cond.strip()})"
+
+    def _loop_exit_break_index(self, instr: BytecodeInstruction, jump_target: int):
+        """
+        Recognize a conditional jump that leaves the innermost `while` loop, i.e.
+        a conditional `break` (3.14 compiles `if cond: break` and
+        `if cond: ... else: break` at the end of a loop body this way).
+
+        The jump qualifies when its target is at or beyond the end of the
+        innermost `while` loop and that loop ends in a backward jump.
+
+        Returns:
+            None if this jump is not a loop exit. Otherwise the index of the
+            loop's back-edge instruction when the jump is immediately followed by
+            it (so the caller can consume it), or -1 when more code follows.
+        """
+        loop_end = None
+        for end, btype in reversed(self.blocks):
+            if btype in ("while", "for"):
+                if btype == "while":
+                    loop_end = end
+                break
+        if loop_end is None or not isinstance(jump_target, int) or jump_target < loop_end:
+            return None
+        last = next((i for i in self.instructions if i.offset == loop_end - 2), None)
+        if last is None or not self._is_backward_instruction(last):
+            return None
+        idx = self.pc
+        while idx < len(self.instructions) and self.instructions[idx].opname in _WHILE_TRIVIAL_OPS:
+            idx += 1
+        if idx < len(self.instructions) and self.instructions[idx] is last:
+            return idx
+        return -1
+
     def _op_conditional_jump(self, instr: BytecodeInstruction):
         """
         Handle a conditional jump instruction, emitting reconstructed `if`, `while`, or ternary code and updating decompiler state.
@@ -5097,6 +5182,19 @@ class DecompilerGeneric(DecompilerBase):
                     else:
                         self._append_reconstructed(f"if {prev_cond} and {cond}:")
                     self.indent_level += 1
+                    return
+
+            # Conditional `break`: this jump leaves the enclosing `while` loop.
+            if not compound_precomputed:
+                back_edge_idx = self._loop_exit_break_index(instr, jump_target)
+                if back_edge_idx is not None:
+                    body_cond = f"not {cond}" if is_true else cond
+                    self._append_reconstructed(f"if {self._negate_condition(body_cond)}:")
+                    self.indent_level += 1
+                    self._append_reconstructed("break")
+                    self.indent_level -= 1
+                    if back_edge_idx >= 0:
+                        self.pc = back_edge_idx + 1
                     return
 
             if compound_precomputed:
