@@ -2,7 +2,7 @@ import os
 import sys
 import unittest
 
-from .test_helpers import _run39_full_impl, assert_contains, decompile
+from .test_helpers import _run39_full_impl, assert_contains, assert_not_contains, decompile
 
 
 class TestControlFlow(unittest.TestCase):
@@ -873,6 +873,148 @@ class TestChainedComparisonSentinel(unittest.TestCase):
             ("3410 <= version_id" in out and "version_id <= 3429" in out),
             "Failed to preserve chained comparison logic"
         )
+
+class TestWhileTrueConditionalBreak(unittest.TestCase):
+    """`while True:` loops that exit through `if ...: break` (issue #96).
+
+    On 3.12+ a loop-exit `break` at the end of module code compiles to
+    `RETURN_CONST None`, and the `if` that guards it jumps straight onto the
+    loop's back-edge. That jump must not be mistaken for the loop guard, or the
+    condition is dropped and the loop exits (or never exits) unconditionally.
+    Each case is checked by running the original and the decompiled code with
+    the same scripted `input()` and comparing what they print.
+    """
+
+    _SCRIPT = ["", "", "skip", "a", "y", "q", "z", "b", "x"] * 4
+
+    @classmethod
+    def _run(cls, code):
+        import builtins
+        import contextlib
+        import io
+
+        feed = iter(cls._SCRIPT)
+        scripted_input = lambda *args: next(feed)  # noqa: E731
+        namespace = {
+            "__name__": "__main__",
+            "__builtins__": dict(vars(builtins), input=scripted_input),
+        }
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                exec(code, namespace)
+            outcome = "ok"
+        except StopIteration:
+            outcome = "input exhausted (loop never exited)"
+        return out.getvalue(), outcome
+
+    def _assert_same_behavior(self, src):
+        decompiled = decompile(src)
+        try:
+            recompiled = compile(decompiled, "<decompiled>", "exec")
+        except SyntaxError as exc:
+            self.fail(f"Decompiled output does not compile ({exc}):\n{decompiled}")
+        self.assertEqual(
+            self._run(recompiled), self._run(compile(src, "<original>", "exec")),
+            f"Decompiled loop behaves differently from the source:\n{decompiled}",
+        )
+        return decompiled
+
+    def test_condition_preserved_at_module_level(self):
+        out = self._assert_same_behavior(
+            "while True:\n    x = input()\n    if x:\n        break\n"
+        )
+        assert_contains(out, "while True:", "if x:", "break")
+
+    def test_condition_preserved_with_code_after_loop(self):
+        out = self._assert_same_behavior(
+            "while True:\n    x = input()\n    if x:\n        break\nprint('end', x)\n"
+        )
+        assert_contains(out, "while True:", "if x:", "print('end', x)")
+
+    def test_negated_condition(self):
+        self._assert_same_behavior(
+            "while True:\n    x = input()\n    if not x:\n        break\n    print('got', x)\n"
+        )
+
+    def test_break_inside_function(self):
+        self._assert_same_behavior(
+            "def f():\n"
+            "    n = 0\n"
+            "    while True:\n"
+            "        n += 1\n"
+            "        x = input()\n"
+            "        if x:\n"
+            "            break\n"
+            "    print('n', n)\n"
+            "f()\n"
+        )
+
+    def test_nested_while_true_loops(self):
+        self._assert_same_behavior(
+            "while True:\n"
+            "    a = input()\n"
+            "    while True:\n"
+            "        b = input()\n"
+            "        if b == 'y':\n"
+            "            break\n"
+            "    print('inner done', a, b)\n"
+            "    if a == 'z':\n"
+            "        break\n"
+        )
+
+    def test_two_conditional_breaks(self):
+        self._assert_same_behavior(
+            "while True:\n"
+            "    x = input()\n"
+            "    if x == 'a':\n"
+            "        break\n"
+            "    if x == 'b':\n"
+            "        print('b')\n"
+            "        break\n"
+            "    print('loop', x)\n"
+        )
+
+    def test_break_in_else_branch(self):
+        self._assert_same_behavior(
+            "while True:\n"
+            "    x = input()\n"
+            "    if x == 'a':\n"
+            "        print('a')\n"
+            "    else:\n"
+            "        break\n"
+            "print('out')\n"
+        )
+
+    @unittest.skipIf(sys.version_info[:2] == (3, 11),
+                     "3.11 mis-decompiles loops containing try blocks (3.11 is not yet supported, see #4)")
+    def test_if_inside_for_try_is_not_turned_into_while(self):
+        # A conditional inside a `for` loop body must stay an `if` even though it
+        # sits after an assignment and before the loop's `continue` back-edge.
+        out = self._assert_same_behavior(
+            "def g(a):\n"
+            "    r = None\n"
+            "    for i in (3, 2, 1):\n"
+            "        try:\n"
+            "            o = a\n"
+            "            if o == 'y':\n"
+            "                r = i\n"
+            "                break\n"
+            "        except Exception:\n"
+            "            continue\n"
+            "    return r\n"
+            "print(g('y'), g('n'))\n"
+        )
+        assert_not_contains(out, "while ")
+
+    @unittest.skipIf(sys.version_info[:2] == (3, 11),
+                     "3.11 decompiles every `while cond:` loop as an `if` (3.11 is not yet supported, see #4)")
+    def test_real_while_guard_still_detected(self):
+        out = self._assert_same_behavior(
+            "x = 3\nwhile x:\n    x = x - 1\n    print('tick', x)\nprint('end')\n"
+        )
+        assert_contains(out, "while x:")
+
 
 if __name__ == "__main__":
     unittest.main()
