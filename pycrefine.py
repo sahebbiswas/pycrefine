@@ -2553,8 +2553,11 @@ class DecompilerGeneric(DecompilerBase):
                     # Fallback for unresolved target (e.g. 3.14+ relative jumps)
                     t = ins.offset + 2 + (arg * 2)
 
-                # Target must exit the loop (land at or beyond jb)
-                if t < jb.offset:
+                # Target must exit the loop: land strictly beyond the
+                # back-edge. A jump that lands ON the back-edge itself is an
+                # `if` whose false branch skips to the loop head (e.g.
+                # `while True: ...; if x: break`), not the loop's guard.
+                if t <= jb.offset:
                     continue
                 # For guards positioned BEFORE body_start: the fall-through
                 # (ins.offset+2) must reach body_start via only trivial
