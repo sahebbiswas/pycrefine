@@ -682,7 +682,12 @@ class TestWhilePrescan(unittest.TestCase):
 
     def test_dup_offsets_populated(self):
         dec = self._get_dec("n = 0\nwhile n < 5:\n    n += 1\n")
-        self.assertGreater(len(dec._while_body_offsets), 0)
+        if (3, 12) <= sys.version_info[:2] < (3, 14):
+            # 3.12/3.13 copy the condition to the bottom of the loop body.
+            self.assertGreater(len(dec._while_body_offsets), 0)
+        else:
+            # No duplicated condition: nothing may be suppressed.
+            self.assertEqual(len(dec._while_body_offsets), 0)
 
     def test_no_while_in_if_only(self):
         dec = self._get_dec("x = 1\nif x > 0:\n    x = 2\n")
@@ -1018,3 +1023,55 @@ class TestWhileTrueConditionalBreak(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipIf(sys.version_info[:2] == (3, 11), "3.11 bytecode is not supported yet (#4)")
+class TestLoopContinueAndTailIf(unittest.TestCase):
+    """`continue` and trailing `if`/`else` chains inside loops (issue #103).
+
+    The compiler threads every `continue` and every branch that ends a loop body
+    straight to the loop head, so those back-jumps used to be dropped along with
+    the `if` guarding them. Each case runs the original and the decompiled code
+    and compares what they print.
+    """
+
+    _SCRIPT = TestWhileTrueConditionalBreak._SCRIPT
+    _run = TestWhileTrueConditionalBreak.__dict__["_run"]
+    _assert_same_behavior = TestWhileTrueConditionalBreak._assert_same_behavior
+
+    CASES = {
+        'for_continue': "for i in range(5):\n    if i == 1:\n        continue\n    print(i)\nprint('end')\n",
+        'for_continue_func': 'def f(n):\n    out = []\n    for i in range(n):\n        if i % 2:\n            continue\n        out.append(i)\n    return out\nprint(f(7))\n',
+        'for_continue_tail': "for i in range(4):\n    print('a', i)\n    if i == 2:\n        continue\n",
+        'for_continue_else': "for i in range(4):\n    if i == 1:\n        continue\n    else:\n        print('x', i)\n    print('y', i)\n",
+        'for_two_continues': 'for i in range(8):\n    if i == 1:\n        continue\n    if i == 3:\n        continue\n    print(i)\n',
+        'for_continue_break': "for i in range(8):\n    if i == 1:\n        continue\n    if i == 4:\n        break\n    print(i)\nprint('end')\n",
+        'for_nested_continue': 'for i in range(3):\n    for j in range(3):\n        if j == 1:\n            continue\n        print(i, j)\n',
+        'for_continue_outer': "for i in range(3):\n    for j in range(3):\n        if j == 1:\n            break\n        print(i, j)\n    if i == 1:\n        continue\n    print('outer', i)\n",
+        'for_continue_ifelse': "for i in range(5):\n    if i == 1:\n        continue\n    elif i == 3:\n        print('three')\n    else:\n        print(i)\n",
+        'for_continue_compound': 'for i in range(6):\n    if i > 1 and i < 4:\n        continue\n    print(i)\n',
+        'while_continue': "i = 0\nwhile i < 5:\n    i += 1\n    if i == 2:\n        continue\n    print(i)\nprint('end')\n",
+        'while_continue_func': 'def f():\n    i = 0\n    r = []\n    while i < 6:\n        i += 1\n        if i % 2:\n            continue\n        r.append(i)\n    return r\nprint(f())\n',
+        'wt_continue': "while True:\n    x = input()\n    if x == 'skip':\n        continue\n    print('got', x)\n    if x == 'q':\n        break\n",
+        'wt_continue_else': "while True:\n    x = input()\n    if x == 'skip':\n        continue\n    else:\n        print('e', x)\n    if x == 'q':\n        break\n",
+        'wt_continue_tail': "n = 0\nwhile True:\n    n += 1\n    x = input()\n    if n > 6:\n        break\n    if x == 'skip':\n        continue\n",
+        'while_continue_break': "i = 0\nwhile i < 9:\n    i += 1\n    if i == 2:\n        continue\n    if i == 5:\n        break\n    print(i)\nprint('end')\n",
+        'while_continue_two': 'i = 0\nwhile i < 9:\n    i += 1\n    if i == 2:\n        continue\n    if i == 4:\n        continue\n    print(i)\n',
+        'R_for_tail_ifelse': "for i in range(5):\n    print('a', i)\n    if i % 2:\n        print('odd')\n    else:\n        print('even')\n",
+        'R_for_if_then_rest': "for i in range(5):\n    if i % 2:\n        print('odd')\n    print('rest', i)\n",
+        'R_for_tail_if': "for i in range(5):\n    print('a', i)\n    if i == 3:\n        print('three')\n",
+        'R_for_nested_ifs': "for i in range(6):\n    if i > 1:\n        if i < 4:\n            print('mid', i)\n        else:\n            print('hi', i)\n    print('end', i)\n",
+        'R_while_tail_ifelse': "i = 0\nwhile i < 5:\n    i += 1\n    if i % 2:\n        print('odd')\n    else:\n        print('even')\n",
+        'R_for_if_elif': "for i in range(5):\n    if i == 1:\n        print('one')\n    elif i == 2:\n        print('two')\n    else:\n        print('other')\n",
+        'R_for_ifelse_rest': "for i in range(5):\n    if i % 2:\n        print('odd')\n    else:\n        print('even')\n    print('rest', i)\n",
+        'R_for_try_if': "for i in range(4):\n    try:\n        if i == 2:\n            print('two')\n        print(i)\n    except Exception:\n        pass\n",
+        'while_nested_continue': 'i = 0\nwhile i < 3:\n    i += 1\n    j = 0\n    while j < 3:\n        j += 1\n        if j == 2:\n            continue\n        print(i, j)\n',
+    }
+
+    def test_behavior_is_preserved(self):
+        for name, src in self.CASES.items():
+            with self.subTest(case=name):
+                out = self._assert_same_behavior(src)
+                # A `continue` that ends the body is a no-op and is not compiled.
+                if "continue" in src and not name.endswith("_tail"):
+                    assert_contains(out, "continue")
