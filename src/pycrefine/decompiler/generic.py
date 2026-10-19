@@ -2821,7 +2821,7 @@ class DecompilerGeneric(DecompilerBase):
             "CALL_FUNCTION_KW": self._op_call, "CALL_FUNCTION_EX": self._op_call,
             "CALL_METHOD": self._op_call, "CALL_KW": self._op_call,
             "KW_NAMES": self._op_kw_names,
-            "PUSH_NULL": self._op_push_null, "CACHE": self._op_cache,
+            "PUSH_NULL": self._op_push_null,
 
             # Pops
             "POP_TOP": self._op_pop_top,
@@ -3820,10 +3820,6 @@ class DecompilerGeneric(DecompilerBase):
     def _op_kw_names(self, instr: BytecodeInstruction):
         """Consume a keyword-names tuple (Python 3.11+ KW_NAMES opcode)."""
         self._kw_names = instr.argval
-
-    def _op_cache(self, instr: BytecodeInstruction):
-        """Ignore CACHE padding instructions."""
-        pass
 
     def _op_push_null(self, instr: BytecodeInstruction):
         self.stack.append(StackNULL(is_method=False))
