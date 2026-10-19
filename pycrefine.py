@@ -25,6 +25,43 @@ _MAX_TERNARY_MINI_SEARCH_WINDOW = 8
 _NO_PASS_TYPES = frozenset({"exc_cleanup", "finally_wrapper"})
 _NO_INDENT_TYPES = frozenset({"finally_wrapper"})
 
+_UNARY_SYMBOLS = {
+    "UNARY_NEGATIVE": "-", "UNARY_POSITIVE": "+", "UNARY_INVERT": "~", "UNARY_NOT": "not ",
+}
+
+
+def _unary_operand(operand) -> str:
+    """
+    Return `operand` as source text that a unary operator can be applied to as a whole.
+
+    Names, calls, subscripts and other atoms are used as they are; anything else (a
+    conditional expression, a binary operation, ...) is parenthesised so that
+    `-(a if flag else b)` does not turn into `-a if flag else b`.
+    """
+    text = str(operand)
+    try:
+        node = ast.parse(text, mode="eval").body
+    except SyntaxError:
+        return f"({text})"
+    if isinstance(node, (ast.Name, ast.Attribute, ast.Subscript, ast.Call)):
+        return text
+    if text.startswith("(") and text.endswith(")"):
+        depth = 0
+        for pos, ch in enumerate(text):
+            depth += (ch == "(") - (ch == ")")
+            if depth == 0:
+                if pos == len(text) - 1:
+                    return text   # already one parenthesised group
+                break
+    if isinstance(node, (ast.List, ast.Set, ast.Dict, ast.ListComp, ast.SetComp,
+                         ast.DictComp, ast.GeneratorExp, ast.Tuple)) and text[:1] in "([{":
+        return text
+    if isinstance(node, ast.Constant) and not (isinstance(node.value, (int, float, complex))
+                                               and text.startswith("-")):
+        return text
+    return f"({text})"
+
+
 _TERNARY_STORES = frozenset(("STORE_FAST", "STORE_NAME", "STORE_GLOBAL", "STORE_DEREF"))
 _TERNARY_SKIP = frozenset(("CACHE", "RESUME", "NOT_TAKEN", "COPY_FREE_VARS"))
 _TERNARY_TERM = frozenset(("RETURN_CONST", "RETURN_VALUE"))
@@ -34,7 +71,7 @@ _TERNARY_PURE = frozenset((
     "GET_ATTR", "LOAD_FAST_BORROW", "LOAD_FAST_BORROW_LOAD_FAST_BORROW",
     "LOAD_CONST_BORROW", "CALL", "CALL_FUNCTION", "CALL_METHOD",
     "COMPARE_OP", "BINARY_OP", "IS_OP", "CONTAINS_OP",
-    "UNARY_NOT", "UNARY_NEGATIVE", "UNARY_POSITIVE", "UNARY_INVERT",
+    "UNARY_NOT", "UNARY_NEGATIVE", "UNARY_POSITIVE", "UNARY_INVERT", "CALL_INTRINSIC_1",
     "BUILD_TUPLE", "BUILD_LIST", "BUILD_SET", "BUILD_MAP",
     "PRECALL", "PUSH_NULL", "FORMAT_VALUE", "FORMAT_SIMPLE", "BUILD_STRING",
     "BINARY_SUBSCR", "TO_BOOL", "BINARY_SLICE", "BUILD_SLICE",
@@ -1340,6 +1377,8 @@ class DecompilerGeneric(DecompilerBase):
             "CALL_FUNCTION", "CALL", "CALL_METHOD", "CALL_FUNCTION_KW",
             "RETURN_VALUE", "RETURN_CONST", "YIELD_VALUE",
             "LIST_APPEND", "SET_ADD", "MAP_ADD",
+            "UNARY_NEGATIVE", "UNARY_POSITIVE", "UNARY_INVERT", "UNARY_NOT",
+            "CALL_INTRINSIC_1", "TO_BOOL",
         ))
         for idx, ins in enumerate(self.instructions):
             if not self._is_compound_cjump(ins.opname):
@@ -2419,15 +2458,11 @@ class DecompilerGeneric(DecompilerBase):
                     container, item = mini_stack.pop(), mini_stack.pop()
                     sym = "not in" if bool(ins.arg) else "in"
                     mini_stack.append(f"{item} {sym} {container}")
-            elif op == "UNARY_NOT":
+            elif op in _UNARY_SYMBOLS or (
+                    op == "CALL_INTRINSIC_1" and "UNARY_POSITIVE" in str(ins.argrepr)):
                 if mini_stack:
-                    mini_stack.append(f"not {mini_stack.pop()}")
-            elif op in ("UNARY_NEGATIVE",):
-                if mini_stack:
-                    val = mini_stack.pop()
-                    # Wrap the operand in parentheses if it's already an expression
-                    # to keep it safe for subsequent attribute access in the pre-scan.
-                    mini_stack.append(f"(-{val})")
+                    symbol = _UNARY_SYMBOLS.get(op, "+")
+                    mini_stack.append(f"({symbol}{_unary_operand(mini_stack.pop())})")
             elif op == "BUILD_SLICE":
                 # Python 3.9: BUILD_SLICE N pops stop,start (and optionally step)
                 argc = ins.arg if ins.arg is not None else 2
@@ -3727,6 +3762,11 @@ class DecompilerGeneric(DecompilerBase):
             "POP_JUMP_IF_NONE": self._op_conditional_jump,
             "POP_JUMP_IF_NOT_NONE": self._op_conditional_jump,
             "JUMP_IF_NOT_EXC_MATCH": self._op_jump_if_not_exc_match,
+
+            # Unary operators
+            "UNARY_NEGATIVE": self._op_unary, "UNARY_POSITIVE": self._op_unary,
+            "UNARY_INVERT": self._op_unary, "UNARY_NOT": self._op_unary,
+            "CALL_INTRINSIC_1": self._op_unary,   # 3.12+: unary plus is an intrinsic
 
             # Iteration
             "FOR_ITER": self._op_for_iter,
@@ -5648,6 +5688,28 @@ class DecompilerGeneric(DecompilerBase):
                     return
 
             self.blocks.append((if_block_end, "if"))
+
+    def _op_unary(self, instr: BytecodeInstruction):
+        """
+        UNARY_NEGATIVE / UNARY_POSITIVE / UNARY_INVERT / UNARY_NOT: apply the operator to TOS.
+
+        The result is parenthesised so that a later `**`, attribute access or
+        comparison cannot rebind it (`(-x) ** 2` is not `-x ** 2`).
+        """
+        if instr.opname == "CALL_INTRINSIC_1":
+            # Only unary plus changes the expression; the other intrinsics are
+            # bookkeeping that never reaches the source.
+            if "UNARY_POSITIVE" not in str(instr.argrepr):
+                return
+            symbol = "+"
+        else:
+            symbol = {
+                "UNARY_NEGATIVE": "-", "UNARY_POSITIVE": "+",
+                "UNARY_INVERT": "~", "UNARY_NOT": "not ",
+            }[instr.opname]
+        if not self.stack:
+            return
+        self.stack.append(f"({symbol}{_unary_operand(self.stack.pop())})")
 
     def _op_jump_if_not_exc_match(self, instr: BytecodeInstruction):
         # 3.9 / 3.10: JUMP_IF_NOT_EXC_MATCH(target)
