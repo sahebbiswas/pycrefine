@@ -38,7 +38,7 @@ You can optionally enhance output readability by adjusting the formatting with `
 python pycrefine.py path/to/compiled_file.pyc --beautification-level core
 ```
 
-The script is entirely self-contained with no third-party dependencies required. It needs Python 3.9 or later to execute.
+pycrefine has no third-party dependencies and needs Python 3.9 or later to run. In a source checkout, `pycrefine.py` is a small launcher for the package in `src/pycrefine/`, so no installation is needed; once installed, `pycrefine` and `python -m pycrefine` do the same.
 
 ### API Usage
 
@@ -64,6 +64,18 @@ print(source_code)
 *   **Cross-Version Parsing:** A built-in marshal reader parses `.pyc` files written by other Python versions, so you can run `pycrefine` on a newer Python (e.g., 3.12) and decompile a `.pyc` compiled by Python 3.9. For 3.10+ bytecode, run `pycrefine` under the Python version that compiled the file.
 *   **PEP 552 Support:** Correctly processes both timestamp-based and hash-based `.pyc` headers introduced dynamically in Python 3.7.
 *   **Dispatch Table Architecture:** The decompiler engine uses a modular opcode dispatch mapping designed to simplify extending and maintaining opcode handlers across newer Python versions.
+
+### Code layout
+
+The implementation is the `pycrefine` package in `src/pycrefine/`. `import pycrefine` still exposes every name the former single-file module had, so existing code keeps working.
+
+| Module | Contents |
+|---|---|
+| `loader.py`, `versions.py`, `codeobj.py` | `.pyc` loading, the marshal reader for foreign versions, magic-number identification |
+| `decompiler/` | `base.py`, `generic.py` (version-independent logic), `py39.py`, `py311.py` (3.10-3.12), `py314.py` (3.13/3.14) |
+| `opcodes/py39.py` | the Python 3.9 opcode table |
+| `postprocess.py`, `expr.py`, `instructions.py`, `_constants.py` | output clean-up, expression helpers, the instruction record, shared constants |
+| `cli.py` | the command-line interface |
 
 ### Example Decompilation
 
@@ -134,7 +146,7 @@ It performs a multi-dimensional analysis with scoring based on:
 
 Run a test against its own source (self-scoring):
 ```bash
-python debug/check_coherency.py pycrefine.py
+python debug/check_coherency.py src/pycrefine/decompiler/generic.py
 ```
 
 Score the coherency of any other python file, enabling verbose output to view the per-dimension grading statistics:

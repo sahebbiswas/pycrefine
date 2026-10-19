@@ -25,7 +25,7 @@ sys.path.insert(0, str(_DEBUG))
 try:
     from pycrefine import get_decompiler
 except ImportError as e:
-    sys.exit(f"Cannot import pycrefine: {e}\nMake sure pycrefine.py is in the same directory.")
+    sys.exit(f"Cannot import pycrefine: {e}\nMake sure the pycrefine package (src/pycrefine) is importable.")
 
 try:
     from check_coherency import normalise_source
@@ -112,7 +112,7 @@ def get_hamming_distance_for_file(source_path: str, verbose: bool = False) -> in
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Compute Hamming distance between original and decompiled source.")
-    parser.add_argument("source", nargs="?", default=str(_HERE / "pycrefine.py"), help="Python source file to score")
+    parser.add_argument("source", nargs="?", default=str(_HERE / "src" / "pycrefine" / "decompiler" / "generic.py"), help="Python source file to score")
     parser.add_argument("-v", "--verbose", action="store_true", help="Print verbose output")
     args = parser.parse_args()
     return get_hamming_distance_for_file(args.source, args.verbose)

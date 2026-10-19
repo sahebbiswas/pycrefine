@@ -110,7 +110,7 @@ The default corpus is `test_files/` (`.py` sources and the committed `.pyc`
 fixtures). Any other file or directory can be measured without gating:
 
 ```bash
-python quality/check_correctness.py pycrefine.py tests/ --no-baseline -v
+python quality/check_correctness.py src/pycrefine/ src/pycrefine/decompiler/ src/pycrefine/opcodes/ tests/ --no-baseline -v
 ```
 
 A larger, versioned corpus is tracked in #78.

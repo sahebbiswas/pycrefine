@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pycrefine"
-version = "1.0.6"
+version = "1.0.7"
 description = "A Python .pyc decompiler for educational purposes"
 authors = [{name = "Saheb"}]
 license = "MIT"
@@ -15,11 +15,10 @@ dependencies = [] # Keeps your "no dependencies" promise
 test = ["pytest"]
 
 [project.scripts]
-pycrefine = "pycrefine:main" # Allows running 'pycrefine' directly in terminal
+pycrefine = "pycrefine.cli:main" # Allows running 'pycrefine' directly in terminal
 
-[tool.setuptools]
-py-modules = ["pycrefine"]
-packages = []
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
