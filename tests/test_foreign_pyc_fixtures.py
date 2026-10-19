@@ -23,6 +23,11 @@ class TestForeignPycManifest(unittest.TestCase):
         regen = _load_regenerate()
         self.assertEqual(regen.check(), 0)
 
+    def test_changed_source_is_reported_as_stale(self):
+        regen = _load_regenerate()
+        regen.source_sha256 = lambda source: "0" * 64
+        self.assertEqual(regen.check(), 1)
+
     def test_magic_numbers_match_recorded_python_version(self):
         with open(os.path.join(_DIR, "manifest.json")) as f:
             manifest = json.load(f)

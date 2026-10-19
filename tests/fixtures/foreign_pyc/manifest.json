@@ -6,42 +6,48 @@
       "python": "3.12",
       "cpython": null,
       "magic": 3531,
-      "sha256": "a4d2fa13f9cacf15693de61d4f531c71e97596fb390d83f761d746e184757b3c"
+      "sha256": "a4d2fa13f9cacf15693de61d4f531c71e97596fb390d83f761d746e184757b3c",
+      "source_sha256": null
     },
     "comprehensive.cpython-314.pyc": {
       "source": "corpus/comprehensive.py",
       "python": "3.14",
       "cpython": null,
       "magic": 3627,
-      "sha256": "ae49803b52e0bf99108a49685bd799f42289991cafd8273362987c7ed5e5b7c4"
+      "sha256": "ae49803b52e0bf99108a49685bd799f42289991cafd8273362987c7ed5e5b7c4",
+      "source_sha256": null
     },
     "comprehensive.cpython-39.pyc": {
       "source": "corpus/comprehensive.py",
       "python": "3.9",
       "cpython": null,
       "magic": 3425,
-      "sha256": "04afda7fb3a45f8ce5da4b1f1bb58d49570ede20fd3275f1812456b54c07fef1"
+      "sha256": "04afda7fb3a45f8ce5da4b1f1bb58d49570ede20fd3275f1812456b54c07fef1",
+      "source_sha256": null
     },
     "simple.cpython-313.pyc": {
       "source": "corpus/simple.py",
       "python": "3.13",
       "cpython": null,
       "magic": 3571,
-      "sha256": "e8fab3e96c1cf96ce1ceeb11ef37c81b9f98003aaa87771a73d8300014bccd7c"
+      "sha256": "e8fab3e96c1cf96ce1ceeb11ef37c81b9f98003aaa87771a73d8300014bccd7c",
+      "source_sha256": "25186d8f3d2942bb24ea50f1c3996efe54f3f27c63ad1bc15487b5bed4a9d368"
     },
     "simple.cpython-314.pyc": {
       "source": "corpus/simple.py",
       "python": "3.14",
       "cpython": null,
       "magic": 3627,
-      "sha256": "743a64aaface6627d2282ea0630f09634a27d0ff5e47ff4a1f88e2d580473200"
+      "sha256": "743a64aaface6627d2282ea0630f09634a27d0ff5e47ff4a1f88e2d580473200",
+      "source_sha256": "25186d8f3d2942bb24ea50f1c3996efe54f3f27c63ad1bc15487b5bed4a9d368"
     },
     "simple.cpython-39.pyc": {
       "source": "corpus/simple.py",
       "python": "3.9",
       "cpython": null,
       "magic": 3425,
-      "sha256": "64134ec50bc18482062a8e45df21e00df3fe7b465adfea3de7cbbe1091420408"
+      "sha256": "64134ec50bc18482062a8e45df21e00df3fe7b465adfea3de7cbbe1091420408",
+      "source_sha256": "25186d8f3d2942bb24ea50f1c3996efe54f3f27c63ad1bc15487b5bed4a9d368"
     }
   }
 }

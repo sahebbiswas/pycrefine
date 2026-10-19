@@ -16,7 +16,10 @@ Usage (run from anywhere):
 Each ``VERSION=INTERPRETER`` pair compiles the sources listed in
 ``SOURCES`` with that interpreter (hash-based pyc, so the output is
 reproducible) and records the interpreter's exact patch version in
-``manifest.json``. Versions not named on the command line keep their existing
+``manifest.json`` together with the source's sha256, which ``--check`` compares so a
+fixture is reported as stale when its source changes. Entries with a null
+``source_sha256`` predate that field and were built from an unrecorded revision of the
+source; ``--check`` only warns about them. Versions not named on the command line keep their existing
 file and manifest entry.
 """
 import argparse
@@ -52,6 +55,10 @@ def describe(path):
     return hashlib.sha256(data).hexdigest(), struct.unpack("<H", data[:2])[0]
 
 
+def source_sha256(source):
+    return hashlib.sha256((ROOT / source).read_bytes()).hexdigest()
+
+
 def load_manifest():
     if MANIFEST.exists():
         return json.loads(MANIFEST.read_text())
@@ -81,7 +88,8 @@ def regenerate(pairs, out_dir):
             sha, magic = describe(target)
             if out_dir == HERE:
                 manifest["files"][name] = {"source": source, "python": version,
-                                           "cpython": patch, "magic": magic, "sha256": sha}
+                                           "cpython": patch, "magic": magic, "sha256": sha,
+                                           "source_sha256": source_sha256(source)}
             print(f"{name}: CPython {patch}, magic {magic}")
     if out_dir == HERE:
         write_manifest(manifest)
@@ -105,6 +113,10 @@ def check():
             problems.append(f"{name}: magic {magic} != manifest {entry['magic']}")
         if not (ROOT / entry["source"]).exists():
             problems.append(f"{name}: source {entry['source']} missing")
+        elif entry.get("source_sha256") is None:
+            print(f"warning: {name}: built from an unrecorded revision of {entry['source']}")
+        elif source_sha256(entry["source"]) != entry["source_sha256"]:
+            problems.append(f"{name}: stale, {entry['source']} changed since it was built")
     for problem in problems:
         print(problem)
     return 1 if problems else 0
