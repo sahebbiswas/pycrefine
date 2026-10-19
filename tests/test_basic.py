@@ -276,3 +276,57 @@ class TestUnaryOperators(unittest.TestCase):
     def test_operators_appear(self):
         out = decompile("x = 2\nprint(-x)\nprint(~x)\nprint(+x)\n")
         assert_contains(out, "-x", "~x", "+x")
+
+
+class TestValueBoolOps(unittest.TestCase):
+    """`and` / `or` used as values (not conditions) must survive decompilation."""
+
+    CASES = {
+        "and_assign": "a, b = 0, 5\nx = a and b\ny = b and a\nprint(x, y)\n",
+        "or_assign": "a, b = 0, 5\nx = a or b\ny = b or a\nprint(x, y)\n",
+        "or_chain": "a, b = 0, 5\nz = a or b or 7\nprint(z)\n",
+        "and_chain": "a, b, c = 1, 2, 3\nz = a and b and c\nprint(z)\n",
+        "and_or_mixed": "a, b, c = 0, 5, 0\nw = (a and b) or c\nprint(w)\n",
+        "or_and_mixed": "a, b, c = 0, 5, 0\nu = (a or b) and c\nprint(u)\n",
+        "and_with_or_right": "a, b, c = 1, 0, 3\nt = a and (b or c)\nprint(t)\n",
+        "and_and_or": "a, b, c, d = 1, 2, 0, 7\nv = a and b and c or d\nprint(v)\n",
+        "or_with_and_right": "a, b, c = 0, 5, 0\nk = a or b and c\nprint(k)\n",
+        "return_value": "def f(p, q):\n    return p and q\ndef g(p, q):\n    return p or q\nprint(f(0, 1), f(2, 3), g(0, 1), g(2, 3))\n",
+        "lambda": "f = lambda p, q: p or q\ng = lambda p, q: p and q\nprint(f(0, 4), g(0, 4), g(2, 4))\n",
+        "call_arguments": "a, b = 0, 5\nprint(a or b, a and b, a or 'x')\n",
+        "nested_in_expression": "a, b = 0, 5\nprint((a or b) + 1, [a or b, a and b])\n",
+        "ternary_inside": "a, b, c = 0, 5, 2\nr = a or (b if c else 3)\nprint(r)\n",
+        "condition_unaffected": "a, b = 0, 5\nif a or b:\n    print('t')\nwhile a and b:\n    break\nprint('done')\n",
+        "in_function_default": "def f(x, y=0 or 3):\n    return x or y\nprint(f(0), f(1))\n",
+        "attribute_and_subscript": "a, b = 0, [1, 2]\nprint((a or b)[0], (a or b).count(1))\n",
+        "not_operand": "a, b = 0, 5\nprint(not (a or b), (not a) and b)\n",
+    }
+
+    def _run(self, code):
+        import contextlib
+        import io
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            exec(code, {"__name__": "__main__"})
+        return out.getvalue()
+
+    def test_cases_are_defined(self):
+        self.assertTrue(self.CASES)
+
+    def test_behavior_is_preserved(self):
+        for name, src in self.CASES.items():
+            with self.subTest(case=name):
+                decompiled = decompile(src)
+                try:
+                    recompiled = compile(decompiled, "<decompiled>", "exec")
+                except SyntaxError as exc:
+                    self.fail(f"Decompiled output does not compile ({exc}):\n{decompiled}")
+                self.assertEqual(
+                    self._run(recompiled), self._run(compile(src, "<original>", "exec")),
+                    f"Decompiled code behaves differently:\n{decompiled}",
+                )
+
+    def test_operators_appear(self):
+        out = decompile("a, b = 0, 5\nx = a or b\ny = a and b\n")
+        assert_contains(out, "x = a or b", "y = a and b")
