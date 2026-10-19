@@ -228,6 +228,15 @@ class TestUnaryOperators(unittest.TestCase):
         "in_function": "def f(a):\n    return -a, ~a, +a, not a\nprint(f(5))\n",
         "in_call_and_attribute": "x = 4\nprint((-x).bit_length(), abs(-x))\n",
         "in_condition": "x = 0\nif not x:\n    print('zero')\nprint(-x == 0)\n",
+        "ternary_branches": (
+            "a = 1\nb = 2\nflag = True\nr = ~a if flag else ~b\nu = -a if flag else -b\n"
+            "w = +a if flag else +b\nt = not a if flag else b\nprint(r, u, w, t)\n"
+        ),
+        "ternary_operand": (
+            "a = 1\nb = 2\nfor flag in (True, False):\n    print(-(a if flag else b), "
+            "~(a if flag else b), +(a if flag else b), not (a if flag else b))\n"
+        ),
+        "negated_sum": "a = 1\nb = 2\nprint(-(a + b), not (a < b), -(a * b) ** 2)\n",
     }
 
     def _run(self, code):
