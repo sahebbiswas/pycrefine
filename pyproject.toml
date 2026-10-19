@@ -15,7 +15,7 @@ dependencies = [] # Keeps your "no dependencies" promise
 test = ["pytest"]
 
 [project.scripts]
-pycrefine = "pycrefine:main" # Allows running 'pycrefine' directly in terminal
+pycrefine = "pycrefine.cli:main" # Allows running 'pycrefine' directly in terminal
 
 [tool.setuptools.packages.find]
 where = ["src"]
