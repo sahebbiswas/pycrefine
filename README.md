@@ -77,6 +77,18 @@ The implementation is the `pycrefine` package in `src/pycrefine/`. `import pycre
 | `postprocess.py`, `expr.py`, `instructions.py`, `_constants.py` | output clean-up, expression helpers, the instruction record, shared constants |
 | `cli.py` | the command-line interface |
 
+Elsewhere in the repository:
+
+| Path | Contents |
+|---|---|
+| `pycrefine.py` | launcher so `python pycrefine.py file.pyc` works from a checkout (not part of the wheel) |
+| `tests/` | the pytest suite; `tests/fixtures/foreign_pyc/` holds the few committed `.pyc` files written by other CPython versions, with a `manifest.json` and `tests/fixtures/regenerate_foreign_pyc.py` (everything else compiles on the fly) |
+| `corpus/` | sources decompiled by the correctness gate (with the foreign `.pyc` fixtures, its default corpus) |
+| `quality/` | the correctness gate, its per-version baselines, and the coherency checker |
+| `docs/` | correctness model and design notes |
+
+The package version lives in one place, `pycrefine.__version__`; `pyproject.toml` reads it.
+
 ### Example Decompilation
 
 **Original Source** (`example.py`):
@@ -123,7 +135,7 @@ This test suite strictly verifies the core mechanics of `pycrefine`, asserting i
 
 ### `check_correctness.py` (Correctness Gate)
 
-Located at `quality/check_correctness.py`, this is the primary quality gate. Each `test_files/` corpus entry, and each top-level unit within it, is decompiled and placed on a correctness ladder: `decompile_error` < `syntax_error` < `compile_error` < `compiles`. The results are compared with a committed per-Python-version baseline in `quality/baselines/`. CI fails when any entry or unit drops below its baseline:
+Located at `quality/check_correctness.py`, this is the primary quality gate. Each corpus entry (`corpus/` sources and the foreign-version `.pyc` files in `tests/fixtures/foreign_pyc/`), and each top-level unit within it, is decompiled and placed on a correctness ladder: `decompile_error` < `syntax_error` < `compile_error` < `compiles`. The results are compared with a committed per-Python-version baseline in `quality/baselines/`. CI fails when any entry or unit drops below its baseline:
 
 ```bash
 python quality/check_correctness.py              # gate against the baseline
@@ -135,7 +147,7 @@ See [docs/correctness.md](docs/correctness.md) for the full model, CI semantics,
 
 ### `check_coherency.py` (Decompilation Coherency Checker)
 
-Located at `debug/check_coherency.py`, this tool is an advanced decompilation coherency checker. It measures textual resemblance to the original source, so treat it as a readability diagnostic rather than a correctness check: output can score highly and still fail to compile. It works by compiling an arbitrary Python source file to `.pyc`, decompiling it backward with `pycrefine`, and scoring how faithfully the decompiler reproduced the semantic and syntactic structure of the original source.
+Located at `quality/check_coherency.py`, this tool is an advanced decompilation coherency checker. It measures textual resemblance to the original source, so treat it as a readability diagnostic rather than a correctness check: output can score highly and still fail to compile. It works by compiling an arbitrary Python source file to `.pyc`, decompiling it backward with `pycrefine`, and scoring how faithfully the decompiler reproduced the semantic and syntactic structure of the original source.
 
 It performs a multi-dimensional analysis with scoring based on:
 - Line and Token fidelity/recall
@@ -146,12 +158,12 @@ It performs a multi-dimensional analysis with scoring based on:
 
 Run a test against its own source (self-scoring):
 ```bash
-python debug/check_coherency.py src/pycrefine/decompiler/generic.py
+python quality/check_coherency.py src/pycrefine/decompiler/generic.py
 ```
 
 Score the coherency of any other python file, enabling verbose output to view the per-dimension grading statistics:
 ```bash
-python debug/check_coherency.py path/to/any_file.py --verbose
+python quality/check_coherency.py path/to/any_file.py --verbose
 ```
 
 For Continuous Integration pipelines, you can format the scoring output as JSON by passing the `--json` flag. The script predictably returns an exit code of `0` for passing scores (>= 70%), `1` for failing scores, and `2` for compilation/configuration errors.

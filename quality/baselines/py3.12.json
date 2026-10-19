@@ -2,19 +2,7 @@
   "schema_version": 1,
   "python_version": "3.12",
   "entries": {
-    "test_files/comprehensive.cpython-312.pyc": {
-      "kind": "pyc",
-      "status": "compiles"
-    },
-    "test_files/comprehensive.cpython-314.pyc": {
-      "kind": "pyc",
-      "status": "decompile_error"
-    },
-    "test_files/comprehensive.cpython-39.pyc": {
-      "kind": "pyc",
-      "status": "compiles"
-    },
-    "test_files/comprehensive.py": {
+    "corpus/comprehensive.py": {
       "kind": "source",
       "status": "syntax_error",
       "units": {
@@ -38,37 +26,7 @@
         "def some_decorator": "compiles"
       }
     },
-    "test_files/simple.cpython-313.pyc": {
-      "kind": "pyc",
-      "status": "decompile_error"
-    },
-    "test_files/simple.cpython-314.pyc": {
-      "kind": "pyc",
-      "status": "decompile_error"
-    },
-    "test_files/simple.cpython-39.pyc": {
-      "kind": "pyc",
-      "status": "compiles"
-    },
-    "test_files/simple.py": {
-      "kind": "source",
-      "status": "compiles",
-      "units": {
-        "Expr: \"\"\"": "compiles",
-        "If: if __name__==\"__main__\":": "compiles",
-        "def show_info": "compiles"
-      }
-    },
-    "test_files/simple_runner.py": {
-      "kind": "source",
-      "status": "compiles",
-      "units": {
-        "Expr: simple.show_info(2)": "compiles",
-        "Expr: simple.show_info(5)": "compiles",
-        "Import: import simple": "compiles"
-      }
-    },
-    "test_files/test_indent2.py": {
+    "corpus/indent2.py": {
       "kind": "source",
       "status": "compiles",
       "units": {
@@ -81,7 +39,7 @@
         "def post_process_source": "compiles"
       }
     },
-    "test_files/test_post_process.py": {
+    "corpus/post_process.py": {
       "kind": "source",
       "status": "compiles",
       "units": {
@@ -92,7 +50,16 @@
         "def post_process_source": "compiles"
       }
     },
-    "test_files/test_simple.py": {
+    "corpus/simple.py": {
+      "kind": "source",
+      "status": "compiles",
+      "units": {
+        "Expr: \"\"\"": "compiles",
+        "If: if __name__==\"__main__\":": "compiles",
+        "def show_info": "compiles"
+      }
+    },
+    "corpus/simple_roundtrip.py": {
       "kind": "source",
       "status": "compiles",
       "units": {
@@ -112,7 +79,16 @@
         "With: with open(\"temp.py\", \"w\") as f:": "compiles"
       }
     },
-    "test_files/verify_scenes.py": {
+    "corpus/simple_runner.py": {
+      "kind": "source",
+      "status": "compiles",
+      "units": {
+        "Expr: simple.show_info(2)": "compiles",
+        "Expr: simple.show_info(5)": "compiles",
+        "Import: import simple": "compiles"
+      }
+    },
+    "corpus/verify_scenes.py": {
       "kind": "source",
       "status": "syntax_error",
       "units": {
@@ -144,6 +120,30 @@
         "def issue_4": "compiles",
         "def issue_5": "syntax_error"
       }
+    },
+    "tests/fixtures/foreign_pyc/comprehensive.cpython-312.pyc": {
+      "kind": "pyc",
+      "status": "compiles"
+    },
+    "tests/fixtures/foreign_pyc/comprehensive.cpython-314.pyc": {
+      "kind": "pyc",
+      "status": "decompile_error"
+    },
+    "tests/fixtures/foreign_pyc/comprehensive.cpython-39.pyc": {
+      "kind": "pyc",
+      "status": "compiles"
+    },
+    "tests/fixtures/foreign_pyc/simple.cpython-313.pyc": {
+      "kind": "pyc",
+      "status": "decompile_error"
+    },
+    "tests/fixtures/foreign_pyc/simple.cpython-314.pyc": {
+      "kind": "pyc",
+      "status": "decompile_error"
+    },
+    "tests/fixtures/foreign_pyc/simple.cpython-39.pyc": {
+      "kind": "pyc",
+      "status": "compiles"
     }
   }
 }

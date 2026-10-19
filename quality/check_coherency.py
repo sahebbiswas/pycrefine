@@ -46,13 +46,13 @@ from typing import Dict, List, Optional, Tuple
 # ---------------------------------------------------------------------------
 # Path setup
 # ---------------------------------------------------------------------------
-# This file lives in debug/ (one level below the project root).
-# _DEBUG  = .../pycrefine/debug/
-# _HERE   = .../pycrefine/          (project root -- the pycrefine package is in src/, reached via the root launcher)
-_DEBUG = Path(__file__).parent
-_HERE  = _DEBUG.parent
-sys.path.insert(0, str(_HERE))
-sys.path.insert(0, str(_DEBUG))
+# This file lives in quality/ (one level below the project root).
+# _QUALITY = .../pycrefine/quality/
+# _ROOT    = .../pycrefine/          (project root -- the pycrefine package is in src/, reached via the root launcher)
+_QUALITY = Path(__file__).parent
+_ROOT    = _QUALITY.parent
+sys.path.insert(0, str(_ROOT))
+sys.path.insert(0, str(_QUALITY))
 
 try:
     from pycrefine import get_decompiler
@@ -1152,7 +1152,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         'source',
         nargs='?',
-        default=str(_HERE / 'src' / 'pycrefine' / 'decompiler' / 'generic.py'),
+        default=str(_ROOT / 'src' / 'pycrefine' / 'decompiler' / 'generic.py'),
         help='Python source file to score (default: src/pycrefine/decompiler/generic.py)',
     )
     parser.add_argument(

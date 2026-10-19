@@ -1,9 +1,23 @@
-trace.log
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Build output
+build/
+dist/
+
+# Local logs and generated reports. Only these exact names are ignored, so
+# new .json / .txt data files under tests/ or quality/ show up in git status.
 *.log
-__pycache__
-*.txt
-*.json
-!quality/baselines/*.json
-pycrefine.egg-info 
-run_tests.bat 
-KNOWN_ISSUES.md 
+/correctness-report*.json
+
+# Local-only files
+run_tests.bat
+KNOWN_ISSUES.md
+
+# Foreign-version bytecode is committed on purpose (see tests/fixtures/foreign_pyc/)
+!tests/fixtures/foreign_pyc/*.pyc

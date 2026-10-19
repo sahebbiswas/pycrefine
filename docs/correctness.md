@@ -55,7 +55,7 @@ These are reported but never affect pass/fail:
   identical to the original's (`ast.dump`, positions ignored). A strict
   measure of structural fidelity.
 * **Coherency** (`--coherency`, per source entry): the composite score from
-  [`debug/check_coherency.py`](../debug/check_coherency.py). The coherency
+  [`quality/check_coherency.py`](../quality/check_coherency.py). The coherency
   checker scores textual resemblance (token and line recall, keyword
   coverage, cleanliness). It is a readability diagnostic, **not** a semantic
   oracle: output can score highly and still fail to compile, as the baseline
@@ -106,8 +106,8 @@ The CI workflow runs the gate after pytest and uploads the JSON report as the
 asserts no regressions against the committed baseline, so a plain `pytest`
 run catches them locally.
 
-The default corpus is `test_files/` (`.py` sources and the committed `.pyc`
-fixtures). Any other file or directory can be measured without gating:
+The default corpus is `corpus/` (`.py` sources) plus the committed `.pyc`
+fixtures in `tests/fixtures/foreign_pyc/`. Any other file or directory can be measured without gating:
 
 ```bash
 python quality/check_correctness.py src/pycrefine/ src/pycrefine/decompiler/ src/pycrefine/opcodes/ tests/ --no-baseline -v
@@ -133,12 +133,12 @@ The report (schema version 1) looks like this:
     "changes": {"improved": 1}                     // absent with --no-baseline
   },
   "changes": [                                     // null with --no-baseline
-    {"path": "test_files/simple.py", "unit": "def f",   // unit null = whole entry
+    {"path": "corpus/simple.py", "unit": "def f",   // unit null = whole entry
      "change": "improved", "before": "syntax_error", "after": "compiles"}
   ],
   "entries": [
     {
-      "path": "test_files/simple.py",
+      "path": "corpus/simple.py",
       "kind": "source",                            // or "pyc"
       "status": "compile_error",
       "level": 2,                                  // null for source_error
