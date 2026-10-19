@@ -62,6 +62,37 @@ def _unary_operand(operand) -> str:
     return f"({text})"
 
 
+class _BoolExpr(str):
+    """A parenthesised `and`/`or` expression that remembers its operator and operands, so chains flatten."""
+
+    op: str
+    parts: list
+
+    @classmethod
+    def join(cls, op: str, left, right) -> "_BoolExpr":
+        """Build `left op right`, merging operands that already use the same operator."""
+        def operands(side):
+            return list(side.parts) if isinstance(side, _BoolExpr) and side.op == op else [side]
+
+        def wrap(side):
+            text = str(side)
+            if isinstance(side, _BoolExpr):
+                return text
+            try:
+                node = ast.parse(text, mode="eval").body
+            except SyntaxError:
+                return f"({text})"
+            if isinstance(node, (ast.IfExp, ast.Lambda, ast.NamedExpr, ast.Yield, ast.YieldFrom, ast.Await)):
+                return f"({text})"
+            return text
+
+        parts = operands(left) + operands(right)
+        obj = cls("(" + f" {op} ".join(wrap(p) for p in parts) + ")")
+        obj.op = op
+        obj.parts = parts
+        return obj
+
+
 _TERNARY_STORES = frozenset(("STORE_FAST", "STORE_NAME", "STORE_GLOBAL", "STORE_DEREF"))
 _TERNARY_SKIP = frozenset(("CACHE", "RESUME", "NOT_TAKEN", "COPY_FREE_VARS"))
 _TERNARY_TERM = frozenset(("RETURN_CONST", "RETURN_VALUE"))
@@ -1006,6 +1037,11 @@ class DecompilerGeneric(DecompilerBase):
         # duplicated condition check emitted at the bottom of 3.11+ while loops.
         self._while_body_offsets: set = set()
         self._inner_back_jumps: dict = {}  # inner back-jump offset -> offset of the closing back-edge
+        # Value-context `and`/`or` (see _prescan_value_boolops).
+        self._boolop_or_pop: dict = {}      # 3.9-3.10: offset -> (op, target) for *_OR_POP jumps
+        self._boolop_copy: dict = {}        # 3.12+: COPY offset -> (op, target, resume offset)
+        self._boolop_groups: dict = {}      # 3.9-3.10: plain POP_JUMP offset -> (op, target)
+        self._boolop_pending: list = []     # open operators: [kind, left operand, join offset]
         self._dup_guard_exits: set = set()  # exit targets of suppressed bottom-of-loop condition copies
         # Exception-handler bookkeeping
         self._exc_as_store_offset: int = -1      # offset of 'as e' STORE to skip
@@ -1054,6 +1090,7 @@ class DecompilerGeneric(DecompilerBase):
         self._prescan_try_structure()
         self._prescan_ternaries()
         self._prescan_compound_conds()
+        self._prescan_value_boolops()
 
         # Check for docstring.
         # co_consts[0] is a docstring ONLY if the first meaningful instruction
@@ -1092,6 +1129,8 @@ class DecompilerGeneric(DecompilerBase):
 
             # Close any blocks whose end offset we have passed
             self._close_blocks(instr.offset)
+            if self._boolop_step(instr):
+                continue
             self._handle_instruction(instr)
 
         # Final block closure for anything spanning to the very end
@@ -5688,6 +5727,120 @@ class DecompilerGeneric(DecompilerBase):
                     return
 
             self.blocks.append((if_block_end, "if"))
+
+    def _prescan_value_boolops(self) -> None:
+        """
+        Find `and`/`or` used as a value (`x = a or b`, `return p and q`, call arguments).
+
+        Their jumps keep the tested operand as the result instead of branching, so
+        they look different from an `if` condition:
+          * 3.9/3.10: `JUMP_IF_FALSE_OR_POP` / `JUMP_IF_TRUE_OR_POP` to the join.
+          * 3.12+: `COPY 1; [TO_BOOL]; POP_JUMP_IF_FALSE/TRUE join; [NOT_TAKEN]; POP_TOP`.
+        Mixed chains (`a and b or c`) on 3.9/3.10 also use plain `POP_JUMP_IF_*` to the
+        start of the next alternative; those are recorded as groups that the next
+        `*_OR_POP` closes. A chained comparison (`a < b < c`) uses the same opcodes but
+        jumps to a `SWAP/ROT_TWO; POP_TOP` cleanup and is left alone.
+        """
+        self._boolop_or_pop = {}
+        self._boolop_copy = {}
+        self._boolop_groups = {}
+        self._boolop_pending = []
+        instrs = self.instructions
+        by_offset = {ins.offset: k for k, ins in enumerate(instrs)}
+        skip = ("TO_BOOL", "NOT_TAKEN", "CACHE")
+
+        def is_chain_cleanup(target):
+            k = by_offset.get(target)
+            if k is None:
+                return False
+            if instrs[k].opname == "ROT_TWO":
+                return True
+            return instrs[k].opname == "SWAP" and k + 1 < len(instrs) and instrs[k + 1].opname == "POP_TOP"
+
+        for k, ins in enumerate(instrs):
+            if ins.opname in ("JUMP_IF_FALSE_OR_POP", "JUMP_IF_TRUE_OR_POP"):
+                target = self._get_jump_target(ins)
+                if isinstance(target, int) and target > ins.offset and not is_chain_cleanup(target):
+                    op = "and" if ins.opname == "JUMP_IF_FALSE_OR_POP" else "or"
+                    self._boolop_or_pop[ins.offset] = (op, target)
+            elif ins.opname == "COPY" and ins.arg == 1:
+                j = k + 1
+                while j < len(instrs) and instrs[j].opname in skip:
+                    j += 1
+                if j >= len(instrs) or instrs[j].opname not in ("POP_JUMP_IF_FALSE", "POP_JUMP_IF_TRUE"):
+                    continue
+                m = j + 1
+                while m < len(instrs) and instrs[m].opname in skip:
+                    m += 1
+                if m >= len(instrs) or instrs[m].opname != "POP_TOP":
+                    continue
+                target = self._get_jump_target(instrs[j])
+                if not isinstance(target, int) or target <= ins.offset or is_chain_cleanup(target):
+                    continue
+                op = "and" if instrs[j].opname == "POP_JUMP_IF_FALSE" else "or"
+                resume = instrs[m + 1].offset if m + 1 < len(instrs) else instrs[m].offset + 2
+                self._boolop_copy[ins.offset] = (op, target, resume)
+
+        # 3.9/3.10 mixed chains: a plain POP_JUMP whose target lies inside the expression
+        # that a later *_OR_POP closes.
+        for ins in instrs:
+            if ins.opname not in ("POP_JUMP_IF_FALSE", "POP_JUMP_IF_TRUE"):
+                continue
+            target = self._get_jump_target(ins)
+            if not isinstance(target, int) or target <= ins.offset:
+                continue
+            for q_off, (_, join) in self._boolop_or_pop.items():
+                if ins.offset < q_off < target < join:
+                    self._boolop_groups[ins.offset] = ("and" if ins.opname == "POP_JUMP_IF_FALSE" else "or", target)
+                    break
+
+    def _boolop_step(self, instr: BytecodeInstruction) -> bool:
+        """
+        Advance value-context `and`/`or` reconstruction for `instr`.
+
+        Closes operators whose join point has been reached, then consumes the
+        operator's jump instructions. Returns True if `instr` was fully handled here.
+        """
+        pending = self._boolop_pending
+        if pending:
+            # Reaching a join: the right operand is on top of the stack. A COPY/jump/POP_TOP
+            # sequence is consumed as one unit, so a join that lands on its POP_TOP (3.14
+            # shares that POP_TOP between two operators) closes before the unit is read.
+            copy_spec = self._boolop_copy.get(instr.offset)
+            limit = copy_spec[2] if copy_spec is not None else instr.offset + 1
+            pending[:] = [e for e in pending if not (e[0].startswith("g") and instr.offset <= e[2] < limit)]
+            while pending and instr.offset <= pending[-1][2] < limit and not pending[-1][0].startswith("g"):
+                kind, left, _ = pending.pop()
+                if not self.stack:
+                    break
+                self.stack.append(_BoolExpr.join(kind, left, self.stack.pop()))
+
+        spec = self._boolop_or_pop.get(instr.offset)
+        if spec is not None and self.stack:
+            self._boolop_open(spec[0], spec[1], instr.offset)
+            return True
+
+        spec = self._boolop_copy.get(instr.offset)
+        if spec is not None and self.stack:
+            self._boolop_open(spec[0], spec[1], instr.offset)
+            while self.pc < len(self.instructions) and self.instructions[self.pc].offset < spec[2]:
+                self.pc += 1
+            return True
+
+        spec = self._boolop_groups.get(instr.offset)
+        if spec is not None and self.stack:
+            pending.append(["g" + spec[0], self.stack.pop(), spec[1]])
+            return True
+        return False
+
+    def _boolop_open(self, op: str, join: int, offset: int) -> None:
+        """Record `<TOS> op ...`, first folding any open mixed-chain groups into the left operand."""
+        pending = self._boolop_pending
+        left = self.stack.pop()
+        while pending and pending[-1][0].startswith("g") and pending[-1][2] > offset:
+            kind, group_left, _ = pending.pop()
+            left = _BoolExpr.join(kind[1:], group_left, left)
+        pending.append([op, left, join])
 
     def _op_unary(self, instr: BytecodeInstruction):
         """
