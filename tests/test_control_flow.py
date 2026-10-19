@@ -1126,7 +1126,20 @@ class TestCodeAfterTryExceptInLoop(unittest.TestCase):
     _assert_same_behavior = TestWhileTrueConditionalBreak._assert_same_behavior
 
     CASES = {
+        'while_try_continue': 'i = 0\nwhile i < 5:\n    i += 1\n    try:\n        if i == 2:\n            continue\n        print(i)\n    except Exception:\n        pass\n',
+        'for_try_continue_after': "for i in range(4):\n    try:\n        if i == 1:\n            continue\n        print(i)\n    except Exception:\n        pass\n    print('after', i)\n",
+        'for_try_after': "for i in range(4):\n    try:\n        print(i)\n    except Exception:\n        pass\n    print('after', i)\n",
+        'for_try_raise_after': "for i in range(4):\n    try:\n        if i == 1:\n            raise ValueError\n        print(i)\n    except ValueError:\n        print('err', i)\n    print('after', i)\n",
+        'while_try_after': "i = 0\nwhile i < 4:\n    i += 1\n    try:\n        print(i)\n    except Exception:\n        pass\n    print('after', i)\n",
+        'for_try_else_after': "for i in range(4):\n    try:\n        print(i)\n    except Exception:\n        pass\n    else:\n        print('else', i)\n    print('after', i)\n",
+        'for_try_finally_after': "for i in range(3):\n    try:\n        print(i)\n    except Exception:\n        pass\n    finally:\n        print('f', i)\n    print('after', i)\n",
+        'func_try_after': 'def f(n):\n    r = []\n    for i in range(n):\n        try:\n            r.append(10 // (i - 1))\n        except ZeroDivisionError:\n            r.append(-1)\n        r.append(i)\n    return r\nprint(f(4))\n',
+        'for_two_try': "for i in range(3):\n    try:\n        print(i)\n    except Exception:\n        pass\n    try:\n        print(i + 10)\n    except Exception:\n        pass\n    print('end', i)\n",
+        'for_try_two_excepts': "for i in range(3):\n    try:\n        print(i)\n    except ValueError:\n        pass\n    except TypeError:\n        pass\n    print('after', i)\n",
     }
+
+    def test_cases_are_defined(self):
+        self.assertGreaterEqual(len(self.CASES), 9)
 
     def test_behavior_is_preserved(self):
         for name, src in self.CASES.items():
