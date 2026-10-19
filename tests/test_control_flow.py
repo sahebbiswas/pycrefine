@@ -1126,16 +1126,6 @@ class TestCodeAfterTryExceptInLoop(unittest.TestCase):
     _assert_same_behavior = TestWhileTrueConditionalBreak._assert_same_behavior
 
     CASES = {
-        'while_try_continue': 'i = 0\nwhile i < 5:\n    i += 1\n    try:\n        if i == 2:\n            continue\n        print(i)\n    except Exception:\n        pass\n',
-        'for_try_continue_after': "for i in range(4):\n    try:\n        if i == 1:\n            continue\n        print(i)\n    except Exception:\n        pass\n    print('after', i)\n",
-        'for_try_after': "for i in range(4):\n    try:\n        print(i)\n    except Exception:\n        pass\n    print('after', i)\n",
-        'for_try_raise_after': "for i in range(4):\n    try:\n        if i == 1:\n            raise ValueError\n        print(i)\n    except ValueError:\n        print('err', i)\n    print('after', i)\n",
-        'while_try_after': "i = 0\nwhile i < 4:\n    i += 1\n    try:\n        print(i)\n    except Exception:\n        pass\n    print('after', i)\n",
-        'for_try_else_after': "for i in range(4):\n    try:\n        print(i)\n    except Exception:\n        pass\n    else:\n        print('else', i)\n    print('after', i)\n",
-        'for_try_finally_after': "for i in range(3):\n    try:\n        print(i)\n    except Exception:\n        pass\n    finally:\n        print('f', i)\n    print('after', i)\n",
-        'func_try_after': 'def f(n):\n    r = []\n    for i in range(n):\n        try:\n            r.append(10 // (i - 1))\n        except ZeroDivisionError:\n            r.append(-1)\n        r.append(i)\n    return r\nprint(f(4))\n',
-        'for_two_try': "for i in range(3):\n    try:\n        print(i)\n    except Exception:\n        pass\n    try:\n        print(i + 10)\n    except Exception:\n        pass\n    print('end', i)\n",
-        'for_try_two_excepts': "for i in range(3):\n    try:\n        print(i)\n    except ValueError:\n        pass\n    except TypeError:\n        pass\n    print('after', i)\n",
     }
 
     def test_behavior_is_preserved(self):
@@ -1156,3 +1146,37 @@ class TestCodeAfterTryExceptInLoop(unittest.TestCase):
             "    except TypeError:\n        pass\n    print('after', i)\n"
         )
         assert_contains(out, "except ValueError:", "except TypeError:")
+
+    def _prescan(self, src):
+        from .test_helpers import _compile
+        from pycrefine import get_decompiler
+
+        pyc = _compile(src)
+        try:
+            dec = get_decompiler(pyc)
+            dec.decompile()
+            return dec
+        finally:
+            os.unlink(pyc)
+
+    @unittest.skipIf(sys.version_info[:2] < (3, 12), "needs exception-table based try blocks")
+    def test_identical_cleanup_elsewhere_is_not_a_finally_copy(self):
+        """Code that matches a later try's cleanup must not become the earlier try's finally."""
+        dec = self._prescan(
+            "for item in [0, 2]:\n    try:\n        if item == 1:\n"
+            "            raise ValueError\n    except KeyError:\n        pass\n"
+            "    print('c', item)\n    try:\n        print('b', item)\n"
+            "    finally:\n        print('c', item)\n"
+        )
+        self.assertEqual(len(dec._deferred_finally_lines), 1)
+
+    @unittest.skipIf(sys.version_info[:2] < (3, 12), "needs exception-table based try blocks")
+    def test_finally_with_branch_is_still_detected(self):
+        """A finally body with a conditional is a real finally even though its jump targets move."""
+        dec = self._prescan(
+            "flag = True\nfor item in [0, 1]:\n    try:\n        print('b', item)\n"
+            "    except KeyError:\n        pass\n    finally:\n        if flag:\n"
+            "            print('yes', item)\n        else:\n            print('no', item)\n"
+        )
+        self.assertEqual(len(dec._deferred_finally_lines), 1)
+

@@ -2772,20 +2772,59 @@ class DecompilerGeneric(DecompilerBase):
         that merely follows a `try`/`except` has no such second copy.
         """
         instrs = self.instructions
-        inline = [(i.opname, i.argval) for i in instrs if i.offset >= merge_off]
+        try:
+            entries = list(dis.Bytecode(self.code_obj).exception_entries)
+        except (AttributeError, IndexError, TypeError, ValueError):
+            entries = None
+
+        owned_by = None
+        if entries is not None:
+            # The `finally` handler protects the `try` body and its `except` handlers,
+            # so its table entries overlap them. Identical code elsewhere in the loop
+            # (another try's cleanup) does not. A body may be covered by several
+            # ranges that share one handler (a `continue` splits it).
+            body_ends = [e for e in entries if e.end == merge_off]
+            regions = [(e.start, e.end) for e in body_ends]
+            pei_offsets = sorted(i.offset for i in instrs if i.opname == "PUSH_EXC_INFO")
+            for h in {e.target for e in body_ends}:
+                nxt = next((o for o in pei_offsets if o > h), instrs[-1].offset + 2)
+                regions.append((h, nxt))
+            owned_by = {
+                e.target for e in entries
+                if any(e.start < r_end and e.end > r_start for r_start, r_end in regions)
+            }
+
+        def is_jump(ins):
+            return "JUMP" in ins.opname or ins.opname in ("FOR_ITER", "SEND")
+
+        def shape(seq, base, span):
+            # Compare control flow, not absolute offsets: a jump inside the body is
+            # relative to the body's start, a jump out of it is just "out".
+            out = []
+            for ins in seq:
+                if is_jump(ins) and isinstance(ins.argval, int):
+                    rel = ins.argval - base
+                    out.append((ins.opname, rel if 0 <= rel <= span else "out"))
+                else:
+                    out.append((ins.opname, ins.argval))
+            return out
+
         for k, ins in enumerate(instrs):
-            if ins.opname != "PUSH_EXC_INFO":
+            if ins.opname != "PUSH_EXC_INFO" or (owned_by is not None and ins.offset not in owned_by):
                 continue
             copy = []
             for nxt in instrs[k + 1:]:
                 if nxt.opname in ("RERAISE", "CHECK_EXC_MATCH", "WITH_EXCEPT_START"):
                     break
-                copy.append((nxt.opname, nxt.argval))
+                copy.append(nxt)
             else:
                 continue
-            if instrs[k + 1 + len(copy)].opname != "RERAISE" or not copy:
+            if not copy or instrs[k + 1 + len(copy)].opname != "RERAISE":
                 continue
-            if inline[:len(copy)] == copy:
+            start = copy[0].offset
+            span = instrs[k + 1 + len(copy)].offset - start
+            inline = [i for i in instrs if i.offset >= merge_off][:len(copy)]
+            if len(inline) == len(copy) and shape(inline, merge_off, span) == shape(copy, start, span):
                 return True
         return False
 
