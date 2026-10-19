@@ -3613,6 +3613,11 @@ class DecompilerGeneric(DecompilerBase):
             "POP_JUMP_IF_NOT_NONE": self._op_conditional_jump,
             "JUMP_IF_NOT_EXC_MATCH": self._op_jump_if_not_exc_match,
 
+            # Unary operators
+            "UNARY_NEGATIVE": self._op_unary, "UNARY_POSITIVE": self._op_unary,
+            "UNARY_INVERT": self._op_unary, "UNARY_NOT": self._op_unary,
+            "CALL_INTRINSIC_1": self._op_unary,   # 3.12+: unary plus is an intrinsic
+
             # Iteration
             "FOR_ITER": self._op_for_iter,
             "INLINED_COMPREHENSION": self._op_inlined_comprehension,
@@ -5533,6 +5538,28 @@ class DecompilerGeneric(DecompilerBase):
                     return
 
             self.blocks.append((if_block_end, "if"))
+
+    def _op_unary(self, instr: BytecodeInstruction):
+        """
+        UNARY_NEGATIVE / UNARY_POSITIVE / UNARY_INVERT / UNARY_NOT: apply the operator to TOS.
+
+        The result is parenthesised so that a later `**`, attribute access or
+        comparison cannot rebind it (`(-x) ** 2` is not `-x ** 2`).
+        """
+        if instr.opname == "CALL_INTRINSIC_1":
+            # Only unary plus changes the expression; the other intrinsics are
+            # bookkeeping that never reaches the source.
+            if "UNARY_POSITIVE" not in str(instr.argrepr):
+                return
+            symbol = "+"
+        else:
+            symbol = {
+                "UNARY_NEGATIVE": "-", "UNARY_POSITIVE": "+",
+                "UNARY_INVERT": "~", "UNARY_NOT": "not ",
+            }[instr.opname]
+        if not self.stack:
+            return
+        self.stack.append(f"({symbol}{self.stack.pop()})")
 
     def _op_jump_if_not_exc_match(self, instr: BytecodeInstruction):
         # 3.9 / 3.10: JUMP_IF_NOT_EXC_MATCH(target)

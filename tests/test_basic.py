@@ -211,3 +211,47 @@ class TestComprehensions(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipIf(sys.version_info[:2] == (3, 11), "3.11 bytecode is not supported yet (#4)")
+class TestUnaryOperators(unittest.TestCase):
+    """Unary `-`, `+`, `~` and `not` must survive decompilation."""
+
+    CASES = {
+        "negative": "x = 2\nprint(-x)\n",
+        "positive": "x = 2\nprint(+x)\n",
+        "invert": "x = 2\nprint(~x)\n",
+        "not_value": "x = 2\nprint(not x)\nprint(not 0)\n",
+        "negative_in_expression": "x = 3\ny = -x + 1\nprint(y, (-x) ** 2, -x ** 2, -(x + 1))\n",
+        "not_comparison": "x = 3\nr = not (x > 1)\nprint(r)\n",
+        "in_collection": "x = 2\nprint([-x, ~x, +x, not x])\n",
+        "in_function": "def f(a):\n    return -a, ~a, +a, not a\nprint(f(5))\n",
+        "in_call_and_attribute": "x = 4\nprint((-x).bit_length(), abs(-x))\n",
+        "in_condition": "x = 0\nif not x:\n    print('zero')\nprint(-x == 0)\n",
+    }
+
+    def _run(self, code):
+        import contextlib
+        import io
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            exec(code, {"__name__": "__main__"})
+        return out.getvalue()
+
+    def test_behavior_is_preserved(self):
+        for name, src in self.CASES.items():
+            with self.subTest(case=name):
+                decompiled = decompile(src)
+                try:
+                    recompiled = compile(decompiled, "<decompiled>", "exec")
+                except SyntaxError as exc:
+                    self.fail(f"Decompiled output does not compile ({exc}):\n{decompiled}")
+                self.assertEqual(
+                    self._run(recompiled), self._run(compile(src, "<original>", "exec")),
+                    f"Decompiled code behaves differently:\n{decompiled}",
+                )
+
+    def test_operators_appear(self):
+        out = decompile("x = 2\nprint(-x)\nprint(~x)\nprint(+x)\n")
+        assert_contains(out, "-x", "~x", "+x")
