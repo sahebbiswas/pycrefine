@@ -39,7 +39,7 @@ Usage
     python quality/check_correctness.py --report correctness.json
 
     # Measure arbitrary files without gating:
-    python quality/check_correctness.py src/pycrefine/ --no-baseline
+    python quality/check_correctness.py src/pycrefine/ src/pycrefine/decompiler/ src/pycrefine/opcodes/ --no-baseline
 
     # Accept the current results as the new baseline:
     python quality/check_correctness.py --update-baseline
