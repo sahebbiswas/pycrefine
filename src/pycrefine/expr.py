@@ -1,8 +1,9 @@
 """Expression helpers and stack sentinels used while rebuilding source text."""
 import ast
+from typing import Any, List
 
 
-def _unary_operand(operand) -> str:
+def _unary_operand(operand: Any) -> str:
     """
     Return `operand` as source text that a unary operator can be applied to as a whole.
 
@@ -38,15 +39,15 @@ class _BoolExpr(str):
     """A parenthesised `and`/`or` expression that remembers its operator and operands, so chains flatten."""
 
     op: str
-    parts: list
+    parts: List[Any]
 
     @classmethod
-    def join(cls, op: str, left, right) -> "_BoolExpr":
+    def join(cls, op: str, left: Any, right: Any) -> "_BoolExpr":  # type: ignore[override]
         """Build `left op right`, merging operands that already use the same operator."""
-        def operands(side):
+        def operands(side: Any) -> List[Any]:
             return list(side.parts) if isinstance(side, _BoolExpr) and side.op == op else [side]
 
-        def wrap(side):
+        def wrap(side: Any) -> str:
             text = str(side)
             if isinstance(side, _BoolExpr):
                 return text
@@ -68,10 +69,10 @@ class _BoolExpr(str):
 # ---------------------------------------------------------------------------
 class StackNULL:
     """Internal sentinel pushed onto the stack to represent Python 3.11+ NULL sentinels in method calls."""
-    def __init__(self, is_method=False):
+    def __init__(self, is_method: bool = False) -> None:
         self.is_method = is_method
-    def __repr__(self): return "__SENTINEL_NULL__"
-    def __str__(self): return "__SENTINEL_NULL__"
+    def __repr__(self) -> str: return "__SENTINEL_NULL__"
+    def __str__(self) -> str: return "__SENTINEL_NULL__"
 
 
 class _CollectionAccumSentinel:
@@ -83,8 +84,8 @@ class _CollectionAccumSentinel:
     reconstructed source, so downstream ``f"{target}.append(...)"`` calls still
     produce readable output.
     """
-    def __init__(self, name: str = "_res"):
+    def __init__(self, name: str = "_res") -> None:
         self._name = name
 
-    def __str__(self): return self._name
-    def __repr__(self): return self._name
+    def __str__(self) -> str: return self._name
+    def __repr__(self) -> str: return self._name

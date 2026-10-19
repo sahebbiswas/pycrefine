@@ -12,6 +12,8 @@ class ForeignCode:
     attributes. The decompilers only read those attributes.
     """
 
+    co_name: str
+
     def __init__(self, **fields: Any):
         self.__dict__.update(fields)
 
