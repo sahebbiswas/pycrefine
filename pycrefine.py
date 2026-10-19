@@ -2542,8 +2542,12 @@ class DecompilerGeneric(DecompilerBase):
         self._inner_back_jumps = self._find_inner_back_jumps()
         self._dup_guard_exits = set()
 
-        for jb in self.instructions:
+        for jb_idx, jb in enumerate(self.instructions):
             if not self._is_backward_instruction(jb):
+                continue
+            # A handler that ends by jumping back to the code after its `try` (the
+            # handler table sits at the end of the function) is not a loop.
+            if self._is_handler_exit_back_jump(jb_idx) and not self._is_loop_head(self._get_jump_target(jb)):
                 continue
             # A `continue`, or the end of an if/else branch threaded to the loop
             # head, is not the loop's own back-edge and defines no guard.
@@ -2765,6 +2769,19 @@ class DecompilerGeneric(DecompilerBase):
         if last is None:
             return instrs[-1].offset + 2
         return instrs[last + 1].offset if last + 1 < len(instrs) else instrs[last].offset + 2
+
+    def _is_loop_head(self, offset: int) -> bool:
+        """True if `offset` is a loop head: a FOR_ITER/iterator head, or a target reached by a non-handler back-jump."""
+        head = next((i for i in self.instructions if i.offset == offset), None)
+        if head is None:
+            return False
+        if head.opname in _TRY_LOOP_HEADS:
+            return True
+        for k, ins in enumerate(self.instructions):
+            if (self._is_backward_instruction(ins) and self._get_jump_target(ins) == offset
+                    and not self._is_handler_exit_back_jump(k)):
+                return True
+        return False
 
     def _range_is_trivial(self, start: int, end: int) -> bool:
         """True if [start, end) holds only no-op style instructions."""
@@ -6605,6 +6622,14 @@ class Decompiler39(DecompilerGeneric):
             is_finally_pop = False
             finally_target = None
 
+            # `continue` inside a try body: POP_BLOCK leaves the try, then the jump
+            # re-enters the loop. It closes nothing; the jump emits the `continue`.
+            if self.pc < len(self.instructions):
+                _nxt = self.instructions[self.pc]
+                if (_nxt.opname == "JUMP_ABSOLUTE" and _nxt.offset in self._inner_back_jumps
+                        and any(b[1] == "try_body" for b in self.blocks)):
+                    return
+
             # ── Early-exit: for-loop break inside if-within-try (Python 3.9) ──────
             # Pattern:
             #   for x in ...:
@@ -6957,6 +6982,7 @@ class Decompiler39(DecompilerGeneric):
                         and not instr.is_jump_target
                         and self._except_header_indents
                         and instr.offset not in _exc_handler_jumps
+                        and instr.offset not in self._inner_back_jumps  # a real `continue`
                         and prev_instr is not None
                         and prev_instr.opname == "POP_BLOCK"):
                     # Implicit for-loop continuation after try clean exit — suppress.

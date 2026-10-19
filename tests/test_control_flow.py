@@ -1075,3 +1075,36 @@ class TestLoopContinueAndTailIf(unittest.TestCase):
                 # A `continue` that ends the body is a no-op and is not compiled.
                 if "continue" in src and not name.endswith("_tail"):
                     assert_contains(out, "continue")
+
+
+@unittest.skipIf(sys.version_info[:2] == (3, 11), "3.11 bytecode is not supported yet (#4)")
+class TestLoopContinueInTry(unittest.TestCase):
+    """`continue` and `break` inside `try` bodies and handlers in loops (issue #106)."""
+
+    _SCRIPT = TestWhileTrueConditionalBreak._SCRIPT
+    _run = TestWhileTrueConditionalBreak.__dict__["_run"]
+    _assert_same_behavior = TestWhileTrueConditionalBreak._assert_same_behavior
+
+    CASES = {
+        "continue_in_try_body": (
+            "for i in range(4):\n    try:\n        if i == 1:\n            continue\n"
+            "        print(i)\n    except Exception:\n        pass\n"
+        ),
+        "continue_in_except": (
+            "for i in range(4):\n    try:\n        if i == 1:\n            raise ValueError\n"
+            "        print(i)\n    except ValueError:\n        continue\n    print('after', i)\n"
+        ),
+        "break_in_try_body": (
+            "for i in range(4):\n    try:\n        if i == 2:\n            break\n"
+            "        print(i)\n    except Exception:\n        pass\n"
+        ),
+    }
+
+    def test_behavior_is_preserved(self):
+        for name, src in self.CASES.items():
+            with self.subTest(case=name):
+                self._assert_same_behavior(src)
+
+    def test_continue_in_try_body_is_emitted(self):
+        out = self._assert_same_behavior(self.CASES["continue_in_try_body"])
+        assert_contains(out, "continue")
