@@ -17,9 +17,8 @@ test = ["pytest"]
 [project.scripts]
 pycrefine = "pycrefine:main" # Allows running 'pycrefine' directly in terminal
 
-[tool.setuptools]
-py-modules = ["pycrefine"]
-packages = []
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

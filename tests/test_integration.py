@@ -190,7 +190,7 @@ class TestErrorHandling(unittest.TestCase):
         mock_dec = MagicMock()
         mock_dec.decompile.return_value = ""
 
-        with patch("pycrefine.get_decompiler", return_value=mock_dec), \
+        with patch("pycrefine.decompiler.generic.get_decompiler", return_value=mock_dec), \
                 patch("sys.argv", ["pycrefine", "dummy.pyc"]), \
                 patch("sys.stderr", new_callable=io.StringIO) as mock_stderr, \
                 patch("sys.exit") as mock_exit:
