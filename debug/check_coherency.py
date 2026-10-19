@@ -11,16 +11,16 @@ original source.
 Usage
 -----
     # Score pycrefine against its own source (self-test):
-    python check_coherency.py pycrefine.py
+    python check_coherency.py src/pycrefine/decompiler/generic.py
 
     # Score against any other file:
     python check_coherency.py path/to/any_file.py
 
     # Verbose: show per-dimension breakdown and diff sample:
-    python check_coherency.py pycrefine.py --verbose
+    python check_coherency.py src/pycrefine/decompiler/generic.py --verbose
 
     # JSON output for CI integration:
-    python check_coherency.py pycrefine.py --json
+    python check_coherency.py src/pycrefine/decompiler/generic.py --json
 
 Exit codes
 ----------
@@ -48,7 +48,7 @@ from typing import Dict, List, Optional, Tuple
 # ---------------------------------------------------------------------------
 # This file lives in debug/ (one level below the project root).
 # _DEBUG  = .../pycrefine/debug/
-# _HERE   = .../pycrefine/          (project root -- where pycrefine.py lives)
+# _HERE   = .../pycrefine/          (project root -- the pycrefine package is in src/, reached via the root launcher)
 _DEBUG = Path(__file__).parent
 _HERE  = _DEBUG.parent
 sys.path.insert(0, str(_HERE))
@@ -57,7 +57,7 @@ sys.path.insert(0, str(_DEBUG))
 try:
     from pycrefine import get_decompiler
 except ImportError as e:
-    sys.exit(f"Cannot import pycrefine: {e}\nMake sure pycrefine.py is in the same directory.")
+    sys.exit(f"Cannot import pycrefine: {e}\nMake sure the pycrefine package (src/pycrefine) is importable.")
 
 
 # ---------------------------------------------------------------------------
@@ -1152,8 +1152,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         'source',
         nargs='?',
-        default=str(_HERE / 'pycrefine.py'),
-        help='Python source file to score (default: pycrefine.py)',
+        default=str(_HERE / 'src' / 'pycrefine' / 'decompiler' / 'generic.py'),
+        help='Python source file to score (default: src/pycrefine/decompiler/generic.py)',
     )
     parser.add_argument(
         '--verbose', '-v',
