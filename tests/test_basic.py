@@ -237,6 +237,18 @@ class TestUnaryOperators(unittest.TestCase):
             "~(a if flag else b), +(a if flag else b), not (a if flag else b))\n"
         ),
         "negated_sum": "a = 1\nb = 2\nprint(-(a + b), not (a < b), -(a * b) ** 2)\n",
+        "lambda": "f = lambda x: -x\nprint(f(3))\n",
+        "comprehension": "xs = [1, 2, 3]\nprint([-x for x in xs], [x for x in xs if not x % 2], {~x for x in xs})\n",
+        "fstring": "x = 3\nprint(f'{-x} {not x} {~x}')\n",
+        "subscript": "xs = [1, 2, 3]\ni = 1\nprint(xs[-1], xs[-2:], xs[:-1], xs[-i], xs[~i])\n",
+        "augmented_assignment": "x = 3\nx += -x\nx *= -2\nprint(x)\n",
+        "default_arguments": "def f(a, b=-1, c=not 0):\n    return a, b, c\nprint(f(1))\n",
+        "stacked_operators": "x = 2\nprint(- -x, ~-x, -~x, +-x)\n",
+        "power_precedence": "x = 2\nprint(-x ** 2, (-x) ** 2, 2 ** -x)\n",
+        "attribute_and_call": "x = 5\nprint((-x).bit_length(), (~x).bit_length(), str(-x))\n",
+        "loops_and_asserts": "n = 3\nwhile not n == 0:\n    n -= 1\nassert not n == 1\nassert -n <= 0\nprint(n)\n",
+        "return_ternary": "def f(a, b, c):\n    return -a if c else ~b\nprint(f(1, 2, True), f(1, 2, False))\n",
+        "float_and_complex": "x = 2.5\nz = 1j\nprint(-x, -z, +x, -(x + 1))\n",
     }
 
     def _run(self, code):
