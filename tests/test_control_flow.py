@@ -1108,3 +1108,51 @@ class TestLoopContinueInTry(unittest.TestCase):
     def test_continue_in_try_body_is_emitted(self):
         out = self._assert_same_behavior(self.CASES["continue_in_try_body"])
         assert_contains(out, "continue")
+
+
+@unittest.skipIf(sys.version_info[:2] == (3, 11), "3.11 bytecode is not supported yet (#4)")
+class TestCodeAfterTryExceptInLoop(unittest.TestCase):
+    """Statements after a `try`/`except` inside a loop body (issue #108).
+
+    On 3.12+ the handlers sit at the end of the code and jump back to whatever
+    follows the `try`. That code used to be mistaken for an inlined `finally`
+    body, and a `continue` in the try body split the try range so the handlers
+    were placed twice. Each case runs the original and the decompiled code and
+    compares what they print.
+    """
+
+    _SCRIPT = TestWhileTrueConditionalBreak._SCRIPT
+    _run = TestWhileTrueConditionalBreak.__dict__["_run"]
+    _assert_same_behavior = TestWhileTrueConditionalBreak._assert_same_behavior
+
+    CASES = {
+        'while_try_continue': 'i = 0\nwhile i < 5:\n    i += 1\n    try:\n        if i == 2:\n            continue\n        print(i)\n    except Exception:\n        pass\n',
+        'for_try_continue_after': "for i in range(4):\n    try:\n        if i == 1:\n            continue\n        print(i)\n    except Exception:\n        pass\n    print('after', i)\n",
+        'for_try_after': "for i in range(4):\n    try:\n        print(i)\n    except Exception:\n        pass\n    print('after', i)\n",
+        'for_try_raise_after': "for i in range(4):\n    try:\n        if i == 1:\n            raise ValueError\n        print(i)\n    except ValueError:\n        print('err', i)\n    print('after', i)\n",
+        'while_try_after': "i = 0\nwhile i < 4:\n    i += 1\n    try:\n        print(i)\n    except Exception:\n        pass\n    print('after', i)\n",
+        'for_try_else_after': "for i in range(4):\n    try:\n        print(i)\n    except Exception:\n        pass\n    else:\n        print('else', i)\n    print('after', i)\n",
+        'for_try_finally_after': "for i in range(3):\n    try:\n        print(i)\n    except Exception:\n        pass\n    finally:\n        print('f', i)\n    print('after', i)\n",
+        'func_try_after': 'def f(n):\n    r = []\n    for i in range(n):\n        try:\n            r.append(10 // (i - 1))\n        except ZeroDivisionError:\n            r.append(-1)\n        r.append(i)\n    return r\nprint(f(4))\n',
+        'for_two_try': "for i in range(3):\n    try:\n        print(i)\n    except Exception:\n        pass\n    try:\n        print(i + 10)\n    except Exception:\n        pass\n    print('end', i)\n",
+        'for_try_two_excepts': "for i in range(3):\n    try:\n        print(i)\n    except ValueError:\n        pass\n    except TypeError:\n        pass\n    print('after', i)\n",
+    }
+
+    def test_behavior_is_preserved(self):
+        for name, src in self.CASES.items():
+            with self.subTest(case=name):
+                self._assert_same_behavior(src)
+
+    def test_no_bogus_finally(self):
+        for name, src in self.CASES.items():
+            if "finally" in src:
+                continue
+            with self.subTest(case=name):
+                assert_not_contains(self._assert_same_behavior(src), "finally", "# ")
+
+    def test_empty_except_clause_gets_pass(self):
+        out = self._assert_same_behavior(
+            "for i in range(3):\n    try:\n        print(i)\n    except ValueError:\n        pass\n"
+            "    except TypeError:\n        pass\n    print('after', i)\n"
+        )
+        assert_contains(out, "except ValueError:", "except TypeError:")

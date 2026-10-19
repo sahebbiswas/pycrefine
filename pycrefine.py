@@ -872,7 +872,10 @@ class DecompilerBase:
         """
         if getattr(self.code_obj, "co_flags", 0) & 0x1:   # CO_OPTIMIZED: a function
             return False
-        if any(btype in ("for", "while") for _, btype in getattr(self, "blocks", [])):
+        here = self.instructions[self.pc - 1].offset if 0 < self.pc <= len(self.instructions) else -1
+        # A loop whose end is at or before this return has already finished (it is
+        # only still on the stack because a block opened inside it ends later).
+        if any(btype in ("for", "while") and end > here for end, btype in getattr(self, "blocks", [])):
             self._append_reconstructed("break")
         return True
 
@@ -1147,6 +1150,8 @@ class DecompilerGeneric(DecompilerBase):
                     exc_only = getattr(self, "_except_only_merge_offsets", set())
                     if block_end in exc_only:
                         exc_only.discard(block_end)
+                        # Emitted here; the merge-label hook must not emit it again.
+                        getattr(self, "_finally_merge_offsets", set()).discard(block_end)
                         self._emit_deferred_finally(block_end, self.indent_level)
 
     # ------------------------------------------------------------------
@@ -1165,6 +1170,15 @@ class DecompilerGeneric(DecompilerBase):
         """
         if not line:
             return
+        # A clause header directly after another header at the same indent means
+        # the earlier clause has an empty body (e.g. `except A: pass` then `except B:`).
+        if line.startswith(("except", "elif ", "else:", "finally:")):
+            prev = next((r for r in reversed(self.reconstructed) if r.strip()), None)
+            if (prev is not None and prev.rstrip().endswith(":")
+                    and prev.lstrip().startswith(("except", "elif ", "else:", "if ", "try:"))
+                    and len(prev) - len(prev.lstrip()) == 4 * self.indent_level
+                    and not (line.startswith("except") and prev.lstrip().startswith("try:"))):
+                self.reconstructed.append("    " * (self.indent_level + 1) + "pass")
         # Blank line before major blocks (top-level only)
         if self.indent_level == 0 and line.startswith(("def ", "class ", "if ", "for ", "while ", "try:")) and self.reconstructed:
             if self.reconstructed[-1] != "":
@@ -2512,7 +2526,8 @@ class DecompilerGeneric(DecompilerBase):
                 continue
             # A handler that ends by jumping back to the code after its `try` (the
             # handler table sits at the end of the function) is not a loop.
-            if self._is_handler_exit_back_jump(jb_idx) and not self._is_loop_head(self._get_jump_target(jb)):
+            # A handler that continues the loop is not the loop's closing back-edge either.
+            if self._is_handler_exit_back_jump(jb_idx):
                 continue
             # A `continue`, or the end of an if/else branch threaded to the loop
             # head, is not the loop's own back-edge and defines no guard.
@@ -2748,6 +2763,32 @@ class DecompilerGeneric(DecompilerBase):
                 return True
         return False
 
+    def _has_exceptional_finally_copy(self, merge_off: int) -> bool:
+        """
+        True if the code at `merge_off` is a real `finally` body.
+
+        The compiler emits a `finally` body twice: inline on the normal path, and
+        again in a handler that re-raises (`PUSH_EXC_INFO; <body>; RERAISE`). Code
+        that merely follows a `try`/`except` has no such second copy.
+        """
+        instrs = self.instructions
+        inline = [(i.opname, i.argval) for i in instrs if i.offset >= merge_off]
+        for k, ins in enumerate(instrs):
+            if ins.opname != "PUSH_EXC_INFO":
+                continue
+            copy = []
+            for nxt in instrs[k + 1:]:
+                if nxt.opname in ("RERAISE", "CHECK_EXC_MATCH", "WITH_EXCEPT_START"):
+                    break
+                copy.append((nxt.opname, nxt.argval))
+            else:
+                continue
+            if instrs[k + 1 + len(copy)].opname != "RERAISE" or not copy:
+                continue
+            if inline[:len(copy)] == copy:
+                return True
+        return False
+
     def _range_is_trivial(self, start: int, end: int) -> bool:
         """True if [start, end) holds only no-op style instructions."""
         return all(i.opname in _WHILE_TRIVIAL_OPS for i in self.instructions if start <= i.offset < end)
@@ -2809,8 +2850,9 @@ class DecompilerGeneric(DecompilerBase):
         # `jb` itself leaving a nested loop (back to an enclosing head) is that
         # loop's exit path, not a duplicated condition.
         jb_target = self._get_jump_target(jb)
-        for f in instrs:
-            if (f.offset > jb.offset and self._is_backward_instruction(f)):
+        for fi, f in enumerate(instrs):
+            if (f.offset > jb.offset and self._is_backward_instruction(f)
+                    and not self._is_handler_exit_back_jump(fi)):
                 ft = self._get_jump_target(f)
                 if jb_target < ft <= jb.offset:
                     return set()
@@ -3051,6 +3093,12 @@ class DecompilerGeneric(DecompilerBase):
                 t_ins = next((ins for ins in instrs if ins.offset == target_off), None)
                 if t_ins and t_ins.is_jump_target and t_ins.opname not in _TRY_LOOP_HEADS:
                     self._finally_merge_offsets.add(target_off)
+                    if not self._has_exceptional_finally_copy(target_off):
+                        # Handlers return to ordinary code after the `try`: there is
+                        # no `finally`, only the handlers to place before that code.
+                        if not hasattr(self, "_except_only_merge_offsets"):
+                            self._except_only_merge_offsets = set()
+                        self._except_only_merge_offsets.add(target_off)
 
         # ── 4. Classify JUMP_BACKWARD as exc-handler exits ───────────────
         self._exc_handler_jump_offsets: set = set()
@@ -3119,12 +3167,23 @@ class DecompilerGeneric(DecompilerBase):
             and ins.offset not in self._suppress_push_exc_offsets
         }
 
+        # A `continue`/`break` in a try body is a jump the exception table leaves
+        # out, so one try body can be covered by several entries that share a
+        # handler. The try body ends where the last of them ends.
+        _body_end_by_target: dict = {}
+        for e in _exc_entries:
+            if e.target in real_push_exc:
+                _body_end_by_target[e.target] = max(_body_end_by_target.get(e.target, 0), e.end)
+
         # Map: first real PUSH_EXC_INFO → finally-merge offset
         for e in _exc_entries:
             if e.target in real_push_exc:
                 merge = None
-                if e.end in self._finally_merge_offsets:
+                body_end = _body_end_by_target[e.target]
+                if body_end in self._finally_merge_offsets:
                     # Already a known finally-merge label.
+                    merge = body_end
+                elif e.end in self._finally_merge_offsets:
                     merge = e.end
                 else:
                     # Case 1: FOR_ITER loop wraps the try body.
