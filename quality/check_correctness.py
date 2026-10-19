@@ -23,7 +23,7 @@ to a lower rung than its baseline is a regression and fails the run; so
 does any change that stops a baseline record from being compared (see
 FAILING_CHANGES).
 
-The coherency checker (debug/check_coherency.py) is a readability
+The coherency checker (quality/check_coherency.py) is a readability
 diagnostic only: --coherency adds its score to the report, but it never
 affects pass/fail.
 
@@ -332,9 +332,8 @@ def collect_corpus(paths: List[Path]) -> List[Path]:
 
 
 def _coherency(path: Path) -> dict:
-    debug_dir = str(_ROOT / 'debug')
-    if debug_dir not in sys.path:
-        sys.path.insert(0, debug_dir)
+    if str(_QUALITY) not in sys.path:
+        sys.path.insert(0, str(_QUALITY))
     try:
         import check_coherency
         sink = io.StringIO()

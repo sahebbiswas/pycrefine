@@ -7,7 +7,7 @@ import unittest
 
 
 def _import_check_coherency():
-    cc_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "debug")
+    cc_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "quality")
     if cc_dir not in sys.path:
         sys.path.insert(0, cc_dir)
     try:
@@ -35,7 +35,7 @@ class TestTokenHamming(unittest.TestCase):
 
     def setUp(self):
         if self.cc is None:
-            self.skipTest("check_coherency module not found in ../debug/")
+            self.skipTest("check_coherency module not found in ../quality/")
 
     def test_line_tokenise_identifiers_and_operators(self):
         toks = self.cc._line_tokenise("x = y + 1")

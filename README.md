@@ -135,7 +135,7 @@ See [docs/correctness.md](docs/correctness.md) for the full model, CI semantics,
 
 ### `check_coherency.py` (Decompilation Coherency Checker)
 
-Located at `debug/check_coherency.py`, this tool is an advanced decompilation coherency checker. It measures textual resemblance to the original source, so treat it as a readability diagnostic rather than a correctness check: output can score highly and still fail to compile. It works by compiling an arbitrary Python source file to `.pyc`, decompiling it backward with `pycrefine`, and scoring how faithfully the decompiler reproduced the semantic and syntactic structure of the original source.
+Located at `quality/check_coherency.py`, this tool is an advanced decompilation coherency checker. It measures textual resemblance to the original source, so treat it as a readability diagnostic rather than a correctness check: output can score highly and still fail to compile. It works by compiling an arbitrary Python source file to `.pyc`, decompiling it backward with `pycrefine`, and scoring how faithfully the decompiler reproduced the semantic and syntactic structure of the original source.
 
 It performs a multi-dimensional analysis with scoring based on:
 - Line and Token fidelity/recall
@@ -146,12 +146,12 @@ It performs a multi-dimensional analysis with scoring based on:
 
 Run a test against its own source (self-scoring):
 ```bash
-python debug/check_coherency.py src/pycrefine/decompiler/generic.py
+python quality/check_coherency.py src/pycrefine/decompiler/generic.py
 ```
 
 Score the coherency of any other python file, enabling verbose output to view the per-dimension grading statistics:
 ```bash
-python debug/check_coherency.py path/to/any_file.py --verbose
+python quality/check_coherency.py path/to/any_file.py --verbose
 ```
 
 For Continuous Integration pipelines, you can format the scoring output as JSON by passing the `--json` flag. The script predictably returns an exit code of `0` for passing scores (>= 70%), `1` for failing scores, and `2` for compilation/configuration errors.

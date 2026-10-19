@@ -55,7 +55,7 @@ These are reported but never affect pass/fail:
   identical to the original's (`ast.dump`, positions ignored). A strict
   measure of structural fidelity.
 * **Coherency** (`--coherency`, per source entry): the composite score from
-  [`debug/check_coherency.py`](../debug/check_coherency.py). The coherency
+  [`quality/check_coherency.py`](../quality/check_coherency.py). The coherency
   checker scores textual resemblance (token and line recall, keyword
   coverage, cleanliness). It is a readability diagnostic, **not** a semantic
   oracle: output can score highly and still fail to compile, as the baseline
