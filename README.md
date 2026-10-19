@@ -77,6 +77,18 @@ The implementation is the `pycrefine` package in `src/pycrefine/`. `import pycre
 | `postprocess.py`, `expr.py`, `instructions.py`, `_constants.py` | output clean-up, expression helpers, the instruction record, shared constants |
 | `cli.py` | the command-line interface |
 
+Elsewhere in the repository:
+
+| Path | Contents |
+|---|---|
+| `pycrefine.py` | launcher so `python pycrefine.py file.pyc` works from a checkout (not part of the wheel) |
+| `tests/` | the pytest suite; `tests/fixtures/foreign_pyc/` holds the few committed `.pyc` files written by other CPython versions, with a `manifest.json` and `tests/fixtures/regenerate_foreign_pyc.py` (everything else compiles on the fly) |
+| `corpus/` | sources decompiled by the correctness gate (with the foreign `.pyc` fixtures, its default corpus) |
+| `quality/` | the correctness gate, its per-version baselines, and the coherency checker |
+| `docs/` | correctness model and design notes |
+
+The package version lives in one place, `pycrefine.__version__`; `pyproject.toml` reads it.
+
 ### Example Decompilation
 
 **Original Source** (`example.py`):

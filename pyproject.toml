@@ -4,18 +4,42 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pycrefine"
-version = "1.0.7"
+dynamic = ["version"]
 description = "A Python .pyc decompiler for educational purposes"
+readme = "README.md"
 authors = [{name = "Saheb"}]
 license = "MIT"
 requires-python = ">=3.9"
+keywords = ["decompiler", "bytecode", "pyc", "cpython", "reverse-engineering"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Disassemblers",
+]
 dependencies = [] # Keeps your "no dependencies" promise
+
+[project.urls]
+Homepage = "https://github.com/sahebbiswas/pycrefine"
+Issues = "https://github.com/sahebbiswas/pycrefine/issues"
 
 [project.optional-dependencies]
 test = ["pytest"]
+dev = ["pytest", "pyflakes"]
 
 [project.scripts]
 pycrefine = "pycrefine.cli:main" # Allows running 'pycrefine' directly in terminal
+
+[tool.setuptools.dynamic]
+version = {attr = "pycrefine.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -3,6 +3,8 @@
 Every name that used to live in the single-file ``pycrefine`` module is re-exported here,
 so ``import pycrefine`` and ``from pycrefine import ...`` behave as before.
 """
+__version__ = "1.0.8"
+
 from ._constants import (  # noqa: F401
     _AUG_ASSIGN_MAP,
     _COMPOUND_EXPR_OPS,
