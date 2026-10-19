@@ -29,7 +29,7 @@ affects pass/fail.
 
 Usage
 -----
-    # Gate the default corpus (test_files/) against the baseline:
+    # Gate the default corpus (corpus/ and tests/fixtures/foreign_pyc/) against the baseline:
     python quality/check_correctness.py
 
     # Machine-readable report on stdout:
@@ -78,7 +78,7 @@ from pycrefine import get_decompiler  # noqa: E402
 
 SCHEMA_VERSION = 1
 
-DEFAULT_CORPUS = [_ROOT / 'test_files']
+DEFAULT_CORPUS = [_ROOT / 'corpus', _ROOT / 'tests' / 'fixtures' / 'foreign_pyc']
 BASELINE_DIR = _QUALITY / 'baselines'
 
 # The correctness ladder, lowest to highest. ``source_error`` (the corpus
@@ -577,7 +577,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         epilog=__doc__,
     )
     parser.add_argument('paths', nargs='*', type=Path,
-                        help='Files or directories to check (default: test_files/)')
+                        help='Files or directories to check (default: corpus/ and tests/fixtures/foreign_pyc/)')
     parser.add_argument('--baseline', type=Path,
                         help='Baseline file (default: quality/baselines/py<ver>.json)')
     parser.add_argument('--no-baseline', action='store_true',

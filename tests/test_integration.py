@@ -593,7 +593,7 @@ class TestVerifyScenesBugs(unittest.TestCase):
 
     def test_api_32_print_string_beautification(self):
         import re as _re
-        # Updated to match current verify_scenes.py structure
+        # Updated to match current corpus/verify_scenes.py structure
         src = (
             "def api_32(in_a):\n"
             "    print(\"This is my Input :\\n %s\" % in_a)\n"

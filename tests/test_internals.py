@@ -208,7 +208,7 @@ class TestMarshalParser(unittest.TestCase):
 class TestCrossVersionLoading(unittest.TestCase):
     """Bytecode written by another Python version (issue #89)."""
 
-    FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "test_files")
+    FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "foreign_pyc")
 
     def _fixture(self, name):
         return os.path.join(self.FIXTURES, name)

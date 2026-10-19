@@ -123,7 +123,7 @@ This test suite strictly verifies the core mechanics of `pycrefine`, asserting i
 
 ### `check_correctness.py` (Correctness Gate)
 
-Located at `quality/check_correctness.py`, this is the primary quality gate. Each `test_files/` corpus entry, and each top-level unit within it, is decompiled and placed on a correctness ladder: `decompile_error` < `syntax_error` < `compile_error` < `compiles`. The results are compared with a committed per-Python-version baseline in `quality/baselines/`. CI fails when any entry or unit drops below its baseline:
+Located at `quality/check_correctness.py`, this is the primary quality gate. Each corpus entry (`corpus/` sources and the foreign-version `.pyc` files in `tests/fixtures/foreign_pyc/`), and each top-level unit within it, is decompiled and placed on a correctness ladder: `decompile_error` < `syntax_error` < `compile_error` < `compiles`. The results are compared with a committed per-Python-version baseline in `quality/baselines/`. CI fails when any entry or unit drops below its baseline:
 
 ```bash
 python quality/check_correctness.py              # gate against the baseline
