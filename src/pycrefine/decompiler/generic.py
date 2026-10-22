@@ -7,6 +7,7 @@ import types
 from typing import Any, Dict, List, Optional, Tuple
 from .._constants import (
     _AUG_ASSIGN_MAP,
+    _FILLER_OPS,
     _VALUE_OPS,
     _COMPOUND_EXPR_OPS,
     _COMPOUND_SKIP,
@@ -2737,7 +2738,7 @@ class DecompilerGeneric(DecompilerBase):
                 continue
             for j in range(i + 1, min(i + _MAX_WITH_EXIT_SEARCH_WINDOW, n)):
                 if instrs[j].opname == "LOAD_CONST" and instrs[j].argval is None and not (
-                        instrs[j - 1].opname.startswith(_VALUE_OPS) and not instrs[j].is_jump_target):
+                        instrs[j - 1].opname.startswith(_VALUE_OPS)):
                     # (after a value: the arguments of a user call such as f(None, None, None))
                     k = j + 1
                     while k < n and instrs[k].opname in _TRY_SKIP_NOP:
@@ -2771,7 +2772,7 @@ class DecompilerGeneric(DecompilerBase):
                  if "JUMP" in x.opname and any(e.start <= x.offset < e.end for e in ranges)}
         last = max((t for t in ends if isinstance(t, int) and t < handler), default=handler)
         k = next((i for i, x in enumerate(instrs) if x.offset >= last), len(instrs))
-        while k < len(instrs) and instrs[k].opname in ("NOP", "CACHE"):
+        while k < len(instrs) and instrs[k].opname in _FILLER_OPS:
             k += 1
         return min(handler, instrs[k].offset + 1) if k < len(instrs) else handler
 
@@ -2801,10 +2802,10 @@ class DecompilerGeneric(DecompilerBase):
                     and instrs[by_offset[e.target]].opname == "PUSH_EXC_INFO"
                     and instrs[by_offset[e.target] + 1].opname == "WITH_EXCEPT_START"}
         for handler in handlers:
-            starts = [e.start for e in entries if e.target == handler]
-            if not starts:
+            ranges = [e for e in entries if e.target == handler]
+            if not ranges:
                 continue
-            body_start = min(starts)
+            body_start = min(e.start for e in ranges)
             # The body's normal exit follows its last protected range of ordinary code
             # (an exit before it is an early one: `continue` in `if c: continue`, with
             # more body after). Handler code, which 3.11+ lays out after all ordinary
@@ -2821,11 +2822,19 @@ class DecompilerGeneric(DecompilerBase):
             starts = {limit} | {self._get_jump_target(x) for x in instrs if "JUMP" in x.opname
                                 and any(e.start <= x.offset < e.end for e in body_ranges)}
             normal_at = {self._skip_nops(by_offset[t]) for t in starts if t in by_offset and t < cold}
+            # An exit call belongs to this with when one of its protected ranges ends
+            # right there (only NOPs in between); a later or nested with's exit calls
+            # follow that with's own ranges instead.
+            range_ends = {e.end for e in ranges}
+            # ... or when a jump from inside its body lands there (the normal exit after
+            # an `if` at the end of the body is reached by the `if`'s jump).
+            range_ends |= {self._get_jump_target(x) for x in instrs
+                           if "JUMP" in x.opname and any(e.start <= x.offset < e.end for e in ranges)}
             last = None
             k = by_offset.get(body_start, len(instrs))
             while k < len(instrs) and instrs[k].offset < handler:
                 seq_end = self._with_exit_call_at(k)
-                if seq_end is None:
+                if seq_end is None or not self._follows_range_end(k, range_ends):
                     k += 1
                     continue
                 self._with_exit_suppress_offsets.update(x.offset for x in instrs[k:seq_end])
@@ -2848,7 +2857,7 @@ class DecompilerGeneric(DecompilerBase):
 
     def _skip_nops(self, k: int) -> int:
         """The index of the first instruction at or after *k* that is not a NOP/CACHE."""
-        while k < len(self.instructions) and self.instructions[k].opname in ("NOP", "CACHE"):
+        while k < len(self.instructions) and self.instructions[k].opname in _FILLER_OPS:
             k += 1
         return k
 
@@ -2861,8 +2870,14 @@ class DecompilerGeneric(DecompilerBase):
         """
         instrs = self.instructions
         start = jb_idx
-        while start >= 5 and start == self._with_exit_call_at(start - 5):
-            start -= 5
+        moved = True
+        while moved:
+            moved = False
+            for size in (5, 6):  # the exit call, with 3.11's PRECALL or without it
+                if start >= size and start == self._with_exit_call_at(start - size):
+                    start -= size
+                    moved = True
+                    break
         for back in range(1, 7):
             check_idx = start - back
             if check_idx < 0:
@@ -2874,28 +2889,46 @@ class DecompilerGeneric(DecompilerBase):
                 return False
         return False
 
+    def _follows_range_end(self, k: int, range_ends: set) -> bool:
+        """True if one of *range_ends* (offsets) is at ``instrs[k]`` or just before it, past only NOPs."""
+        instrs = self.instructions
+        j = k
+        while True:
+            if instrs[j].offset in range_ends:
+                return True
+            if j == 0 or instrs[j - 1].opname not in _FILLER_OPS:
+                return False
+            j -= 1
+
     def _with_exit_call_at(self, k: int) -> Optional[int]:
         """
         Index just past an inlined ``__exit__(None, None, None)`` call starting at *k*, or None.
 
-        The shape is ``[SWAP...] LOAD_CONST None x3; CALL 2|3; POP_TOP``; the SWAPs move
+        The shape is ``[SWAP...] LOAD_CONST None x3; [PRECALL (3.11)] CALL 2|3; POP_TOP``; the SWAPs move
         a return value past the exit function. A user call such as ``f(None, None, None)``
         has the same tail, but its callee is loaded right before the arguments, while
-        an exit call follows the end of a statement (or is a jump target).
+        an exit call follows the end of a statement (or a jump).
         """
         instrs = self.instructions
         m = k
         while m < len(instrs) and instrs[m].opname == "SWAP":
             m += 1
-        seq = instrs[m:m + 5]
-        shape = tuple(x.opname for x in seq)
+        # 3.11 puts a PRECALL before the CALL.
+        ops = [x.opname for x in instrs[m:m + 6]]
+        length = 6 if ops[3:4] == ["PRECALL"] else 5
+        seq = instrs[m:m + length]
+        shape = tuple(x.opname for x in seq if x.opname != "PRECALL")
         if shape != ("LOAD_CONST", "LOAD_CONST", "LOAD_CONST", "CALL", "POP_TOP"):
             return None
-        if any(x.argval is not None for x in seq[:3]) or seq[3].arg not in (2, 3):
+        if any(x.argval is not None for x in seq[:3]) or seq[-2].arg not in (2, 3):
             return None
-        if m == k and m > 0 and not seq[0].is_jump_target and instrs[m - 1].opname.startswith(_VALUE_OPS):
-            return None  # the callee and NULL of an ordinary call precede its arguments
-        return m + 5
+        if m == k and m > 0 and instrs[m - 1].opname.startswith(_VALUE_OPS):
+            # The callee of an ordinary call precedes its arguments; when it was chosen
+            # by a branch, `(f if c else g)(None, None, None)`, the arguments are a jump
+            # target too, but the code falling into them still pushed a value. An exit
+            # call is never fallen into from a value: only from the end of a statement.
+            return None
+        return m + length
 
     def _find_finally_copies(self, handler_body: list, lo: int, hi: int) -> list:
         """

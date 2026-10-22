@@ -170,8 +170,7 @@ class Decompiler314(Decompiler311Plus):
             # Check if this is the start of a 3x None sequence. Not after a value: then
             # it is the arguments of a user call such as f(None, None, None).
             prev = self.instructions[self.pc - 2] if self.pc >= 2 else None
-            after_value = (prev is not None and not instr.is_jump_target
-                           and prev.opname.startswith(_VALUE_OPS))
+            after_value = prev is not None and prev.opname.startswith(_VALUE_OPS)
             if not after_value and self.pc + 3 < len(self.instructions):
                 seq = self.instructions[self.pc: self.pc + 4]
                 if (seq[0].opname == "LOAD_CONST" and seq[0].argval is None and
