@@ -3,7 +3,7 @@
 Every name that used to live in the single-file ``pycrefine`` module is re-exported here,
 so ``import pycrefine`` and ``from pycrefine import ...`` behave as before.
 """
-__version__ = "1.0.10"
+__version__ = "1.0.11"
 
 from ._constants import (  # noqa: F401
     _AUG_ASSIGN_MAP,
@@ -34,6 +34,7 @@ from ._constants import (  # noqa: F401
 from .expr import StackNULL, _BoolExpr, _CollectionAccumSentinel, _unary_operand  # noqa: F401
 from .instructions import (  # noqa: F401
     BytecodeInstruction,
+    _const_repr,
     _is_anonymous_func_body,
     _render_func_tuple,
 )

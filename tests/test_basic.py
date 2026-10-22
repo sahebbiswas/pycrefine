@@ -422,3 +422,124 @@ class TestValueBoolOps(unittest.TestCase):
     def test_operators_appear(self):
         out = decompile("a, b = 0, 5\nx = a or b\ny = a and b\n")
         assert_contains(out, "x = a or b", "y = a and b")
+
+
+@unittest.skipIf(sys.version_info[:2] == (3, 11), "3.11 bytecode is not supported yet (#4)")
+class TestDeterministicConstants(unittest.TestCase):
+    """Set and frozenset constants render in a fixed order (#128).
+
+    A constant set iterates in hash order, which changes with PYTHONHASHSEED, so
+    the same .pyc used to decompile differently from one run to the next.
+    """
+
+    def test_set_elements_are_sorted(self):
+        from pycrefine import _const_repr
+        cases = [
+            (frozenset({"gamma", "alpha", "delta", "beta"}), "frozenset({'alpha', 'beta', 'delta', 'gamma'})"),
+            (frozenset({10, 2, 1, 100, -5}), "frozenset({-5, 1, 2, 10, 100})"),
+            (frozenset({b"b", b"a"}), "frozenset({b'a', b'b'})"),
+            (frozenset({2.5, 1, 0.5}), "frozenset({0.5, 1, 2.5})"),
+            (frozenset({"é", "ß", "a", "Z", ""}), "frozenset({'', 'Z', 'a', 'ß', 'é'})"),
+            (frozenset(), "frozenset()"),
+            ({"b", "a"}, "{'a', 'b'}"),
+            (set(), "set()"),
+        ]
+        for value, expected in cases:
+            with self.subTest(value=expected):
+                self.assertEqual(_const_repr(value), expected)
+
+    def test_mixed_types_never_raise_and_have_one_order(self):
+        from pycrefine import _const_repr
+        members = [None, True, 3, 2.5, "a", b"x", (1, 2), frozenset({"q", "p"}), 7j, Ellipsis]
+        expected = _const_repr(frozenset(members))
+        for shift in range(len(members)):
+            rotated = members[shift:] + members[:shift]
+            self.assertEqual(_const_repr(frozenset(rotated)), expected)
+        self.assertTrue(expected.startswith("frozenset({None, True, 2.5, 3, 'a', b'x', 7j, (1, 2), "))
+
+    def test_nan_and_infinity_do_not_break_sorting(self):
+        from pycrefine import _const_repr
+        out = _const_repr(frozenset({float("nan"), float("inf"), float("-inf"), 0.0, 1}))
+        self.assertEqual(out, "frozenset({-inf, 0.0, 1, inf, nan})")
+        # an int too large for a float must not trip the NaN check
+        self.assertEqual(
+            _const_repr(frozenset({float("inf"), 10 ** 400, 1})), f"frozenset({{1, {10 ** 400}, inf}})")
+
+    def test_equal_numbers_that_render_differently_have_one_order(self):
+        # (1, nan) and (1.0, nan) can both be members of one set, compare equal by
+        # number, and render differently: the order must not depend on how they arrive.
+        from pycrefine.instructions import _const_repr, _const_sort_key
+        nan_a, nan_b = float("nan"), float("nan")
+        pair = [(1, nan_a), (1.0, nan_b)]
+        self.assertNotEqual(_const_sort_key(pair[0]), _const_sort_key(pair[1]))
+        self.assertEqual(sorted(pair, key=_const_sort_key), sorted(reversed(pair), key=_const_sort_key))
+        self.assertEqual(_const_repr(frozenset(pair)), "frozenset({(1, nan), (1.0, nan)})")
+
+    def test_sets_nested_in_tuples_and_sets(self):
+        from pycrefine import _const_repr
+        value = (frozenset({"b", "a"}), (frozenset({3, 1, 2}),), 1)
+        self.assertEqual(_const_repr(value), "(frozenset({'a', 'b'}), (frozenset({1, 2, 3}),), 1)")
+        outer = frozenset({frozenset({"d", "c"}), frozenset({"b", "a"}), frozenset({"a"})})
+        self.assertEqual(
+            _const_repr(outer), "frozenset({frozenset({'a'}), frozenset({'a', 'b'}), frozenset({'c', 'd'})})")
+
+    def test_everything_but_sets_is_spelled_exactly_like_repr(self):
+        from pycrefine import _const_repr
+        values = [
+            None, True, False, 0, -7, 2 ** 70, 1.5, float("inf"), 3j, "a'b\"c", "line\nbreak", b"\x00\xff", "",
+            (), (1,), (1, 2), ((), (1,)), ("a", ("b", (None, True))), Ellipsis, slice(1, 2),
+        ]
+        for value in values:
+            with self.subTest(value=repr(value)):
+                self.assertEqual(_const_repr(value), repr(value))
+
+    def test_decompiled_constants_use_the_sorted_form(self):
+        out = decompile("def f(n):\n    return n in {'delta', 'alpha', 'gamma', 'beta'}\n")
+        self.assertIn("{'alpha', 'beta', 'delta', 'gamma'}", out)
+
+    def test_behavior_is_preserved(self):
+        import contextlib
+        import io
+
+        src = (
+            "def a(n):\n    return n in {'x', 'y', 'z', 'w'}\n"
+            "def d(n):\n    return n not in {1, 10, 2, 3, 100, -5}\n"
+            "def c(n):\n    return n in {(1, 2), (3, 4), (0, 9)}\n"
+            "def e():\n    return sorted(x for x in {'p', 'q', 'r'})\n"
+            "print(a('x'), a('q'), d(10), d(11), c((3, 4)), c((4, 3)), e())\n"
+        )
+
+        def run(code):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                exec(code, {"__name__": "__main__"})
+            return out.getvalue()
+
+        decompiled = decompile(src)
+        self.assertEqual(run(compile(decompiled, "<decompiled>", "exec")), run(compile(src, "<original>", "exec")))
+
+    def test_output_does_not_depend_on_the_hash_seed(self):
+        import os
+        import subprocess
+        import pycrefine
+
+        from .test_helpers import _compile
+
+        src = (
+            "def a(n):\n    return n in {'alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta'}\n"
+            "def b(n):\n    return n in {None, 'alpha', 'beta', 'gamma', 'delta'}\n"
+            "def c(n):\n    return n in {(1, 'a'), (2, 'b'), (3, 'c'), (4, 'd'), (5, 'e')}\n"
+            "def d(n):\n    return n in {1.5, 2, 'x', b'y', 3, 4, 5}\n"
+        )
+        pyc = _compile(src)
+        try:
+            pythonpath = os.path.dirname(os.path.dirname(pycrefine.__file__))
+            outputs = set()
+            for seed in ("0", "1", "2", "3", "4", "5"):
+                env = dict(os.environ, PYTHONHASHSEED=seed, PYTHONPATH=pythonpath)
+                done = subprocess.run(
+                    [sys.executable, "-m", "pycrefine", pyc], env=env, capture_output=True, text=True, check=True)
+                outputs.add(done.stdout)
+            self.assertEqual(len(outputs), 1, f"output varies with PYTHONHASHSEED: {outputs}")
+        finally:
+            os.unlink(pyc)
