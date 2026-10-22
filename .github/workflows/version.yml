@@ -1,0 +1,32 @@
+name: Version
+
+# Every pull request into main bumps __version__ in src/pycrefine/__init__.py by exactly
+# one SemVer step (CONTRIBUTING.md, "Versioning"). The base version comes from the first
+# parent of GitHub's test merge commit, so nothing is stored or fetched for the check.
+
+on:
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  version-bumped:
+    name: Version bumped
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        fetch-depth: 2
+        persist-credentials: false
+    - name: Compare with the base branch
+      run: |
+        if ! git rev-parse --verify --quiet HEAD^2 >/dev/null; then
+          echo "::error::Expected the pull request's test merge commit, found a single-parent commit"
+          exit 1
+        fi
+        git show HEAD^1:src/pycrefine/__init__.py > "$RUNNER_TEMP/base_version.py"
+        python3 .github/scripts/check_version_bump.py "$RUNNER_TEMP/base_version.py" src/pycrefine/__init__.py
