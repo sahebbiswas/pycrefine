@@ -9,7 +9,7 @@ from .loader import get_decompiler
 # CLI
 # ---------------------------------------------------------------------------
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="A Python .pyc decompiler that reconstructs readable source code from compiled bytecode."
     )

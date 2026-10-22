@@ -33,7 +33,7 @@ Issues = "https://github.com/sahebbiswas/pycrefine/issues"
 
 [project.optional-dependencies]
 test = ["pytest"]
-dev = ["pytest", "pyflakes"]
+dev = ["pytest", "pylint==4.1.3", "mypy==2.4.0"]
 
 [project.scripts]
 pycrefine = "pycrefine.cli:main" # Allows running 'pycrefine' directly in terminal
@@ -47,3 +47,33 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = "test_*.py"
+
+# Type checking (docs/linting.md). Permissive by default: errors are ignored everywhere
+# except the modules listed in the override below, which are checked with the strict
+# flag set. Move a module into the list once it is clean. Run: mypy
+[tool.mypy]
+python_version = "3.10"  # oldest target mypy supports; the code itself stays 3.9-compatible
+files = ["src/pycrefine"]
+mypy_path = "src"
+ignore_errors = true
+warn_unused_configs = true
+warn_redundant_casts = true
+
+[[tool.mypy.overrides]]
+module = [
+    "pycrefine._constants",
+    "pycrefine.cli",
+    "pycrefine.codeobj",
+    "pycrefine.expr",
+    "pycrefine.instructions",
+    "pycrefine.versions",
+]
+ignore_errors = false
+disallow_any_generics = true
+disallow_untyped_calls = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_unused_ignores = true
+warn_return_any = true

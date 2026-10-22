@@ -89,6 +89,8 @@ Elsewhere in the repository:
 
 The package version lives in one place, `pycrefine.__version__`; `pyproject.toml` reads it.
 
+Static checks (a pylint ratchet that blocks only new findings, and strict mypy on the small modules) are described in [docs/linting.md](docs/linting.md).
+
 ### Example Decompilation
 
 **Original Source** (`example.py`):
