@@ -32,7 +32,7 @@ from .._constants import (
 from ..codeobj import _is_code
 from .base import DecompilerBase
 from ..expr import StackNULL, _BoolExpr, _CollectionAccumSentinel, _unary_operand
-from ..instructions import BytecodeInstruction, _is_anonymous_func_body, _render_func_tuple
+from ..instructions import BytecodeInstruction, _const_repr, _is_anonymous_func_body, _render_func_tuple
 from ..postprocess import collapse_chained_comparisons, post_process_source
 
 
@@ -364,7 +364,7 @@ class DecompilerGeneric(DecompilerBase):
             if '"""' in val:
                 return f"'''{val}'''"
             return f'"""{val}"""'
-        return repr(val)
+        return _const_repr(val)
 
     def _has_exception_handler(self) -> bool:
         """Return True if this code object has any exception handlers."""
@@ -2602,7 +2602,7 @@ class DecompilerGeneric(DecompilerBase):
             # --- Control flow (simple) ---
             if op in ("RETURN_VALUE", "RETURN_CONST"):
                 if op == "RETURN_CONST":
-                    val = repr(ins.argval)
+                    val = _const_repr(ins.argval)
                 else:
                     val = stack.pop() if stack else "None"
                 lines.append(f"return {val}")
@@ -3720,7 +3720,7 @@ class DecompilerGeneric(DecompilerBase):
 
         val = instr.argval
         val_str = str(val)
-        self._append_reconstructed("return " + repr(val))
+        self._append_reconstructed("return " + _const_repr(val))
 
         # ── POP_TOP ────────────────────────────────────────────────────
 

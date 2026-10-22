@@ -1,5 +1,6 @@
 """Disassembled-instruction record and small rendering helpers."""
 import ast
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Type
@@ -20,6 +21,66 @@ class BytecodeInstruction:
     starts_line: Optional[int]
     is_jump_target: bool
     argrepr: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+
+def _const_sort_key(value: Any) -> Tuple[Any, ...]:
+    """
+    Sort key giving code-object constants one fixed order, whatever mix of types
+    a set holds: None, bool, numbers, str, bytes, complex, tuples, frozensets.
+
+    Each key starts with a type rank, so values of different types never get
+    compared with each other; numbers sort by value (NaN last) and strings and
+    bytes naturally, which keeps small sets of the same type in the order a
+    person would write them.
+    """
+    rank: int = 8
+    payload: Any = repr(value)
+    if value is None:
+        rank, payload = 0, 0
+    elif isinstance(value, bool):
+        rank, payload = 1, int(value)
+    elif isinstance(value, (int, float)):
+        is_nan = isinstance(value, float) and math.isnan(value)
+        # Equal numbers can still render differently (1 and 1.0 inside tuples), so the
+        # repr breaks the tie and keeps the order independent of set iteration order.
+        rank, payload = 2, ((1, repr(value)) if is_nan else (0, value, repr(value)))
+    elif isinstance(value, str):
+        rank, payload = 3, value
+    elif isinstance(value, bytes):
+        rank, payload = 4, value
+    elif isinstance(value, complex):
+        rank, payload = 5, repr(value)
+    elif isinstance(value, tuple):
+        rank, payload = 6, tuple(_const_sort_key(v) for v in value)
+    elif isinstance(value, (frozenset, set)):
+        rank, payload = 7, tuple(sorted(_const_sort_key(v) for v in value))
+    return (rank, payload)
+
+
+def _const_repr(value: Any) -> str:
+    """
+    ``repr()`` of a code-object constant with a deterministic spelling.
+
+    A set or frozenset iterates in hash order, which changes with
+    PYTHONHASHSEED (and, for None or other objects hashed by address, from run to
+    run), so its plain ``repr()`` makes the decompiler's output unstable. Sets are
+    rendered with their elements sorted (see _const_sort_key), including sets
+    nested inside tuples. Every other constant is spelled exactly as ``repr()``.
+    """
+    if isinstance(value, (frozenset, set)):
+        items = ", ".join(_const_repr(v) for v in sorted(value, key=_const_sort_key))
+        if isinstance(value, frozenset):
+            return f"frozenset({{{items}}})" if items else "frozenset()"
+        return f"{{{items}}}" if items else "set()"
+    if isinstance(value, tuple):
+        items = ", ".join(_const_repr(v) for v in value)
+        return f"({items},)" if len(value) == 1 else f"({items})"
+    return repr(value)
 
 
 # ---------------------------------------------------------------------------
