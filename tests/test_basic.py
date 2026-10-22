@@ -214,6 +214,98 @@ if __name__ == "__main__":
 
 
 @unittest.skipIf(sys.version_info[:2] == (3, 11), "3.11 bytecode is not supported yet (#4)")
+class TestGeneratorExpressionFilters(unittest.TestCase):
+    """The `if` filters of a generator expression must keep their polarity (#127).
+
+    Since 3.13 a generator expression's filter is compiled as a jump back to the
+    loop head, which the decompiler writes as `if not cond: continue`. That line
+    rejects an item, so the filter it stands for is `cond`.
+    """
+
+    CASES = {
+        "truthiness": (
+            "def a(xs):\n    return sum(1 for x in xs if x)\n"
+            "print(a([0, 1, 2, 0, 3]), a([]), a([0, 0]))\n"
+        ),
+        "and_filter": (
+            "def b(xs, ys):\n    return sum(1 for x in xs if x and ys)\n"
+            "print(b([0, 1, 2], [1]), b([0, 1, 2], []), b([], [1]))\n"
+        ),
+        "comparison": (
+            "def c(xs):\n    return list(x for x in xs if x > 1)\n"
+            "print(c([0, 1, 2, 3]), c([5, 0]))\n"
+        ),
+        "zip_not_equal": (
+            "def diff(ot, dt):\n    return sum(1 for t1, t2 in zip(ot, dt) if t1 != t2)\n"
+            "print(diff('abcd', 'abxd'), diff('ab', 'ab'), diff('ab', 'cd'))\n"
+        ),
+        "negated": "xs = [0, 1, 2, 0]\nprint(list(x for x in xs if not x), list(x for x in xs if not x > 1))\n",
+        "or_filter": (
+            "def e(xs, y):\n    return list(x for x in xs if x or y)\n"
+            "print(e([0, 1, 2], 0), e([0, 1, 2], 1))\n"
+        ),
+        "chained_filters": (
+            "def f(xs):\n    return list(x for x in xs if x if x > 1 if x < 9)\n"
+            "print(f([0, 1, 2, 5, 9, 12]))\n"
+        ),
+        "is_none": (
+            "xs = [None, 1, None, 2]\nprint(list(x for x in xs if x is None), list(x for x in xs if x is not None))\n"
+        ),
+        "membership": (
+            "d = {1, 3}\nxs = [1, 2, 3, 4]\n"
+            "print(list(x for x in xs if x in d), list(x for x in xs if x not in d))\n"
+        ),
+        "chained_comparison": "xs = [0, 1, 5, 9, 12]\nprint(list(x for x in xs if 1 < x < 9))\n",
+        "ternary_filter": (
+            "xs = [0, 1, 2, 3]\nprint(list(x for x in xs if (x if x > 1 else 0)))\n"
+        ),
+        "nested_loops": (
+            "def g(xs, ys):\n    return list((x, y) for x in xs for y in ys if x != y)\n"
+            "print(g([1, 2], [2, 3]))\n"
+        ),
+        "filter_on_each_loop": (
+            "def h(xs, ys):\n    return list((x, y) for x in xs if x for y in ys if y)\n"
+            "print(h([0, 1, 2], [0, 3]))\n"
+        ),
+        "filter_in_call_argument": (
+            "words = ['a', '', 'bc', '']\n"
+            "print(' '.join(w.upper() for w in words if w), max(len(w) for w in words if w))\n"
+        ),
+    }
+
+    def _run(self, code):
+        import contextlib
+        import io
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            exec(code, {"__name__": "__main__"})
+        return out.getvalue()
+
+    def test_behavior_is_preserved(self):
+        for name, src in self.CASES.items():
+            with self.subTest(case=name):
+                decompiled = decompile(src)
+                try:
+                    recompiled = compile(decompiled, "<decompiled>", "exec")
+                except SyntaxError as exc:
+                    self.fail(f"Decompiled output does not compile ({exc}):\n{decompiled}")
+                self.assertEqual(
+                    self._run(recompiled), self._run(compile(src, "<original>", "exec")),
+                    f"Decompiled code behaves differently:\n{decompiled}",
+                )
+
+    def test_issue_127_repro_keeps_the_filter(self):
+        out = decompile(
+            "def a(xs): return sum(1 for x in xs if x)\n"
+            "def c(xs): return list(x for x in xs if x > 1)\n"
+        )
+        self.assertNotIn("if not x", out)
+        self.assertIn("if x)", out)
+        self.assertIn("if x > 1)", out)
+
+
+@unittest.skipIf(sys.version_info[:2] == (3, 11), "3.11 bytecode is not supported yet (#4)")
 class TestUnaryOperators(unittest.TestCase):
     """Unary `-`, `+`, `~` and `not` must survive decompilation."""
 

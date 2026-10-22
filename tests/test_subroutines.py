@@ -194,6 +194,77 @@ class TestGenexprRendering(unittest.TestCase):
         self.assertIn("for x in xs", out)
         self.assertIn("if x > 0", out)
 
+    def test_continue_filter_is_negated(self):
+        # 3.13+ writes `if cond: continue`; that rejects the item, so the filter is `not cond`.
+        from pycrefine import _render_func_tuple
+        body = "def <genexpr>(.0):\n    for x in .0:\n        if not x > 1:\n            continue\n        yield x\n"
+        self.assertEqual(_render_func_tuple(body, ["xs"]), "(x for x in xs if x > 1)")
+        body = "def <genexpr>(.0):\n    for x in .0:\n        if x:\n            continue\n        yield 1\n"
+        self.assertEqual(_render_func_tuple(body, ["xs"]), "(1 for x in xs if not x)")
+
+    def test_consecutive_continue_filters_are_each_negated(self):
+        from pycrefine import _render_func_tuple
+        body = ("def <genexpr>(.0):\n    for x in .0:\n        if not x:\n            continue\n"
+                "        if not ys:\n            continue\n        yield 1\n")
+        self.assertEqual(_render_func_tuple(body, ["xs"]), "(1 for x in xs if x if ys)")
+
+    def test_continue_filter_negation_handles_boolean_operators_and_complements(self):
+        from pycrefine import _render_func_tuple
+        template = "def <genexpr>(.0):\n    for x in .0:\n        if {}:\n            continue\n        yield x\n"
+        cases = {
+            "not x and not y": "x or y",
+            "not x or not y": "x and y",
+            "x is not None": "x is None",
+            "x is None": "x is not None",
+            "not x in d": "x in d",
+            "not x not in d": "x not in d",
+            "x in d": "x not in d",
+            "x == 1": "not x == 1",
+            "f(x)": "not f(x)",
+            "a < x < b": "not a < x < b",
+        }
+        for cond, expected in cases.items():
+            with self.subTest(cond=cond):
+                self.assertEqual(
+                    _render_func_tuple(template.format(cond), ["xs"]), f"(x for x in xs if {expected})")
+
+    def test_else_continue_keeps_the_polarity_of_the_condition(self):
+        # `if a: [if not b: continue] else: continue` is the 3.13+ spelling of `if a if b`.
+        from pycrefine import _render_func_tuple
+        body = ("def <genexpr>(.0):\n    for x in .0:\n        if 1 < x:\n            if not x < 9:\n"
+                "                continue\n        else:\n            continue\n        yield x\n")
+        self.assertEqual(_render_func_tuple(body, ["xs"]), "(x for x in xs if 1 < x if x < 9)")
+
+    def test_filter_on_each_nested_loop(self):
+        from pycrefine import _render_func_tuple
+        body = ("def <genexpr>(.0):\n    for x in .0:\n        if not x:\n            continue\n"
+                "        for y in ys:\n            if not y:\n                continue\n            yield (x, y)\n")
+        self.assertEqual(
+            _render_func_tuple(body, ["xs"]), "((x, y) for x in xs if x for y in ys if y)")
+
+    def test_while_inside_a_comprehension_is_a_filter(self):
+        # A comprehension cannot contain a real `while`; 3.9 writes a filter that way.
+        from pycrefine import _render_func_tuple
+        body = "def <genexpr>(.0):\n    for x in .0:\n        while x:\n            yield x\n"
+        self.assertEqual(_render_func_tuple(body, ["xs"]), "(x for x in xs if x)")
+
+    def test_continue_filter_in_list_and_dict_comprehensions(self):
+        from pycrefine import _render_func_tuple
+        body = "def <listcomp>(.0):\n    for x in .0:\n        if not x:\n            continue\n        yield x\n"
+        self.assertEqual(_render_func_tuple(body, ["xs"]), "[x for x in xs if x]")
+        body = "def <dictcomp>(.0):\n    for k, v in .0:\n        if v is None:\n            continue\n        yield k: v\n"
+        self.assertEqual(_render_func_tuple(body, ["d"]), "{k: v for k, v in d if v is not None}")
+
+    def test_unparsable_condition_is_negated_verbatim(self):
+        from pycrefine import _render_func_tuple
+        body = "def <genexpr>(.0):\n    for x in .0:\n        if x ? y:\n            continue\n        yield x\n"
+        self.assertEqual(_render_func_tuple(body, ["xs"]), "(x for x in xs if not (x ? y))")
+
+    def test_body_without_a_yield_still_falls_back(self):
+        from pycrefine import _render_func_tuple
+        body = "def <genexpr>(.0):\n    for x in .0:\n        if not x:\n            continue\n"
+        self.assertIn("<func>", _render_func_tuple(body, ["xs"]))
+
     def test_trailing_empty_call_suffix_stripped(self):
         from pycrefine import _render_func_tuple
         body = "def <genexpr>(.0):\n    for x in .0:\n        yield x\n"
