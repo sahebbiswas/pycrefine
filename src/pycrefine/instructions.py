@@ -84,6 +84,68 @@ def _const_repr(value: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Finally-body copies
+# ---------------------------------------------------------------------------
+
+# Instructions that carry no meaning for comparing two compilations of the same code.
+_COPY_SKIP_OPS = frozenset({"CACHE", "NOP", "NOT_TAKEN", "RESUME"})
+
+# Superinstructions and variants (3.13+) that the optimizer applies to one copy of a
+# finally body and not necessarily to another, spelled as the plain instructions
+# they stand for.
+_COPY_EXPANSIONS: Dict[str, Tuple[str, ...]] = {
+    "LOAD_FAST_BORROW": ("LOAD_FAST",),
+    "LOAD_FAST_CHECK": ("LOAD_FAST",),
+    "LOAD_FAST_LOAD_FAST": ("LOAD_FAST", "LOAD_FAST"),
+    "LOAD_FAST_BORROW_LOAD_FAST_BORROW": ("LOAD_FAST", "LOAD_FAST"),
+    "STORE_FAST_LOAD_FAST": ("STORE_FAST", "LOAD_FAST"),
+    "STORE_FAST_STORE_FAST": ("STORE_FAST", "STORE_FAST"),
+}
+
+
+def _copy_signature(instrs: List[BytecodeInstruction]) -> List[Tuple[str, Any]]:
+    """
+    Reduce *instrs* to ``(opname, operand)`` pairs that are equal for two compilations
+    of the same source: optimizer variants are spelled as their plain forms, no-ops are
+    dropped, and jump operands (absolute offsets that differ between copies) are blanked.
+    """
+    signature: List[Tuple[str, Any]] = []
+    for ins in instrs:
+        op = ins.opname
+        if op in _COPY_SKIP_OPS:
+            continue
+        expansion = _COPY_EXPANSIONS.get(op)
+        if expansion is not None:
+            names = ins.argval if isinstance(ins.argval, (tuple, list)) else (ins.argval,)
+            signature.extend(zip(expansion, names))
+        elif op == "LOAD_SMALL_INT":
+            signature.append(("LOAD_CONST", ins.arg))
+        elif "JUMP" in op or op in ("FOR_ITER", "SEND"):
+            signature.append((op, None))
+        else:
+            signature.append((op, ins.argval))
+    return signature
+
+
+def _match_finally_copy(instrs: List[BytecodeInstruction], start: int, template: List[Tuple[str, Any]]) -> Optional[int]:
+    """
+    Index just past the run of instructions that begins at ``instrs[start]`` and has the
+    signature *template*, or None when the code there is something else.
+    """
+    done = 0
+    idx = start
+    while done < len(template):
+        if idx >= len(instrs):
+            return None
+        piece = _copy_signature([instrs[idx]])
+        if piece != template[done:done + len(piece)]:
+            return None
+        done += len(piece)
+        idx += 1
+    return idx
+
+
+# ---------------------------------------------------------------------------
 # Comprehension bodies
 # ---------------------------------------------------------------------------
 
