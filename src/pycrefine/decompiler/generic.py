@@ -42,6 +42,12 @@ from ..postprocess import collapse_chained_comparisons, post_process_source
 # ---------------------------------------------------------------------------
 
 
+# CPython 3.14's LOAD_COMMON_CONSTANT table (opcode._common_constants), by name, so a
+# 3.14 .pyc can be read on another interpreter. Only used when ``dis`` cannot resolve the
+# constant itself; tests/test_basic.py (TestInlinedBuiltinCalls) checks it against the
+# running 3.14's table, so a reordering in CPython fails the suite instead of passing silently.
+_COMMON_CONSTANT_NAMES = ("AssertionError", "NotImplementedError", "tuple", "all", "any")
+
 # Instructions that make up a value-context `and`/`or` inside an expression.
 _BOOLOP_PARTS = frozenset(("JUMP_IF_TRUE_OR_POP", "JUMP_IF_FALSE_OR_POP", "COPY", "TO_BOOL",
                            "POP_JUMP_IF_TRUE", "POP_JUMP_IF_FALSE", "POP_TOP"))
@@ -127,6 +133,45 @@ class DecompilerGeneric(DecompilerBase):
     # Main loop
     # ------------------------------------------------------------------
 
+    def _fold_inlined_builtin_calls(self) -> None:
+        """
+        Undo CPython 3.14's inlining of ``all``/``any``/``tuple`` over a generator.
+
+        3.14 compiles ``any(x for x in xs)`` as a guard that checks the name is still the
+        builtin, an inlined loop for that case, and the ordinary call as the fallback::
+
+            LOAD_GLOBAL any; COPY 1; LOAD_COMMON_CONSTANT any; IS_OP 0
+            POP_JUMP_IF_FALSE fallback; [NOT_TAKEN]; POP_TOP; <inlined loop ...>
+            fallback: PUSH_NULL; <generator>; CALL 1
+
+        Only the fallback is the source code, so the guard and the inlined loop are
+        dropped and the call is decompiled as written.
+        """
+        instrs = self.instructions
+        index_of = {ins.offset: n for n, ins in enumerate(instrs)}
+        drop: set = set()
+        for k, ins in enumerate(instrs):
+            if ins.opname != "COPY" or ins.arg != 1 or k == 0 or k + 3 >= len(instrs):
+                continue
+            const, test, jump = instrs[k + 1], instrs[k + 2], instrs[k + 3]
+            name = getattr(const.argval, "__name__", None)
+            if name is None and isinstance(const.arg, int) and 0 <= const.arg < len(_COMMON_CONSTANT_NAMES):
+                name = _COMMON_CONSTANT_NAMES[const.arg]
+            guard = (const.opname, test.opname, test.arg, jump.opname)
+            if guard != ("LOAD_COMMON_CONSTANT", "IS_OP", 0, "POP_JUMP_IF_FALSE") or name is None:
+                continue
+            loaded = instrs[k - 1]
+            # The guard reloads the name the call uses (the builtin, or a shadowing local).
+            if loaded.opname not in ("LOAD_GLOBAL", "LOAD_NAME", "LOAD_DEREF", "LOAD_FAST") \
+                    or not isinstance(loaded.argval, str) or loaded.argval != name:
+                continue
+            end = index_of.get(self._get_jump_target(jump))
+            if end is None or end <= k + 3 or instrs[end].opname != "PUSH_NULL":
+                continue
+            drop.update(range(k, end))
+        if drop:
+            self.instructions = [ins for n, ins in enumerate(instrs) if n not in drop]
+
     def decompile(self) -> str:
         """
         Decompile the stored code object into a human-readable Python source string.
@@ -139,6 +184,7 @@ class DecompilerGeneric(DecompilerBase):
         self._disassemble()
         self.instructions = self._split_superinstructions(self.instructions)
         self._collapse_inlined_comprehensions()
+        self._fold_inlined_builtin_calls()
         self.pc = 0
         self.blocks = []
         self._while_header_targets = {}

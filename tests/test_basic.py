@@ -919,3 +919,61 @@ class TestTernaryWithBooleanBranches(unittest.TestCase):
         out = decompile("def k(a, b, f):\n    x = foo(1, a if f else b)\n    return x\n")
         self.assertNotIn("func(", out)
         self.assertEqual(out.count("foo(1, "), 1 if "if f else" in out else 2)
+
+
+@unittest.skipIf(sys.version_info[:2] == (3, 11), "3.11 bytecode is not supported yet (#4)")
+class TestInlinedBuiltinCalls(unittest.TestCase):
+    """`any`/`all`/`tuple` over a generator, which 3.14 inlines behind a guard (#139)."""
+
+    SRC = (
+        "def f(xs):\n    return any(x > 1 for x in xs)\n"
+        "def g(xs):\n    y = all(x for x in xs if x)\n    t = tuple(x * 2 for x in xs if x != 3)\n"
+        "    if any(x for x in xs if not x):\n        print('has falsy', y)\n    return y, t\n"
+        "z = all(v for v in range(3))\n"
+        "print(f([0, 1]), f([2]), g([1, 2, 3]), g([0, 3]), z)\n"
+    )
+
+    @unittest.skipUnless(sys.version_info[:2] == (3, 14), "LOAD_COMMON_CONSTANT table of 3.14")
+    def test_common_constant_names_match_cpython(self):
+        import opcode
+
+        from pycrefine.decompiler.generic import _COMMON_CONSTANT_NAMES
+
+        table = [getattr(c, "__name__", None) for c in getattr(opcode, "_common_constants", ())]
+        self.assertEqual(tuple(table[:len(_COMMON_CONSTANT_NAMES)]), _COMMON_CONSTANT_NAMES)
+
+    def test_calls_are_kept(self):
+        out = decompile(self.SRC)
+        compile(out, "<decompiled>", "exec")
+        for call in ("any((x > 1 for x in xs))", "all((x for x in xs if x))", "all((v for v in range(3)))"):
+            self.assertIn(call, out)
+        for leak in ("_item", " is 4", " is 3", "True((", "False(("):
+            self.assertNotIn(leak, out)
+
+    def test_behavior_is_preserved(self):
+        import contextlib
+        import io
+
+        def run(code):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                exec(code, {"__name__": "__main__"})
+            return buf.getvalue()
+
+        out = decompile(self.SRC)
+        self.assertEqual(run(compile(out, "<decompiled>", "exec")), run(compile(self.SRC, "<original>", "exec")))
+
+    def test_shadowed_name_still_decompiles(self):
+        src = "def h(xs, any):\n    return any(x for x in xs)\n"
+        out = decompile(src)
+        self.assertIn("return any((x for x in xs))", out)
+        original, decompiled = {}, {}
+        exec(compile(src, "<original>", "exec"), original)
+        exec(compile(out, "<decompiled>", "exec"), decompiled)
+
+        def shadowed(values):
+            return ("shadowed", list(values))
+
+        # The call must go to the parameter, not to the builtin.
+        self.assertEqual(decompiled["h"]([0, 1], shadowed), original["h"]([0, 1], shadowed))
+        self.assertEqual(decompiled["h"]([0, 1], shadowed), ("shadowed", [0, 1]))
