@@ -32,7 +32,8 @@ from .._constants import (
 from ..codeobj import _is_code
 from .base import DecompilerBase
 from ..expr import StackNULL, _BoolExpr, _CollectionAccumSentinel, _unary_operand
-from ..instructions import BytecodeInstruction, _const_repr, _is_anonymous_func_body, _render_func_tuple
+from ..instructions import (BytecodeInstruction, _const_repr, _copy_signature, _is_anonymous_func_body,
+                            _match_finally_copy, _render_func_tuple)
 from ..postprocess import collapse_chained_comparisons, post_process_source
 
 
@@ -110,6 +111,7 @@ class DecompilerGeneric(DecompilerBase):
         self._wrapper_body_suppress: set = set()
         self._pending_finally_merge: Optional[int] = None
         self._nop_to_push_exc: dict = {}
+        self._nop_to_finally_merge: dict = {}
         self._kw_names: Tuple[str, ...] = ()
         self._else_starts: dict = {}  # map of else_start_offset -> else_end_offset
         self._build_dispatch()
@@ -2418,12 +2420,13 @@ class DecompilerGeneric(DecompilerBase):
         for merge_off, targets in self._push_exc_to_finally_merge.items():
             if merge_off in getattr(self, "_except_only_merge_offsets", ()):
                 continue
-            body_end = None
-            for ins in instrs:
-                if ins.offset > merge_off and ins.opname == "NOP":
-                    if ins.offset in self._try_nop_offsets or ins.offset == 2:
-                        body_end = ins.offset
-                        break
+            body_end = self._finally_copy_end(merge_off)
+            if body_end is None:
+                for ins in instrs:
+                    if ins.offset > merge_off and ins.opname == "NOP":
+                        if ins.offset in self._try_nop_offsets or ins.offset == 2:
+                            body_end = ins.offset
+                            break
             if body_end is None:
                 for ins in instrs:
                     if ins.offset > merge_off and (
@@ -2438,12 +2441,13 @@ class DecompilerGeneric(DecompilerBase):
                 if merge_off <= ins.offset < body_end:
                     self._finally_body_suppress.add(ins.offset)
             sub_instrs = [ins for ins in instrs if merge_off <= ins.offset < body_end]
-            lines = self._render_finally_body(sub_instrs)
+            lines = self._render_finally_body(sub_instrs) or ["pass"]
             self._deferred_finally_lines[merge_off] = lines
 
         # ── 7. Build nop_to_push_exc: maps each try-entry NOP to the correct
         #       PUSH_EXC_INFO that handles its try body, using the exception table.
         self._nop_to_push_exc: dict = {}  # nop_offset → push_exc_info_offset
+        self._nop_to_finally_merge: dict = {}  # nop_offset → finally start, for try/finally without except
         try:
             _exc_entries_for_nop = dis.Bytecode(self.code_obj).exception_entries  # type: ignore[name-defined]
         except (AttributeError, IndexError, TypeError, ValueError):
@@ -2476,16 +2480,17 @@ class DecompilerGeneric(DecompilerBase):
                     # Finally body: from try_body_end to first RETURN_CONST or
                     # next suppressed PUSH_EXC_INFO
                     finally_start = try_body_end
-                    finally_end = None
-                    for ins in instrs:
-                        if ins.offset >= finally_start:
-                            if ins.opname in ("RETURN_CONST", "RETURN_VALUE"):
-                                finally_end = ins.offset
-                                break
-                            if ins.opname == "PUSH_EXC_INFO":
-                                finally_end = ins.offset
-                                break
-                    if finally_end is None or finally_end <= finally_start:
+                    finally_end = self._finally_copy_end(finally_start, owner=e.target)
+                    if finally_end is None:
+                        for ins in instrs:
+                            if ins.offset >= finally_start:
+                                if ins.opname in ("RETURN_CONST", "RETURN_VALUE"):
+                                    finally_end = ins.offset
+                                    break
+                                if ins.opname == "PUSH_EXC_INFO":
+                                    finally_end = ins.offset
+                                    break
+                    if finally_end is None or finally_end < finally_start:
                         break
                     # Suppress the finally body instructions
                     for ins in instrs:
@@ -2493,8 +2498,15 @@ class DecompilerGeneric(DecompilerBase):
                             self._finally_body_suppress.add(ins.offset)
                     # Pre-render the finally body
                     sub_instrs = [ins for ins in instrs if finally_start <= ins.offset < finally_end]
-                    lines = self._render_finally_body(sub_instrs)
+                    if not sub_instrs:
+                        # A try body that always raises or returns has no inline copy of the
+                        # finally body; the copy in the exception handler is the only one.
+                        sub_instrs = self._handler_copy_instrs(e.target)
+                    lines = self._render_finally_body(sub_instrs) or ["pass"]
                     self._deferred_finally_lines[finally_start] = lines
+                    # The try body ends where the finally body starts; _op_nop needs it
+                    # to open and close the `try:` block (there is no handler to ask).
+                    self._nop_to_finally_merge[nop_off] = finally_start
                     # Record this as a finally-merge point (even though there's no
                     # JUMP_BACKWARD — the inline finally body entry IS the merge label)
                     self._finally_merge_offsets.add(finally_start)
@@ -2529,131 +2541,98 @@ class DecompilerGeneric(DecompilerBase):
                                 break
                     break
 
+    def _handler_copy_instrs(self, wrapper_off: int) -> list:
+        """
+        Instructions of the `finally` body copy inside the re-raise handler at *wrapper_off*.
+
+        Returns an empty list when the handler is not a `PUSH_EXC_INFO ... RERAISE 0` wrapper.
+        """
+        try:
+            entries = dis.Bytecode(self.code_obj).exception_entries
+        except (AttributeError, TypeError, ValueError):
+            return []
+        entry = next((e for e in entries if e.start == wrapper_off and e.lasti), None)
+        if entry is None:
+            return []
+        wrapper = [ins for ins in self.instructions if wrapper_off < ins.offset < entry.end]
+        if not wrapper or wrapper[-1].opname != "RERAISE" or wrapper[-1].arg != 0:
+            return []
+        return wrapper[:-1]
+
+    def _finally_copy_end(self, start_offset: int, owner: Optional[int] = None) -> Optional[int]:
+        """
+        Offset just past the inline copy of a `finally` body that begins at *start_offset*.
+
+        CPython compiles a finally body more than once: inline on the normal exit path,
+        and again in a handler that runs it and re-raises (`PUSH_EXC_INFO ... RERAISE 0`).
+        The exception table bounds the handler copy exactly, and the inline copy is the
+        same code, so the two have the same instructions. Matching them tells where the
+        inline copy ends, which is where the code after the try statement begins. Scanning
+        for the first `return` instead (the fallback) swallows every statement that
+        follows the try into the finally body.
+
+        Only the handler of the `try` that ends at *start_offset* is used: *owner* when
+        the caller knows it, otherwise the handler whose protected range ends there.
+        Comparing against every handler would let an earlier `try` whose finally body
+        is empty, or a prefix of this one, cut this body short.
+
+        Returns None when no handler copy matches, for instance when the body itself
+        returns or loops, so the caller can fall back to scanning. May return
+        *start_offset* itself: that is a body with no instructions, i.e. `pass`.
+        """
+        instrs = self.instructions
+        start_idx = next((i for i, ins in enumerate(instrs) if ins.offset == start_offset), None)
+        if start_idx is None:
+            return None
+        try:
+            entries = dis.Bytecode(self.code_obj).exception_entries
+        except (AttributeError, TypeError, ValueError):
+            return None
+        suppressed = getattr(self, "_suppress_push_exc_offsets", set())
+        if owner is not None:
+            candidates = [owner]
+        else:
+            candidates = sorted({e.target for e in entries
+                                 if e.target in suppressed and self._ends_just_before(e.end, start_idx)})
+        for wrapper_off in candidates:
+            entry = next((e for e in entries if e.start == wrapper_off and e.lasti), None)
+            if entry is None:
+                continue
+            wrapper = [ins for ins in instrs if wrapper_off < ins.offset < entry.end]
+            if not wrapper or wrapper[-1].opname != "RERAISE" or wrapper[-1].arg != 0:
+                continue  # a with-exit or other handler, not a finally copy
+            end_idx = _match_finally_copy(instrs, start_idx, _copy_signature(wrapper[:-1]))
+            if end_idx is not None:
+                return instrs[end_idx].offset if end_idx < len(instrs) else instrs[-1].offset + 2
+        return None
+
+    def _ends_just_before(self, end_offset: int, idx: int) -> bool:
+        """True if *end_offset* is ``instrs[idx]``'s offset, or only NOPs lie between them."""
+        instrs = self.instructions
+        j = idx
+        while j >= 0:
+            if instrs[j].offset == end_offset:
+                return True
+            if j == idx or instrs[j].opname in ("NOP", "CACHE"):
+                j -= 1
+                continue
+            return False
+        return False
+
     def _render_finally_body(self, sub_instrs: list) -> list:
         """
-        Render a sequence of bytecode instructions into a list of Python source lines suitable for a deferred `finally` body.
+        Render the instructions of a ``finally`` body into source lines.
+
+        Runs the full sub-decompiler over the slice, so calls, loops, nested code objects and
+        every other construct render exactly as they would in ordinary code.
 
         Parameters:
-            sub_instrs (list): Sequence of BytecodeInstruction objects (a contiguous slice of disassembled instructions) representing the finally-body to render.
+            sub_instrs (list): The instructions of the finally body (one copy of it).
 
         Returns:
-            list: Ordered lines of Python source (strings) representing the rendered body. Unknown or complex operations are emitted as commented disassembly lines.
+            list: Source lines, without indentation; empty for an empty body.
         """
-        # Simple stack-based mini-eval to convert the instruction sequence
-        # (which can now include stores and complex ops) to source lines.
-        stack: list = []
-        lines: list = []
-
-        # Standard decompiler skip ops
-        _SKIP = {"RESUME", "CACHE", "NOP", "NOT_TAKEN"}
-
-        for ins in sub_instrs:
-            op = ins.opname
-            if op == "POP_TOP":
-                if stack:
-                    stmt = str(stack.pop())
-                    # Only emit as a line if it's not a boring constant or sentinel
-                    if stmt not in ("None", "_exc_info", "_exc_match", "True", "False"):
-                        lines.append(stmt)
-                continue
-
-            if op in _IS_COMP_GEN_SKIP:
-                continue
-
-            # --- Loading ---
-            if op in ("LOAD_CONST", "LOAD_NAME", "LOAD_FAST", "LOAD_GLOBAL",
-                      "LOAD_SMALL_INT", "LOAD_GLOBAL_MODULE", "LOAD_DEREF"):
-                if _is_code(ins.argval):
-                    stack.append(("code", ins.argval))
-                else:
-                    val = ins.argval
-                    if op == "LOAD_GLOBAL_MODULE" and isinstance(val, (list, tuple)) and val:
-                        val = val[0]
-                    # Use repr for constants so strings keep their quotes
-                    if op in ("LOAD_CONST", "LOAD_SMALL_INT"):
-                        stack.append(self._format_val(val))
-                    else:
-                        s = str(val)
-                        if " + NULL" in s:
-                            s = s.split(" + ")[0]
-                        if "|" in s:
-                            s = s.split("|")[0]
-                        stack.append(s)
-                continue
-
-            if op in ("LOAD_ATTR", "LOAD_METHOD", "GET_ATTR"):
-                obj = stack.pop() if stack else "obj"
-                name = str(ins.argval).split(" + ")[0].split("|")[0]
-                stack.append(f"{obj}.{name}")
-                continue
-
-            # --- Storing / Deleting ---
-            if op in ("STORE_NAME", "STORE_FAST", "STORE_GLOBAL", "STORE_DEREF"):
-                val = stack.pop() if stack else "None"
-                target = str(ins.argval)
-                lines.append(f"{target} = {val}")
-                continue
-
-            if op in ("DELETE_NAME", "DELETE_FAST", "DELETE_GLOBAL"):
-                target = str(ins.argval)
-                lines.append(f"del {target}")
-                continue
-
-            # --- Control flow (simple) ---
-            if op in ("RETURN_VALUE", "RETURN_CONST"):
-                if op == "RETURN_CONST":
-                    val = _const_repr(ins.argval)
-                else:
-                    val = stack.pop() if stack else "None"
-                lines.append(f"return {val}")
-                continue
-
-            # --- Expression Building ---
-            if op == "CALL":
-                num = int(ins.arg or 0)
-                args = []
-                for _ in range(num):
-                    args.insert(0, str(stack.pop()) if stack else "?")
-                func = stack.pop() if stack else "?"
-                # Clean func name from NULL/self markers
-                s_func = str(func).split(" + ")[0].split("|")[0]
-                stack.append(f"{s_func}({', '.join(args)})")
-                continue
-
-            if op == "BINARY_OP":
-                rhs = stack.pop() if stack else "?"
-                lhs = stack.pop() if stack else "?"
-                op_sym = str(ins.argrepr) if ins.argrepr else "+"
-                stack.append(f"({lhs} {op_sym} {rhs})")
-                continue
-
-            if op == "BUILD_LIST":
-                num = int(ins.arg or 0)
-                items = [str(stack.pop()) if stack else "?" for _ in range(num)]
-                stack.append(f"[{', '.join(reversed(items))}]")
-                continue
-
-            if op == "BUILD_MAP":
-                num = int(ins.arg or 0)
-                pairs = []
-                for _ in range(num):
-                    v = stack.pop() if stack else "?"
-                    k = stack.pop() if stack else "?"
-                    pairs.insert(0, f"{k}: {v}")
-                stack.append(f"{{ {', '.join(pairs)} }}")
-                continue
-
-            # --- Fallback ---
-            # For truly complex or unknown ops, emit disassembly as a comment
-            lines.append(f"# {ins.opname} {ins.argrepr or ''}")
-
-        # Flush remaining stack items as statements
-        for item in stack:
-            s = str(item)
-            if s not in ("None", "_exc_info", "_exc_match", "True", "False"):
-                lines.append(s)
-
-        return lines
+        return [ln for ln in self._render_handler_section(sub_instrs, 0) if ln.strip()]
 
     def _emit_deferred_finally(self, merge_offset: int, header_indent: int = -1) -> None:
         """
@@ -2731,6 +2710,7 @@ class DecompilerGeneric(DecompilerBase):
         sub._deferred_except_lines = {}
         sub._pending_finally_merge = None
         sub._nop_to_push_exc = {}
+        sub._nop_to_finally_merge = {}
         # Sync while loop headers for continue detection in sub-decompiler fallback logic
         sub._while_header_targets = getattr(self, "_while_header_targets", {})
         sub._while_body_offsets = set()
@@ -4355,7 +4335,10 @@ class DecompilerGeneric(DecompilerBase):
                 # scanning for the nearest PUSH_EXC_INFO if the map is empty.
                 nop_map = getattr(self, "_nop_to_push_exc", {})
                 next_pei = nop_map.get(instr.offset, -1)
-                if next_pei < 0:
+                # try/finally with no except: the handler is only a re-raise wrapper,
+                # so the prescan recorded where the finally body starts instead.
+                finally_only = getattr(self, "_nop_to_finally_merge", {}).get(instr.offset)
+                if next_pei < 0 and finally_only is None:
                     for ins in self.instructions:
                         if ins.opname == "PUSH_EXC_INFO" and ins.offset > instr.offset:
                             if ins.offset not in getattr(self, "_suppress_push_exc_offsets", ()):
@@ -4391,6 +4374,8 @@ class DecompilerGeneric(DecompilerBase):
                                 if isinstance(t, int) and t > instr.offset and t < block_end:
                                     block_end = t
                         self.blocks.append((block_end, "try_body"))
+                    elif finally_only is not None:
+                        self.blocks.append((finally_only, "try_body"))
                 return
 
         # while True: — NOP is the body_start of a while-True loop.

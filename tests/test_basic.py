@@ -543,3 +543,78 @@ class TestDeterministicConstants(unittest.TestCase):
             self.assertEqual(len(outputs), 1, f"output varies with PYTHONHASHSEED: {outputs}")
         finally:
             os.unlink(pyc)
+
+
+@unittest.skipIf(sys.version_info[:2] in ((3, 10), (3, 11)), "3.10/3.11 try/finally decompilation has known failures")
+class TestTryFinallyWithoutExcept(unittest.TestCase):
+    """A try/finally with no except clause keeps its finally body clean (#129)."""
+
+    def assert_clean(self, out):
+        for junk in ("code object", "<code", "# PUSH_NULL", "# LOAD", "# CALL"):
+            self.assertNotIn(junk, out)
+
+    def test_issue_repro_genexpr_after_finally(self):
+        out = decompile(
+            "def t(xs):\n    try:\n        a = xs.go()\n    finally:\n        xs.close()\n"
+            "    return sum(xs)\n")
+        self.assert_clean(out)
+        assert_contains(out, "try:", "a = xs.go()", "finally:", "xs.close()", "return sum(xs)")
+
+    def test_finally_with_genexpr_lambda_and_def(self):
+        src = (
+            "def t(xs):\n    try:\n        a = 1\n    finally:\n"
+            "        total = sum(x for x in xs)\n        f = lambda y: y + 1\n"
+            "        def g(z):\n            return z * 2\n    return a\n")
+        out = decompile(src)
+        self.assert_clean(out)
+        compile(out, "<decompiled>", "exec")
+        assert_contains(out, "finally:", "total = ")
+
+    def test_module_level_try_finally(self):
+        out = decompile("try:\n    x = 1\nfinally:\n    print('done')\nprint('after')\n")
+        self.assert_clean(out)
+        assert_contains(out, "try:", "x = 1", "finally:", "print('done')", "print('after')")
+        self.assertLess(out.index("finally:"), out.index("print('after')"))
+
+    def test_sequential_try_finally_blocks_keep_their_own_bodies(self):
+        # The first finally body is empty / a prefix of the second; it must not cut
+        # the second one short.
+        for first in ("pass", "a()"):
+            src = (
+                "def f(x):\n    try:\n        a = 1\n    finally:\n        " + first + "\n"
+                "    try:\n        b = 2\n    finally:\n        a()\n        b()\n    print(x)\n")
+            out = decompile(src)
+            self.assert_clean(out)
+            compile(out, "<decompiled>", "exec")
+            tail = out[out.rindex("finally:"):]
+            self.assertIn("a()", tail.split("print(x)")[0])
+            self.assertIn("b()", tail.split("print(x)")[0])
+            lines = [ln for ln in out.splitlines() if ln.strip() in ("b()", "print(x)")]
+            self.assertGreater(len(lines[0]) - len(lines[0].lstrip()), len(lines[1]) - len(lines[1].lstrip()))
+
+    def test_empty_finally_body_is_pass(self):
+        out = decompile("def t():\n    try:\n        x = 1\n    finally:\n        pass\n    return 2\n")
+        self.assert_clean(out)
+        compile(out, "<decompiled>", "exec")
+
+    def test_behavior_is_preserved(self):
+        import contextlib
+        import io
+
+        src = (
+            "log = []\n"
+            "def t(xs):\n    try:\n        a = list(xs)\n    finally:\n        log.append('closed')\n"
+            "    return sum(x for x in a)\n"
+            "def u():\n    try:\n        raise ValueError('x')\n    finally:\n        log.append('u')\n"
+            "print(t([1, 2, 3]))\n"
+            "try:\n    u()\nexcept ValueError:\n    pass\n"
+            "print(log)\n")
+
+        def run(code):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                exec(code, {"__name__": "__main__"})
+            return out.getvalue()
+
+        decompiled = decompile(src)
+        self.assertEqual(run(compile(decompiled, "<decompiled>", "exec")), run(compile(src, "<original>", "exec")))
