@@ -737,3 +737,44 @@ class TestEarlyExitsInTryFinally(unittest.TestCase):
         self.assert_same_behavior(
             "def g(rows):\n    for r in rows:\n        for c in r:\n            if c > 2:\n                return c\n"
             "    return 0\nprint(g([[1, 2], [3, 4]]), g([[1]]))\n")
+
+
+@unittest.skipIf(sys.version_info[:2] in ((3, 10), (3, 11)), "3.10/3.11 try/finally decompilation has known failures")
+class TestFinallyAfterLoopBody(unittest.TestCase):
+    """try/except/finally whose body ends in a loop keeps its finally block (#132).
+
+    On 3.12 the compiler leaves a NOP between the loop and the inline finally body,
+    which hid the finally and produced unparsable output.
+    """
+
+    SRC = (
+        "def run(data, log):\n    try:\n        for d in data:\n            log.append(d)\n"
+        "    except KeyError as e:\n        log.append(e)\n    except ValueError as e:\n        log.append((d, e))\n"
+        "    except Exception:\n        pass\n    finally:\n        log.append('finally')\n    log.append('after')\n"
+        "def items(exc):\n    yield 1\n    if exc is not None:\n        raise exc\n"
+        "for exc in (None, KeyError('k'), ValueError('v'), RuntimeError('r')):\n"
+        "    out = []\n    run(items(exc), out)\n    print(out)\n"
+    )
+
+    def test_finally_block_is_kept(self):
+        out = decompile(self.SRC)
+        compile(out, "<decompiled>", "exec")
+        assert_contains(out, "try:", "except KeyError as e:", "except ValueError as e:", "except Exception:", "finally:")
+        self.assertLess(out.index("finally:"), out.index("'after'"))
+
+    def test_behavior_is_preserved(self):
+        # Normal completion, and an iterator that raises into each except clause
+        # (KeyError, ValueError, and one only `except Exception` catches).
+        import contextlib
+        import io
+
+        def run(code):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                exec(code, {"__name__": "__main__"})
+            return buf.getvalue()
+
+        out = decompile(self.SRC)
+        expected = run(compile(self.SRC, "<original>", "exec"))
+        self.assertEqual(expected.count("'finally'"), 4)
+        self.assertEqual(run(compile(out, "<decompiled>", "exec")), expected)

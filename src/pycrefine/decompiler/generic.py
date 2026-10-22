@@ -2338,11 +2338,16 @@ class DecompilerGeneric(DecompilerBase):
             if e.target in real_push_exc:
                 merge = None
                 body_end = _body_end_by_target[e.target]
+                after_body = self._merge_after_nops(body_end)
                 if body_end in self._finally_merge_offsets:
                     # Already a known finally-merge label.
                     merge = body_end
                 elif e.end in self._finally_merge_offsets:
                     merge = e.end
+                elif after_body is not None:
+                    # Only the no-op that marks the end of the try body lies in between
+                    # (a body ending in a loop leaves one before the inline finally).
+                    merge = after_body
                 else:
                     # Case 1: FOR_ITER loop wraps the try body.
                     # Use the FOR_ITER's jump target (loop-exit) as the merge.
@@ -2662,6 +2667,19 @@ class DecompilerGeneric(DecompilerBase):
                 continue
             for k in range(start, end):
                 self._finally_body_suppress.add(self.instructions[k].offset)
+
+    def _merge_after_nops(self, offset: int) -> Optional[int]:
+        """
+        The finally-merge label reached from *offset* by skipping nothing but NOPs, or None.
+        """
+        for ins in self.instructions:
+            if ins.offset < offset:
+                continue
+            if ins.offset in self._finally_merge_offsets:
+                return ins.offset
+            if ins.opname != "NOP":
+                return None
+        return None
 
     def _handler_copy_instrs(self, wrapper_off: int) -> list:
         """
