@@ -91,6 +91,8 @@ The package version lives in one place, `pycrefine.__version__`; `pyproject.toml
 
 Static checks (a pylint ratchet that blocks only new findings, and strict mypy on the small modules) are described in [docs/linting.md](docs/linting.md).
 
+Releases to PyPI and TestPyPI are published by the `Release` workflow when a GitHub release is published; see [docs/releasing.md](docs/releasing.md).
+
 ### Example Decompilation
 
 **Original Source** (`example.py`):
