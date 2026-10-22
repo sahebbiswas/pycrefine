@@ -875,3 +875,47 @@ class TestImplicitReturnAfterBlocks(unittest.TestCase):
         self._assert_same_ast(
             "def f(xs):\n    for x in xs:\n        for y in x:\n            try:\n                return y\n"
             "            finally:\n                print('c')\n    print('none')\n")
+
+@unittest.skipIf(sys.version_info[:2] in ((3, 10), (3, 11)), "3.10/3.11 have known control-flow failures")
+class TestTernaryWithBooleanBranches(unittest.TestCase):
+    """Conditional expressions whose branches use `and`/`or` (#115)."""
+
+    SRC = (
+        "def g1(a, b, f):\n    print((a or b) if f else (a and b))\n"
+        "def g2(a, b, f, xs):\n    out = []\n    for x in xs:\n        r = (a or b) if f else (a and b)\n"
+        "        out.append((r, x))\n        a = x\n    return out\n"
+        "def g3(a, b, c, f):\n    return (a and b or c) if f else not a\n"
+        "def g4(a, b, f):\n    r = a if f else (a or b)\n    return r\n"
+        "def h1(a, b, c, f):\n    return (a or b) if f else c\n"
+        "def h3(a, b, c, f):\n    x = (a and b or c) if f else a\n    return x\n"
+        "def k(a, b, f):\n    x = foo(1, a if f else b)\n    return x\n"
+        "def foo(*args):\n    return args\n"
+        "for a in (0, 1, ''):\n    for b in (0, 2):\n        for f in (0, 1):\n"
+        "            g1(a, b, f)\n            print(g2(a, b, f, [3, 0]), g3(a, b, 5, f), g4(a, b, f),\n"
+        "                  h1(a, b, 7, f), h3(a, b, 9, f), k(a, b, f))\n"
+    )
+
+    def test_output_compiles(self):
+        compile(decompile(self.SRC), "<decompiled>", "exec")
+
+    def test_behavior_is_preserved(self):
+        import contextlib
+        import io
+
+        def run(code):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                exec(code, {"__name__": "__main__"})
+            return buf.getvalue()
+
+        out = decompile(self.SRC)
+        self.assertEqual(run(compile(out, "<decompiled>", "exec")), run(compile(self.SRC, "<original>", "exec")))
+
+    def test_merged_ternary_is_rendered_as_one_expression(self):
+        out = decompile("def g2(a, b, f):\n    r = (a or b) if f else (a and b)\n    print(r)\n")
+        self.assertRegex(out, r"r = \(a or b\) if f else \(a and b\)")
+
+    def test_ternary_argument_keeps_earlier_arguments(self):
+        out = decompile("def k(a, b, f):\n    x = foo(1, a if f else b)\n    return x\n")
+        self.assertNotIn("func(", out)
+        self.assertEqual(out.count("foo(1, "), 1 if "if f else" in out else 2)
