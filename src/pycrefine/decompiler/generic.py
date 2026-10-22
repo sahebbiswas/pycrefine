@@ -7,6 +7,7 @@ import types
 from typing import Any, Dict, List, Optional, Tuple
 from .._constants import (
     _AUG_ASSIGN_MAP,
+    _VALUE_OPS,
     _COMPOUND_EXPR_OPS,
     _COMPOUND_SKIP,
     _GENERIC_SKIP_OPS,
@@ -47,6 +48,22 @@ from ..postprocess import collapse_chained_comparisons, post_process_source
 # constant itself; tests/test_basic.py (TestInlinedBuiltinCalls) checks it against the
 # running 3.14's table, so a reordering in CPython fails the suite instead of passing silently.
 _COMMON_CONSTANT_NAMES = ("AssertionError", "NotImplementedError", "tuple", "all", "any")
+
+def _owned_handlers(handler: int, entries: list) -> set:
+    """
+    *handler* and the handlers of everything nested in the code it protects: a try in a
+    with body is protected by its own handler, whose code the with's handler protects.
+    """
+    owned = {handler}
+    targets = {e.target for e in entries}
+    grew = True
+    while grew:
+        inner = {t for t in targets - owned
+                 if any(e.target in owned and e.start <= t < e.end for e in entries)}
+        owned |= inner
+        grew = bool(inner)
+    return owned
+
 
 # Instructions that make up a value-context `and`/`or` inside an expression.
 _BOOLOP_PARTS = frozenset(("JUMP_IF_TRUE_OR_POP", "JUMP_IF_FALSE_OR_POP", "COPY", "TO_BOOL",
@@ -114,6 +131,9 @@ class DecompilerGeneric(DecompilerBase):
         self._finally_merge_offsets: set = set()
         self._exc_handler_jump_offsets: set = set()
         self._with_exit_suppress_offsets: set = set()
+        self._with_body_end: dict = {}  # first protected offset of a with body -> where it ends
+        self._open_with_sentinels: list = []  # 3.14: (body end, body start) of open with bodies
+        self._with_exit_owner: dict = {}  # POP_TOP ending an inlined __exit__ call -> its with's body start
         self._finally_body_suppress: set = set()
         self._push_exc_to_finally_merge: dict = {}
         self._deferred_finally_lines: dict = {}
@@ -190,6 +210,7 @@ class DecompilerGeneric(DecompilerBase):
         self._while_header_targets = {}
         self._prescan_while_loops()
         self._prescan_try_structure()
+        self._prescan_with_exits()
         self._prescan_ternaries()
         self._prescan_compound_conds()
         self._prescan_value_boolops()
@@ -2410,18 +2431,7 @@ class DecompilerGeneric(DecompilerBase):
                 continue
             # The JB must be preceded by POP_EXCEPT or handler cleanup within 6 steps
             jb_idx = off2idx.get(jb.offset, -1)
-            preceded_by_handler_exit = False
-            for back in range(1, 7):
-                check_idx = jb_idx - back
-                if check_idx < 0:
-                    break
-                if instrs[check_idx].opname in _TRY_HANDLER_EXIT_OPS:
-                    preceded_by_handler_exit = True
-                    break
-                # Stop early if we cross a non-trivial boundary
-                if instrs[check_idx].opname in ("CALL", "BINARY_OP", "COMPARE_OP"):
-                    break
-            if preceded_by_handler_exit and not _is_with_cleanup_jump(instrs, jb_idx):
+            if self._handler_exit_before(jb_idx) and not _is_with_cleanup_jump(instrs, jb_idx):
                 jb_targets[target] += 1
 
         for target_off, count in jb_targets.items():
@@ -2454,17 +2464,7 @@ class DecompilerGeneric(DecompilerBase):
             if not has_pei:
                 continue
             jb_idx = off2idx.get(jb.offset, -1)
-            preceded_by_handler_exit = False
-            for back in range(1, 7):
-                check_idx = jb_idx - back
-                if check_idx < 0:
-                    break
-                if instrs[check_idx].opname in _TRY_HANDLER_EXIT_OPS:
-                    preceded_by_handler_exit = True
-                    break
-                if instrs[check_idx].opname in ("CALL", "BINARY_OP", "COMPARE_OP"):
-                    break
-            if preceded_by_handler_exit and not _is_with_cleanup_jump(instrs, jb_idx):
+            if self._handler_exit_before(jb_idx) and not _is_with_cleanup_jump(instrs, jb_idx):
                 self._exc_handler_jump_offsets.add(jb.offset)
                 if not hasattr(self, "_exc_handler_continue_offsets"):
                     self._exc_handler_continue_offsets = set()
@@ -2736,7 +2736,9 @@ class DecompilerGeneric(DecompilerBase):
             if ins.opname != "BEFORE_WITH":
                 continue
             for j in range(i + 1, min(i + _MAX_WITH_EXIT_SEARCH_WINDOW, n)):
-                if instrs[j].opname == "LOAD_CONST" and instrs[j].argval is None:
+                if instrs[j].opname == "LOAD_CONST" and instrs[j].argval is None and not (
+                        instrs[j - 1].opname.startswith(_VALUE_OPS) and not instrs[j].is_jump_target):
+                    # (after a value: the arguments of a user call such as f(None, None, None))
                     k = j + 1
                     while k < n and instrs[k].opname in _TRY_SKIP_NOP:
                         k += 1
@@ -2772,6 +2774,128 @@ class DecompilerGeneric(DecompilerBase):
         while k < len(instrs) and instrs[k].opname in ("NOP", "CACHE"):
             k += 1
         return min(handler, instrs[k].offset + 1) if k < len(instrs) else handler
+
+    def _prescan_with_exits(self) -> None:
+        """
+        3.11+: find every inlined ``__exit__`` call of each ``with`` block and where the
+        block's body ends.
+
+        Each way out of a ``with`` body (falling off the end, ``return``, ``break``,
+        ``continue``) is compiled as ``[SWAP...] LOAD_CONST None x3; CALL; POP_TOP``
+        followed by the exit itself; the SWAPs move a return value past the exit
+        function. Only the exit itself is source code, so all those calls are hidden
+        (``_with_exit_suppress_offsets``). The body ends after the last of them, or,
+        when that one carries a return value, at the handler, so the `return` stays in
+        the block (``_with_body_end``, keyed by the first offset the handler protects).
+        """
+        self._with_body_end = {}
+        self._with_exit_owner = {}
+        instrs = self.instructions
+        try:
+            entries = list(dis.Bytecode(self.code_obj).exception_entries)
+        except (AttributeError, IndexError, TypeError, ValueError):
+            return
+        by_offset = {ins.offset: k for k, ins in enumerate(instrs)}
+        handlers = {e.target for e in entries
+                    if e.target in by_offset and by_offset[e.target] + 1 < len(instrs)
+                    and instrs[by_offset[e.target]].opname == "PUSH_EXC_INFO"
+                    and instrs[by_offset[e.target] + 1].opname == "WITH_EXCEPT_START"}
+        for handler in handlers:
+            starts = [e.start for e in entries if e.target == handler]
+            if not starts:
+                continue
+            body_start = min(starts)
+            # The body's normal exit follows its last protected range of ordinary code
+            # (an exit before it is an early one: `continue` in `if c: continue`, with
+            # more body after). Handler code, which 3.11+ lays out after all ordinary
+            # code, can be protected too (an inner try's handlers): it does not count.
+            cold = min((x.offset for x in instrs if x.opname == "PUSH_EXC_INFO" and x.offset > body_start),
+                       default=handler)
+            # Code in a try nested in the body is protected by that try's handler, whose
+            # own code the with's handler protects: those ranges belong to the body too.
+            body_ranges = [e for e in entries if e.target in _owned_handlers(handler, entries) and e.start < cold]
+            limit = max((e.end for e in body_ranges), default=handler)
+            # The normal exit starts right there (past NOPs), or where a jump from the
+            # body lands (after an `if` that ends the body). Other exits are early ones,
+            # or sit in handler code (`except E: continue` leaves the with too).
+            starts = {limit} | {self._get_jump_target(x) for x in instrs if "JUMP" in x.opname
+                                and any(e.start <= x.offset < e.end for e in body_ranges)}
+            normal_at = {self._skip_nops(by_offset[t]) for t in starts if t in by_offset and t < cold}
+            last = None
+            k = by_offset.get(body_start, len(instrs))
+            while k < len(instrs) and instrs[k].offset < handler:
+                seq_end = self._with_exit_call_at(k)
+                if seq_end is None:
+                    k += 1
+                    continue
+                self._with_exit_suppress_offsets.update(x.offset for x in instrs[k:seq_end])
+                # In nested with blocks the outer body's range covers the inner exits
+                # too: an exit belongs to the innermost block (the latest body start).
+                exit_off = instrs[seq_end - 1].offset
+                if self._with_exit_owner.get(exit_off, -1) < body_start:
+                    self._with_exit_owner[exit_off] = body_start
+                if k in normal_at and instrs[k].offset < cold:
+                    last = (k, seq_end)
+                k = seq_end
+            if last is None:
+                # The body never exits normally (it always raises, or every exit is an
+                # early one): it ends with its last protected code.
+                self._with_body_end[body_start] = limit
+                continue
+            carries_value = instrs[last[0]].opname == "SWAP"
+            end = handler if carries_value or last[1] >= len(instrs) else instrs[last[1]].offset
+            self._with_body_end[body_start] = end
+
+    def _skip_nops(self, k: int) -> int:
+        """The index of the first instruction at or after *k* that is not a NOP/CACHE."""
+        while k < len(self.instructions) and self.instructions[k].opname in ("NOP", "CACHE"):
+            k += 1
+        return k
+
+    def _handler_exit_before(self, jb_idx: int) -> bool:
+        """
+        Whether the jump at *jb_idx* leaves an exception handler: POP_EXCEPT (or other
+        handler clean-up) comes within a few instructions before it. Inlined
+        ``__exit__`` calls of enclosing `with` blocks between them are skipped: an
+        `except E: continue` inside a `with` in a loop exits the with on its way back.
+        """
+        instrs = self.instructions
+        start = jb_idx
+        while start >= 5 and start == self._with_exit_call_at(start - 5):
+            start -= 5
+        for back in range(1, 7):
+            check_idx = start - back
+            if check_idx < 0:
+                return False
+            if instrs[check_idx].opname in _TRY_HANDLER_EXIT_OPS:
+                return True
+            # Stop early if we cross a non-trivial boundary
+            if instrs[check_idx].opname in ("CALL", "BINARY_OP", "COMPARE_OP"):
+                return False
+        return False
+
+    def _with_exit_call_at(self, k: int) -> Optional[int]:
+        """
+        Index just past an inlined ``__exit__(None, None, None)`` call starting at *k*, or None.
+
+        The shape is ``[SWAP...] LOAD_CONST None x3; CALL 2|3; POP_TOP``; the SWAPs move
+        a return value past the exit function. A user call such as ``f(None, None, None)``
+        has the same tail, but its callee is loaded right before the arguments, while
+        an exit call follows the end of a statement (or is a jump target).
+        """
+        instrs = self.instructions
+        m = k
+        while m < len(instrs) and instrs[m].opname == "SWAP":
+            m += 1
+        seq = instrs[m:m + 5]
+        shape = tuple(x.opname for x in seq)
+        if shape != ("LOAD_CONST", "LOAD_CONST", "LOAD_CONST", "CALL", "POP_TOP"):
+            return None
+        if any(x.argval is not None for x in seq[:3]) or seq[3].arg not in (2, 3):
+            return None
+        if m == k and m > 0 and not seq[0].is_jump_target and instrs[m - 1].opname.startswith(_VALUE_OPS):
+            return None  # the callee and NULL of an ordinary call precede its arguments
+        return m + 5
 
     def _find_finally_copies(self, handler_body: list, lo: int, hi: int) -> list:
         """
@@ -3073,6 +3197,8 @@ class DecompilerGeneric(DecompilerBase):
         sub._exc_handler_jump_offsets = getattr(self, "_exc_handler_jump_offsets", set())
         sub._exc_handler_continue_offsets = getattr(self, "_exc_handler_continue_offsets", set())
         sub._with_exit_suppress_offsets = set()
+        sub._with_body_end = {}
+        sub._with_exit_owner = {}
         sub._finally_body_suppress = set()
         sub._handler_section_suppress = set()
         sub._wrapper_body_suppress = set()
@@ -3261,9 +3387,6 @@ class DecompilerGeneric(DecompilerBase):
             if self.stack:
                 self.stack.pop()
             return
-        # Suppress BEFORE_WITH __exit__(None,None,None) epilogue instructions
-        if instr.offset in getattr(self, "_with_exit_suppress_offsets", ()):
-            return
         # When we reach a finally-merge label, emit the pre-decompiled except
         # handlers + finally body in source order, then continue normally.
         # This check MUST come before _finally_body_suppress since the merge-label
@@ -3282,6 +3405,10 @@ class DecompilerGeneric(DecompilerBase):
             # (which means this instruction is the start of a suppressed body).
             if instr.offset in getattr(self, "_finally_body_suppress", ()):
                 return
+        # Suppress BEFORE_WITH __exit__(None,None,None) epilogue instructions. This comes
+        # after the merge-label check: a try inside a with merges right at the exit call.
+        if instr.offset in getattr(self, "_with_exit_suppress_offsets", ()):
+            return
         # Suppress inlined finally-body instructions (deferred; emitted at merge label)
         if instr.offset in getattr(self, "_finally_body_suppress", ()):
             return
@@ -3791,6 +3918,45 @@ class DecompilerGeneric(DecompilerBase):
                         break
                     _fb.add(self.instructions[k].offset)
                 self._finally_body_suppress = _fb
+            self._suppress_with_exits_39(instr.offset, t_idx)
+
+    def _suppress_with_exits_39(self, setup_offset: int, handler_idx: int) -> None:
+        """
+        3.9/3.10: hide the `__exit__` calls the compiler inlines into a `with` body, and
+        the exception handler that follows it.
+
+        Every way out of the body (`return`, `break`, `continue`, falling off the end)
+        is ``POP_BLOCK; [ROT_TWO;] LOAD_CONST None; DUP_TOP; DUP_TOP; CALL_FUNCTION 3;
+        POP_TOP`` followed by the exit itself. Only the exit is source code. The handler
+        (``WITH_EXCEPT_START ... POP_EXCEPT; POP_TOP`` and a jump back into the code
+        after the block) runs only on exceptions and has no source of its own.
+        """
+        instrs = self.instructions
+        setup_idx = next((k for k, x in enumerate(instrs) if x.offset == setup_offset), handler_idx)
+        hidden = self._finally_body_suppress
+        exit_call = ("LOAD_CONST", "DUP_TOP", "DUP_TOP", "CALL_FUNCTION", "POP_TOP")
+        for k in range(setup_idx + 1, handler_idx):
+            if instrs[k].opname != "POP_BLOCK":
+                continue
+            m = k + 1
+            if m < len(instrs) and instrs[m].opname == "ROT_TWO":
+                m += 1
+            seq = instrs[m:m + len(exit_call)]
+            if (tuple(x.opname for x in seq) == exit_call and seq[0].argval is None
+                    and seq[3].arg == 3):
+                hidden.update(x.offset for x in instrs[k:m + len(exit_call)])
+        if not 0 <= handler_idx < len(instrs) or instrs[handler_idx].opname != "WITH_EXCEPT_START":
+            return
+        end = next((n for n in range(handler_idx, len(instrs)) if instrs[n].opname == "POP_EXCEPT"), None)
+        if end is None:
+            return
+        end += 1  # the POP_TOP that drops the exit function
+        if end < len(instrs) and instrs[end].opname == "POP_TOP":
+            end += 1
+        if (end < len(instrs) and instrs[end].opname in ("JUMP_ABSOLUTE", "JUMP_FORWARD")
+                and not instrs[end].is_jump_target):
+            end += 1  # the handler's own jump back to the code after the block
+        hidden.update(x.offset for x in instrs[handler_idx:end])
 
     def _op_before_with(self, instr: BytecodeInstruction):
         opname = instr.opname
@@ -3828,7 +3994,12 @@ class DecompilerGeneric(DecompilerBase):
             # The with-exit PUSH_EXC_INFO is NOT in _finally_push_offsets
             # (it handles the __exit__ call, not user finally: code).
         ]
-        if with_exc_offsets:
+        body_end = self._with_body_end.get(self.instructions[self.pc].offset) if self.pc < len(self.instructions) else None
+        if body_end is None and self.pc > 0:
+            body_end = self._with_body_end.get(self.instructions[self.pc - 1].offset)
+        if body_end is not None:
+            self.blocks.append((body_end, "with"))
+        elif with_exc_offsets:
             # Use the last (highest-offset) PUSH_EXC_INFO — that is the one
             # that handles the __exit__ on exceptional exit from the with body.
             self.blocks.append((max(with_exc_offsets), "with"))

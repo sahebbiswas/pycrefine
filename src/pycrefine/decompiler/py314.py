@@ -1,5 +1,6 @@
 """Decompiler backend for CPython 3.13/3.14 bytecode."""
 import dis
+from .._constants import _VALUE_OPS
 from .py311 import Decompiler311Plus
 from ..instructions import BytecodeInstruction
 
@@ -13,6 +14,25 @@ class Decompiler314(Decompiler311Plus):
     Python 3.14+ specific decompiler logic.
     Handles the new LOAD_SPECIAL opcodes and structure for with statements.
     """
+
+    def _remove_with_sentinel(self, with_id: int) -> None:
+        """Remove the stack sentinel of the with body that starts at *with_id*, if present."""
+        self.stack = [item for item in self.stack
+                      if not (isinstance(item, tuple) and len(item) > 2
+                              and item[0] == "_with_info" and item[2] == with_id)]
+
+    def _close_blocks(self, offset: int):
+        """Close blocks as usual, then drop the stack sentinel of every `with` body that ended."""
+        super()._close_blocks(offset)
+        still_open = []
+        for end, with_id in getattr(self, "_open_with_sentinels", []):
+            if offset >= end:
+                # A body that only raises or returns never runs its __exit__ call inline,
+                # so nothing else removes the sentinel it left on the stack.
+                self._remove_with_sentinel(with_id)
+            else:
+                still_open.append((end, with_id))
+        self._open_with_sentinels = still_open
 
     def _handle_instruction(self, instr: BytecodeInstruction):
         """
@@ -44,6 +64,18 @@ class Decompiler314(Decompiler311Plus):
 
         opname = instr.opname
 
+        # Inlined __exit__ calls at the exits of a with body (see _prescan_with_exits)
+        if instr.offset in getattr(self, "_with_exit_suppress_offsets", ()):
+            owner = self._with_exit_owner.get(instr.offset)
+            if owner is not None:
+                self._remove_with_sentinel(owner)  # this exit left the with body
+            if (instr.offset in getattr(self, "_finally_merge_offsets", ())
+                    or instr.offset in getattr(self, "_except_only_merge_offsets", ())):
+                # A try statement that ends the with body merges at its exit call: the
+                # generic handler emits the deferred handlers/finally there, then hides
+                # the call itself.
+                super()._handle_instruction(instr)
+            return
         # Suppress normal-path __exit__ body calls (identified by range scan)
         if getattr(self, "_with_exit_suppress", set()) and instr.offset in getattr(self, "_with_exit_suppress"):
             return
@@ -67,10 +99,12 @@ class Decompiler314(Decompiler311Plus):
 
                     ctx_mgr = str(self.stack.pop()) if self.stack else "unknown_ctx"
                     # Push internal sentinel representing EX and CM that stay on stack
-                    self.stack.append(("_with_info", ctx_mgr))
+                    body_start = self.instructions[self.pc + 5].offset if self.pc + 5 < len(self.instructions) else instr.offset
+                    self.stack.append(("_with_info", ctx_mgr, body_start))
 
                     self.pc += 5
                     next_instr = self.instructions[self.pc] if self.pc < len(self.instructions) else None
+                    body_end = self._with_body_end.get(next_instr.offset) if next_instr is not None else None
                     as_name = ""
                     if next_instr and next_instr.opname in ("STORE_NAME", "STORE_FAST", "STORE_GLOBAL", "STORE_ATTR"):
                         as_name = f" as {next_instr.argval}"
@@ -105,8 +139,13 @@ class Decompiler314(Decompiler311Plus):
                     except (AttributeError, IndexError, TypeError, ValueError):
                         pass
 
+                    if body_end is not None:
+                        # The prescan knows where the body really ends (after its last
+                        # __exit__ call, or at the handler when that call carries a return).
+                        try_end, exit_body_start = body_end, None
                     if try_end is not None:
                         self.blocks.append((try_end, "with_body"))
+                        self._open_with_sentinels.append((try_end, body_start))
                     if exit_body_start is not None:
                         if not hasattr(self, "_with_exit_suppress"):
                             self._with_exit_suppress = set()
@@ -128,8 +167,12 @@ class Decompiler314(Decompiler311Plus):
 
         # Suppress normal-path cleanup calls: LOAD_CONST None (x3) + CALL 3 + POP_TOP
         elif opname == "LOAD_CONST" and instr.argval is None:
-            # Check if this is the start of a 3x None sequence
-            if self.pc + 3 < len(self.instructions):
+            # Check if this is the start of a 3x None sequence. Not after a value: then
+            # it is the arguments of a user call such as f(None, None, None).
+            prev = self.instructions[self.pc - 2] if self.pc >= 2 else None
+            after_value = (prev is not None and not instr.is_jump_target
+                           and prev.opname.startswith(_VALUE_OPS))
+            if not after_value and self.pc + 3 < len(self.instructions):
                 seq = self.instructions[self.pc: self.pc + 4]
                 if (seq[0].opname == "LOAD_CONST" and seq[0].argval is None and
                     seq[1].opname == "LOAD_CONST" and seq[1].argval is None and

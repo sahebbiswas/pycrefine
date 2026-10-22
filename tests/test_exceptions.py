@@ -109,11 +109,10 @@ class TestExceptions(unittest.TestCase):
     def test_with_explicit_return_none(self):
         src = "def f():\n    with open('f'):\n        return None\n"
         out = decompile(src)
-        if sys.version_info < (3, 11):
-            self.assertIn("return None", out)
-            return
         compile(out, "<decompiled>", "exec")
         self.assertIn("with open('f'):", out)
+        if sys.version_info < (3, 11):
+            self.assertIn("return None", out)
         # On 3.11+ a final `return None` inside the `with` compiles to exactly the
         # bytecode of `pass` (the implicit return follows the block either way), so
         # both renderings are correct; the implicit one is dropped (#140).
