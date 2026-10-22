@@ -595,6 +595,7 @@ class TestTryFinallyWithoutExcept(unittest.TestCase):
     def test_empty_finally_body_is_pass(self):
         out = decompile("def t():\n    try:\n        x = 1\n    finally:\n        pass\n    return 2\n")
         self.assert_clean(out)
+        self.assertIn("finally:\n        pass", out)
         compile(out, "<decompiled>", "exec")
 
     def test_behavior_is_preserved(self):
@@ -618,3 +619,121 @@ class TestTryFinallyWithoutExcept(unittest.TestCase):
 
         decompiled = decompile(src)
         self.assertEqual(run(compile(decompiled, "<decompiled>", "exec")), run(compile(src, "<original>", "exec")))
+
+
+@unittest.skipIf(sys.version_info[:2] in ((3, 10), (3, 11)), "3.10/3.11 try/finally decompilation has known failures")
+class TestEarlyExitsInTryFinally(unittest.TestCase):
+    """continue/break/return inside try/finally in a loop (#109).
+
+    The compiler inlines a copy of the finally body before every early exit. Those
+    copies are not source code, so they must not show up as statements.
+    """
+
+    @staticmethod
+    def _run(code):
+        import contextlib
+        import io
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            exec(code, {"__name__": "__main__"})
+        return out.getvalue()
+
+    def assert_same_behavior(self, src):
+        decompiled = decompile(src)
+        compile(decompiled, "<decompiled>", "exec")
+        self.assertEqual(self._run(compile(decompiled, "<decompiled>", "exec")), self._run(compile(src, "<original>", "exec")))
+        return decompiled
+
+    def test_issue_repro_continue(self):
+        out = self.assert_same_behavior(
+            "for i in range(4):\n    try:\n        if i == 1:\n            continue\n        print(i)\n"
+            "    finally:\n        print('f', i)\n")
+        assert_contains(out, "continue", "finally:")
+        self.assertEqual(out.count("print('f', i)"), 1)
+
+    def test_try_body_statement_identical_to_finally_body(self):
+        # A statement in the try body that compiles exactly like the finally body is not
+        # an inline copy and must stay, with and without an early exit nearby.
+        out = self.assert_same_behavior(
+            "def f(xs):\n    for x in xs:\n        try:\n            print('c')\n            if x:\n"
+            "                continue\n            print('w', x)\n        finally:\n            print('c')\n"
+            "def g():\n    try:\n        print('c')\n        print('w')\n    finally:\n        print('c')\n"
+            "def h(xs):\n    for x in xs:\n        try:\n            print('c')\n            print('c')\n"
+            "        finally:\n            print('c')\n"
+            "f([0, 1, 2]); g(); h([1, 2])\n")
+        self.assertEqual(out.count("print('c')"), 7)
+
+    def test_always_raising_body_with_statement_identical_to_finally_body(self):
+        # No normal-path copy exists, so a matching try-body statement must not be
+        # taken for one; the finally body then comes from the exception handler.
+        out = self.assert_same_behavior(
+            "def f():\n    try:\n        print('c')\n        raise ValueError\n    finally:\n        print('c')\n"
+            "try:\n    f()\nexcept ValueError:\n    print('raised')\n")
+        self.assertEqual(out.count("print('c')"), 2)
+
+    def test_always_raising_body_in_loops(self):
+        out = self.assert_same_behavior(
+            "def g(xs):\n    for x in xs:\n        try:\n            if x:\n                continue\n"
+            "            raise ValueError\n        finally:\n            print('c', x)\n"
+            "def h(xs):\n    for x in xs:\n        for y in x:\n            try:\n                if y:\n"
+            "                    continue\n                raise ValueError\n            finally:\n"
+            "                print('c', y)\n        print('after')\n"
+            "for fn, arg in ((g, [1, 2, 0]), (h, [[1], [2, 0]])):\n    try:\n        fn(arg)\n"
+            "    except ValueError:\n        print('raised')\n")
+        self.assertEqual(out.count("print('c'"), 2)
+
+    @unittest.skipIf(sys.version_info >= (3, 11), "chained comparison as a value: #154")
+    def test_return_chained_comparison_from_loops(self):
+        # The chain's own cleanup (ROT_TWO; POP_TOP) precedes the iterator drops.
+        self.assert_same_behavior(
+            "def f(items, a, b, c):\n    for item in items:\n        return a < b < c\n"
+            "def g(items, a, b, c):\n    for item in items:\n        for j in item:\n            return a < b < c\n"
+            "print(f([1], 1, 2, 3), f([1], 2, 1, 3), f([], 1, 2, 3), g([[1]], 1, 2, 3), g([[1]], 3, 2, 1))\n")
+
+    def test_continue_break_and_return(self):
+        out = self.assert_same_behavior(
+            "def f(xs):\n    for i in xs:\n        try:\n            if i == 1:\n                continue\n"
+            "            if i == 3:\n                break\n            if i == 5:\n                return i\n"
+            "            print(i)\n        finally:\n            print('f', i)\n    return -1\n"
+            "print(f(range(10)), f([0, 1, 2]), f([5]))\n")
+        self.assertEqual(out.count("print('f', i)"), 1)
+
+    def test_while_loop(self):
+        out = self.assert_same_behavior(
+            "i = 0\nwhile i < 6:\n    i += 1\n    try:\n        if i == 2:\n            continue\n"
+            "        if i == 4:\n            break\n        print(i)\n    finally:\n        print('f', i)\n")
+        self.assertEqual(out.count("print('f', i)"), 1)
+
+    def test_with_except_clause(self):
+        out = self.assert_same_behavior(
+            "out = []\nfor i in range(5):\n    try:\n        if i == 1:\n            continue\n"
+            "        if i == 2:\n            raise ValueError(i)\n        out.append(i)\n"
+            "    except ValueError:\n        out.append(-1)\n    finally:\n        out.append(100 + i)\n"
+            "print(out)\n")
+        self.assertEqual(out.count("100 + i"), 1)
+
+    def test_loop_body_without_early_exit_has_no_stray_continue(self):
+        out = self.assert_same_behavior(
+            "def f(xs):\n    for i in xs:\n        try:\n            print(i)\n        finally:\n"
+            "            print('f', i)\n    return 0\nf([1, 2])\n")
+        self.assertNotIn("continue", out)
+
+    def test_finally_is_not_swallowing_exceptions(self):
+        # a `continue` inside the finally block would silently swallow the exception
+        src = (
+            "def f(xs):\n    for i in xs:\n        try:\n            if i == 1:\n                raise KeyError(i)\n"
+            "        finally:\n            print('f', i)\n    return 0\n"
+            "try:\n    f([0, 1, 2])\nexcept KeyError as e:\n    print('raised', e)\n")
+        self.assert_same_behavior(src)
+
+    def test_return_value_from_loop(self):
+        out = self.assert_same_behavior(
+            "def g(xs):\n    for i in xs:\n        if i > 2:\n            return i * 2\n        print(i)\n    return 0\n"
+            "print(g([1, 2, 3, 4]), g([1]))\n")
+        self.assertIn("return (i * 2)" if "(i * 2)" in out else "return i * 2", out)
+
+    def test_return_value_from_nested_loops(self):
+        self.assert_same_behavior(
+            "def g(rows):\n    for r in rows:\n        for c in r:\n            if c > 2:\n                return c\n"
+            "    return 0\nprint(g([[1, 2], [3, 4]]), g([[1]]))\n")

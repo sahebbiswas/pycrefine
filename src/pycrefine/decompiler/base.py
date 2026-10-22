@@ -25,13 +25,17 @@ class DecompilerBase:
     def _disassemble(self):
         """Convert code object bytecode into a list of BytecodeInstruction."""
         for instr in dis.get_instructions(self.code_obj):
+            starts_line = instr.starts_line
+            if isinstance(starts_line, bool):
+                # 3.13+: a flag, with the number in ``line_number``.
+                starts_line = getattr(instr, "line_number", None) if starts_line else None
             self.instructions.append(BytecodeInstruction(
                 opcode=instr.opcode,
                 opname=instr.opname,
                 arg=instr.arg,
                 argval=instr.argval,
                 offset=instr.offset,
-                starts_line=instr.starts_line,
+                starts_line=starts_line,
                 is_jump_target=instr.is_jump_target,
                 argrepr=instr.argrepr,
             ))

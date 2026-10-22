@@ -278,6 +278,12 @@ class DecompilerGeneric(DecompilerBase):
                         # Emitted here; the merge-label hook must not emit it again.
                         getattr(self, "_finally_merge_offsets", set()).discard(block_end)
                         self._emit_deferred_finally(block_end, self.indent_level)
+                    elif (block_end in getattr(self, "_finally_merge_offsets", ())
+                          and self.blocks and offset >= self.blocks[-1][0]):
+                        # A try body that always raises or exits ends where an enclosing
+                        # block (a loop) ends too: emit its finally before that one closes.
+                        self._finally_merge_offsets.discard(block_end)
+                        self._emit_deferred_finally(block_end, self.indent_level)
 
     # ------------------------------------------------------------------
     # Output helpers
@@ -1683,7 +1689,11 @@ class DecompilerGeneric(DecompilerBase):
             )
             head_is_nop = head_instr is not None and head_instr.opname == "NOP"
             head_is_for = head_instr is not None and head_instr.opname in _TRY_LOOP_HEADS
-
+            if head_instr is not None and head_instr.opname == "FOR_ITER":
+                # A loop headed by FOR_ITER is a `for` loop and has no `while` guard; a
+                # conditional jump in its body is an `if`, even one that lands right after
+                # the back-edge (`if c: return x` as the last statement).
+                continue
             guard_offset = -1
             guard_dist = float('inf')   # distance from body_start
             for ins in self.instructions:
@@ -1917,21 +1927,6 @@ class DecompilerGeneric(DecompilerBase):
                 if any(e.start < r_end and e.end > r_start for r_start, r_end in regions)
             }
 
-        def is_jump(ins):
-            return "JUMP" in ins.opname or ins.opname in ("FOR_ITER", "SEND")
-
-        def shape(seq, base, span):
-            # Compare control flow, not absolute offsets: a jump inside the body is
-            # relative to the body's start, a jump out of it is just "out".
-            out = []
-            for ins in seq:
-                if is_jump(ins) and isinstance(ins.argval, int):
-                    rel = ins.argval - base
-                    out.append((ins.opname, rel if 0 <= rel <= span else "out"))
-                else:
-                    out.append((ins.opname, ins.argval))
-            return out
-
         for k, ins in enumerate(instrs):
             if ins.opname != "PUSH_EXC_INFO" or (owned_by is not None and ins.offset not in owned_by):
                 continue
@@ -1944,10 +1939,11 @@ class DecompilerGeneric(DecompilerBase):
                 continue
             if not copy or instrs[k + 1 + len(copy)].opname != "RERAISE":
                 continue
-            start = copy[0].offset
-            span = instrs[k + 1 + len(copy)].offset - start
-            inline = [i for i in instrs if i.offset >= merge_off][:len(copy)]
-            if len(inline) == len(copy) and shape(inline, merge_off, span) == shape(copy, start, span):
+            # The inline copy has the same instructions as the handler copy. They are
+            # compared in normalized form because the optimizer may have specialized
+            # one copy and not the other (3.13+ borrowed and fused loads).
+            merge_idx = next((n for n, i in enumerate(instrs) if i.offset >= merge_off), None)
+            if merge_idx is not None and _match_finally_copy(instrs, merge_idx, _copy_signature(copy)) is not None:
                 return True
         return False
 
@@ -2420,7 +2416,16 @@ class DecompilerGeneric(DecompilerBase):
         for merge_off, targets in self._push_exc_to_finally_merge.items():
             if merge_off in getattr(self, "_except_only_merge_offsets", ()):
                 continue
-            body_end = self._finally_copy_end(merge_off)
+            # This try's finally handler is the first re-raise wrapper after its except
+            # handlers (3.11+ lays them out in that order).
+            owner = min((w for w in self._suppress_push_exc_offsets if w > max(targets)), default=None)
+            matched = self._match_finally_wrapper(merge_off, owner)
+            body_end = None if matched is None else matched[0]
+            if matched is not None:
+                # Every inline copy in this try body before the normal-path one sits at a
+                # continue/break/return.
+                try_start = min((e.start for e in _exc_entries if e.target in targets), default=merge_off)
+                self._suppress_copies(self._find_finally_copies(matched[1], try_start, merge_off))
             if body_end is None:
                 for ins in instrs:
                     if ins.offset > merge_off and ins.opname == "NOP":
@@ -2476,11 +2481,27 @@ class DecompilerGeneric(DecompilerBase):
                 if e.start <= body_start < e.end and e.target in self._suppress_push_exc_offsets:
                     # This NOP has only a finally (no except).
                     # Find the try body end = start of finally body = e.end
-                    try_body_end = e.end
+                    # A continue/break/return in the body splits the protected range, so
+                    # the body ends where the last range aimed at this handler ends.
+                    try_body_end = max(x.end for x in _exc_entries_for_nop
+                                       if x.target == e.target and x.start >= body_start)
                     # Finally body: from try_body_end to first RETURN_CONST or
                     # next suppressed PUSH_EXC_INFO
                     finally_start = try_body_end
+                    # The copy where the protected body ends is the normal-path one; any
+                    # earlier copy belongs to a continue/break/return and is not source. A
+                    # body that always raises or returns has no normal-path copy, and
+                    # try-body statements that merely look like the finally body stay.
+                    copies = self._find_finally_copies(self._handler_copy_instrs(e.target), body_start,
+                                                       self._try_body_limit(e.target, _exc_entries_for_nop))
+                    normal = [c for c in copies if c[2] and instrs[c[0]].offset >= try_body_end]
+                    if normal:
+                        finally_start = instrs[normal[-1][0]].offset
+                    self._suppress_copies([c for c in copies if not normal or c is not normal[-1]])
                     finally_end = self._finally_copy_end(finally_start, owner=e.target)
+                    if finally_end is None and not normal:
+                        # No inline copy: the code at the body's end is not the finally body.
+                        finally_end = finally_start
                     if finally_end is None:
                         for ins in instrs:
                             if ins.offset >= finally_start:
@@ -2541,6 +2562,107 @@ class DecompilerGeneric(DecompilerBase):
                                 break
                     break
 
+    def _try_body_limit(self, handler: int, entries: list) -> int:
+        """
+        Exclusive bound for the finally copies that belong to the try protected by
+        *handler*: everything up to the normal-path copy, which starts where the body's
+        last protected range ends or where a jump from inside the body lands (past NOPs).
+        Later code, such as the next try statement's copies, is beyond it.
+        """
+        instrs = self.instructions
+        ranges = [e for e in entries if e.target == handler]
+        ends = {e.end for e in ranges}
+        ends |= {self._get_jump_target(x) for x in instrs
+                 if "JUMP" in x.opname and any(e.start <= x.offset < e.end for e in ranges)}
+        last = max((t for t in ends if isinstance(t, int) and t < handler), default=handler)
+        k = next((i for i, x in enumerate(instrs) if x.offset >= last), len(instrs))
+        while k < len(instrs) and instrs[k].opname in ("NOP", "CACHE"):
+            k += 1
+        return min(handler, instrs[k].offset + 1) if k < len(instrs) else handler
+
+    def _find_finally_copies(self, handler_body: list, lo: int, hi: int) -> list:
+        """
+        Locate the inline copies of a `finally` body that start in ``[lo, hi)``.
+
+        CPython inlines the finally body on the normal exit and again before every
+        `continue`, `break` and `return` in the try body. Each copy has the same
+        instructions as the copy in the re-raise handler (*handler_body*), which is
+        how they are recognized.
+
+        A statement in the try body can compile to the same instructions (``cleanup()``
+        in both the try body and the finally body). Copies carry the finally body's line
+        numbers, so a match on another line is such a statement and is left alone; without
+        line numbers, a match counts as a copy only when an early exit follows it.
+
+        Returns:
+            list: ``(start_index, end_index, is_copy)`` triples into ``self.instructions``, in
+            order. ``is_copy`` is False for a match that is a statement of the try body.
+        """
+        template = _copy_signature(handler_body)
+        if not template:
+            return []
+        instrs = self.instructions
+        first = next((i for i, x in enumerate(instrs)
+                      if any(x is y for y in handler_body) and _copy_signature([x])), None)
+        body_line = None if first is None else self._line_at(first)
+        found: list = []
+        idx = 0
+        while idx < len(instrs):
+            if not lo <= instrs[idx].offset < hi:
+                idx += 1
+                continue
+            end = _match_finally_copy(instrs, idx, template)
+            if end is None:
+                idx += 1
+                continue
+            # The first instruction can be a no-op of the exit's own line.
+            line = self._line_at(next((k for k in range(idx, end) if _copy_signature([instrs[k]])), idx))
+            if body_line is not None and line is not None:
+                is_copy = line == body_line
+            else:
+                is_copy = self._precedes_early_exit(end)
+            found.append((idx, end, is_copy))
+            idx = end
+        return found
+
+    def _line_at(self, idx: int) -> Optional[int]:
+        """Source line of ``self.instructions[idx]``: the line it, or the nearest instruction before it, starts."""
+        instrs = self.instructions
+        k = idx
+        while k >= 0:
+            if instrs[k].starts_line is not None:
+                return instrs[k].starts_line
+            k -= 1
+        return None
+
+    def _precedes_early_exit(self, idx: int) -> bool:
+        """
+        Whether ``self.instructions[idx]`` begins a `continue`, `break` or `return`: an
+        unconditional jump, a return, or dropping a loop iterator (``POP_TOP``, after a
+        swap when a value is returned), possibly after leaving a block.
+        """
+        instrs = self.instructions
+        while idx < len(instrs) and instrs[idx].opname in ("NOP", "CACHE", "POP_BLOCK", "POP_EXCEPT"):
+            idx += 1
+        if idx >= len(instrs):
+            return True
+        op = instrs[idx].opname
+        return op.startswith(("RETURN_", "JUMP")) or op in ("JUMP_ABSOLUTE", "POP_TOP", "ROT_TWO", "SWAP")
+
+    def _suppress_copies(self, copies: list) -> None:
+        """
+        Suppress the finally copies among ``(start_index, end_index, is_copy)`` matches.
+
+        These are the copies at early exits: only the exit itself is source code, since the
+        finally body runs because the exit leaves the `try`. Matches that are statements of
+        the try body stay.
+        """
+        for start, end, is_copy in copies:
+            if not is_copy:
+                continue
+            for k in range(start, end):
+                self._finally_body_suppress.add(self.instructions[k].offset)
+
     def _handler_copy_instrs(self, wrapper_off: int) -> list:
         """
         Instructions of the `finally` body copy inside the re-raise handler at *wrapper_off*.
@@ -2560,6 +2682,11 @@ class DecompilerGeneric(DecompilerBase):
         return wrapper[:-1]
 
     def _finally_copy_end(self, start_offset: int, owner: Optional[int] = None) -> Optional[int]:
+        """Offset just past the inline `finally` copy at *start_offset*, or None (see `_match_finally_wrapper`)."""
+        matched = self._match_finally_wrapper(start_offset, owner)
+        return None if matched is None else matched[0]
+
+    def _match_finally_wrapper(self, start_offset: int, owner: Optional[int] = None) -> Optional[Tuple[int, list]]:
         """
         Offset just past the inline copy of a `finally` body that begins at *start_offset*.
 
@@ -2577,8 +2704,9 @@ class DecompilerGeneric(DecompilerBase):
         is empty, or a prefix of this one, cut this body short.
 
         Returns None when no handler copy matches, for instance when the body itself
-        returns or loops, so the caller can fall back to scanning. May return
-        *start_offset* itself: that is a body with no instructions, i.e. `pass`.
+        returns or loops, so the caller can fall back to scanning. Otherwise returns the
+        end offset together with the instructions of the matching handler copy. The end
+        may be *start_offset* itself: that is a body with no instructions, i.e. `pass`.
         """
         instrs = self.instructions
         start_idx = next((i for i, ins in enumerate(instrs) if ins.offset == start_offset), None)
@@ -2603,7 +2731,8 @@ class DecompilerGeneric(DecompilerBase):
                 continue  # a with-exit or other handler, not a finally copy
             end_idx = _match_finally_copy(instrs, start_idx, _copy_signature(wrapper[:-1]))
             if end_idx is not None:
-                return instrs[end_idx].offset if end_idx < len(instrs) else instrs[-1].offset + 2
+                end_offset = instrs[end_idx].offset if end_idx < len(instrs) else instrs[-1].offset + 2
+                return end_offset, wrapper[:-1]
         return None
 
     def _ends_just_before(self, end_offset: int, idx: int) -> bool:
@@ -4046,8 +4175,41 @@ class DecompilerGeneric(DecompilerBase):
             op = "is not" if bool(instr.arg) else "is"
             self.stack.append(f"{left} {op} {right}")
 
+    def _loop_return_tail(self) -> Optional[int]:
+        """
+        Index of the RETURN_VALUE when the code ahead is the tail of `return x` from loops.
+
+        Returning a value from inside `for` loops swaps it above each live iterator and
+        drops the iterator: ``SWAP 2; POP_TOP`` (``ROT_TWO; POP_TOP`` before 3.11), once per
+        enclosing loop, then ``RETURN_VALUE``. The caller has just handled the first swap.
+        """
+        instrs = self.instructions
+        k = self.pc
+        while True:
+            while k < len(instrs) and instrs[k].opname in _GENERIC_SKIP_OPS:
+                k += 1
+            if k >= len(instrs) or instrs[k].opname != "POP_TOP":
+                return None
+            k += 1
+            while k < len(instrs) and instrs[k].opname in _GENERIC_SKIP_OPS:
+                k += 1
+            if k < len(instrs) and instrs[k].opname == "RETURN_VALUE":
+                return k
+            is_swap = k < len(instrs) and (
+                instrs[k].opname == "ROT_TWO" or (instrs[k].opname == "SWAP" and instrs[k].arg == 2))
+            if not is_swap:
+                return None
+            k += 1
+
     def _op_stack_manip(self, instr: BytecodeInstruction):
         opname = instr.opname
+        is_swap_two = opname == "ROT_TWO" or (opname == "SWAP" and instr.arg == 2)
+        if is_swap_two:
+            return_at = self._loop_return_tail()
+            if return_at is not None:
+                # The iterators are not tracked on the stack; leave the value for RETURN_VALUE.
+                self.pc = return_at
+                return
         if opname == "ROT_TWO" and len(self.stack) >= 2:
             a, b = self.stack.pop(), self.stack.pop()
             self.stack.extend([a, b])
@@ -4294,8 +4456,15 @@ class DecompilerGeneric(DecompilerBase):
                     self.stack.pop()
 
             # Find the most recently emitted "if" header and rewrite it.
+            head_instr = next((i for i in self.instructions if i.offset == body_start), None)
             for bi in range(len(self.blocks) - 1, -1, -1):
                 boff, btype = self.blocks[bi]
+                if btype == "if" and boff > instr.offset and head_instr is not None and head_instr.opname == "FOR_ITER":
+                    # An `if` that is still open at a jump back to a `for` head is a body
+                    # statement ending in `continue` (`if c: return x` as the last
+                    # statement compiles to `if not c: continue`), not a `while` guard.
+                    self._append_reconstructed("continue")
+                    return
                 if btype == "if" and boff >= instr.offset:
                     for idx in range(len(self.reconstructed) - 1, -1, -1):
                         if self.reconstructed[idx].lstrip().startswith("if "):
