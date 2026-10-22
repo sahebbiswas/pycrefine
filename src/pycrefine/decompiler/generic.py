@@ -112,6 +112,7 @@ class DecompilerGeneric(DecompilerBase):
         self._pending_finally_merge: Optional[int] = None
         self._nop_to_push_exc: dict = {}
         self._nop_to_finally_merge: dict = {}
+        self._finally_from_handler: dict = {}  # 3.9: finally rendered from its handler copy
         self._kw_names: Tuple[str, ...] = ()
         self._else_starts: dict = {}  # map of else_start_offset -> else_end_offset
         self._build_dispatch()
@@ -1905,10 +1906,7 @@ class DecompilerGeneric(DecompilerBase):
         that merely follows a `try`/`except` has no such second copy.
         """
         instrs = self.instructions
-        try:
-            entries = list(dis.Bytecode(self.code_obj).exception_entries)
-        except (AttributeError, IndexError, TypeError, ValueError):
-            entries = None
+        entries = self._exception_entries()
 
         owned_by = None
         if entries is not None:
@@ -2500,10 +2498,20 @@ class DecompilerGeneric(DecompilerBase):
                     copies = self._find_finally_copies(self._handler_copy_instrs(e.target), body_start,
                                                        self._try_body_limit(e.target, _exc_entries_for_nop))
                     normal = [c for c in copies if c[2] and instrs[c[0]].offset >= try_body_end]
-                    if normal:
-                        finally_start = instrs[normal[-1][0]].offset
-                    self._suppress_copies([c for c in copies if not normal or c is not normal[-1]])
-                    finally_end = self._finally_copy_end(finally_start, owner=e.target)
+                    after_return = self._copy_precedes_final_return(normal[-1][1]) if normal else None
+                    if after_return is not None:
+                        # The try body ends in `return value`: every copy, the last one
+                        # included, runs on the way out of a return. The return stays in
+                        # the try body, which ends right after it (before the end of an
+                        # enclosing loop), and the finally body is the handler's copy.
+                        self._suppress_copies(copies)
+                        finally_start = after_return
+                        normal = []
+                    else:
+                        if normal:
+                            finally_start = instrs[normal[-1][0]].offset
+                        self._suppress_copies([c for c in copies if not normal or c is not normal[-1]])
+                    finally_end = self._finally_copy_end(finally_start, owner=e.target) if normal else None
                     if finally_end is None and not normal:
                         # No inline copy: the code at the body's end is not the finally body.
                         finally_end = finally_start
@@ -2654,6 +2662,44 @@ class DecompilerGeneric(DecompilerBase):
         op = instrs[idx].opname
         return op.startswith(("RETURN_", "JUMP")) or op in ("JUMP_ABSOLUTE", "POP_TOP", "ROT_TWO", "SWAP")
 
+    def _copy_precedes_final_return(self, end_idx: int) -> Optional[int]:
+        """
+        Offset just past the `return` when the finally copy ending at index *end_idx* runs
+        on the way out of a `return` of a value that is the try body's last statement,
+        else None.
+
+        Such a return keeps its own line: a returned name or expression is loaded before
+        the copy, and a constant is loaded or returned right after it without starting a
+        new line (3.12: ``NOP`` on the return's line, the copy, ``RETURN_CONST``; 3.14:
+        the copy, ``LOAD_SMALL_INT``, ``RETURN_VALUE``). A `return` after the whole
+        try statement starts a line of its own after the copy. Inside loops, the iterators
+        are dropped (``SWAP 2; POP_TOP``) between the copy and the return. A bare
+        `return None` is left alone, since the implicit return at the end of a function
+        looks the same.
+        """
+        instrs = self.instructions
+        k = end_idx
+        while k < len(instrs) and instrs[k].opname in ("NOP", "CACHE", "SWAP", "POP_TOP"):
+            k += 1
+        if k >= len(instrs):
+            return None
+        first = instrs[k]
+        ret: Optional[int] = None
+        value: Optional[tuple] = None
+        if first.opname in ("LOAD_CONST", "LOAD_SMALL_INT") and k + 1 < len(instrs) \
+                and instrs[k + 1].opname == "RETURN_VALUE":
+            ret, value = k + 1, (first.opname, first.argval)
+        elif first.opname == "RETURN_CONST":
+            ret, value = k, ("LOAD_CONST", first.argval)
+        elif first.opname == "RETURN_VALUE":
+            ret, value = k, ((instrs[k - 1].opname, instrs[k - 1].argval) if k > 0 else None)
+        if ret is None or value == ("LOAD_CONST", None):
+            return None
+        if any(instrs[j].starts_line is not None for j in range(end_idx, k + 1)):
+            # The return starts a line after the copy: it follows the try statement.
+            return None
+        return instrs[ret + 1].offset if ret + 1 < len(instrs) else instrs[ret].offset + 2
+
     def _suppress_copies(self, copies: list) -> None:
         """
         Suppress the finally copies among ``(start_index, end_index, is_copy)`` matches.
@@ -2687,9 +2733,8 @@ class DecompilerGeneric(DecompilerBase):
 
         Returns an empty list when the handler is not a `PUSH_EXC_INFO ... RERAISE 0` wrapper.
         """
-        try:
-            entries = dis.Bytecode(self.code_obj).exception_entries
-        except (AttributeError, TypeError, ValueError):
+        entries = self._exception_entries()
+        if entries is None:
             return []
         entry = next((e for e in entries if e.start == wrapper_off and e.lasti), None)
         if entry is None:
@@ -2730,9 +2775,8 @@ class DecompilerGeneric(DecompilerBase):
         start_idx = next((i for i, ins in enumerate(instrs) if ins.offset == start_offset), None)
         if start_idx is None:
             return None
-        try:
-            entries = dis.Bytecode(self.code_obj).exception_entries
-        except (AttributeError, TypeError, ValueError):
+        entries = self._exception_entries()
+        if entries is None:
             return None
         suppressed = getattr(self, "_suppress_push_exc_offsets", set())
         if owner is not None:

@@ -128,6 +128,7 @@ class Decompiler39(DecompilerGeneric):
         # patterns (even though 3.9 uses SETUP_FINALLY, the super call is harmless
         # and we must preserve whatever it set).
         self._finally_targets = set()
+        self._finally_from_handler = {}  # handler offset -> its RERAISE, see _elide_early_finally_copies
         # Merge with any suppress set from super(), don't overwrite it.
         if not hasattr(self, "_finally_body_suppress"):
             self._finally_body_suppress = set()
@@ -308,6 +309,7 @@ class Decompiler39(DecompilerGeneric):
             # statement's, so only a try body without nested blocks can be handled.
             return
         handler_offset = instrs[handler_idx].offset
+        normal_path = False
         for k in range(setup_idx + 1, handler_idx):
             if instrs[k].opname != "POP_BLOCK":
                 continue
@@ -320,6 +322,7 @@ class Decompiler39(DecompilerGeneric):
                 # the loop's own back-edge, not a `continue` written inside the finally.
                 if tail > end and instrs[end].opname == "JUMP_ABSOLUTE" and instrs[end].argval < instrs[end].offset:
                     self._finally_body_suppress.add(instrs[end].offset)
+                normal_path = True
                 continue
             # Leaving several nested blocks pops them all, one POP_BLOCK each.
             first = k
@@ -327,6 +330,23 @@ class Decompiler39(DecompilerGeneric):
                 first -= 1
             for idx in range(first, end):
                 self._finally_body_suppress.add(instrs[idx].offset)
+        if not normal_path and template:
+            # Every way out of the try body is a return, raise, break or continue, so
+            # there is no normal-path copy to become the `finally:` block: the copy in
+            # the exception handler is the only one left, and it is rendered in place.
+            for idx in range(handler_idx, reraise_idx):
+                self._finally_body_suppress.discard(instrs[idx].offset)
+            self._finally_from_handler[handler_offset] = instrs[reraise_idx].offset
+
+    def _open_finally_from_handler(self, instr: BytecodeInstruction) -> None:
+        """Emit `finally:` at the handler copy of a finally body that has no normal-path copy."""
+        end = self._finally_from_handler.pop(instr.offset)
+        if self._except_header_indents:
+            self.indent_level = self._except_header_indents[-1]
+        self._append_reconstructed("finally:")
+        self.indent_level += 1
+        # The RERAISE that ends the copy closes the block (and is skipped as usual).
+        self.blocks.append((end, "finally_body"))
 
     # clean instruction dispatch for 3.9-specific opcodes
     def _handle_instruction(self, instr: BytecodeInstruction):
@@ -347,6 +367,8 @@ class Decompiler39(DecompilerGeneric):
             if self.stack:
                 self.stack.pop()
             return
+        if instr.offset in getattr(self, "_finally_from_handler", {}):
+            self._open_finally_from_handler(instr)
         if getattr(self, "_finally_body_suppress", set()) and instr.offset in self._finally_body_suppress:
             return
 
@@ -527,6 +549,7 @@ class Decompiler39(DecompilerGeneric):
         elif opname == "POP_BLOCK":
             is_finally_pop = False
             finally_target = None
+            _closing_exc_cleanup = False
 
             # `continue` inside a try body: POP_BLOCK leaves the try, then the jump
             # re-enters the loop. It closes nothing; the jump emits the `continue`.
@@ -837,6 +860,11 @@ class Decompiler39(DecompilerGeneric):
 
             # Record the indent level where except/finally headers should appear.
             # In nested scenarios, each try body's POP_BLOCK records its parent's indent.
+            # The `except X as e:` cleanup guard is not a try body: no header follows
+            # it, and recording the handler body's indent there put a later `finally:`
+            # inside the except clause.
+            if _closing_exc_cleanup:
+                return
             self._except_header_indents.append(self.indent_level)
             # Peek ahead for JUMP_FORWARD at end of try block to establish scope.
             look = self.pc

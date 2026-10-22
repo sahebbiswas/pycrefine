@@ -778,3 +778,100 @@ class TestFinallyAfterLoopBody(unittest.TestCase):
         expected = run(compile(self.SRC, "<original>", "exec"))
         self.assertEqual(expected.count("'finally'"), 4)
         self.assertEqual(run(compile(out, "<decompiled>", "exec")), expected)
+
+
+@unittest.skipIf(sys.version_info[:2] in ((3, 10), (3, 11)), "3.10/3.11 try/finally decompilation has known failures")
+class TestImplicitReturnAfterBlocks(unittest.TestCase):
+    """No `return None` is invented after a try or with block that ends a function (#140)."""
+
+    def assert_no_return_none(self, src):
+        out = decompile(src)
+        compile(out, "<decompiled>", "exec")
+        self.assertNotIn("return None", out)
+        return out
+
+    def test_try_finally(self):
+        self.assert_no_return_none("def f(xs):\n    try:\n        print(xs)\n    finally:\n        print('done')\n")
+
+    def test_try_except(self):
+        self.assert_no_return_none("def f(x):\n    try:\n        x.go()\n    except ValueError:\n        print('bad')\n")
+
+    def test_try_except_finally(self):
+        self.assert_no_return_none(
+            "def f(x):\n    try:\n        x.go()\n    except ValueError as e:\n        print(e)\n"
+            "    finally:\n        print('done')\n")
+
+    def test_with_block(self):
+        self.assert_no_return_none("def f(p):\n    with open(p) as fh:\n        fh.read()\n")
+
+    def test_try_finally_in_loop(self):
+        self.assert_no_return_none(
+            "def f(xs):\n    for i in xs:\n        try:\n            print(i)\n        finally:\n            print('f')\n")
+
+    def test_explicit_return_in_else_before_more_code(self):
+        # `else: return None` is followed directly by the handlers, but the handlers
+        # continue to code after the try, so that return is explicit and must stay.
+        import contextlib
+        import io
+
+        src = (
+            "class X:\n    def __init__(self, e):\n        self.e = e\n"
+            "    def go(self):\n        if self.e:\n            raise self.e\n"
+            "def f(x):\n    try:\n        x.go()\n    except ValueError:\n        print('bad')\n"
+            "    else:\n        return None\n    print('after')\n"
+            "f(X(None))\nf(X(ValueError()))\n")
+        out = decompile(src)
+        self.assertIn("return None", out)
+
+        def run(code):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                exec(code, {"__name__": "__main__"})
+            return buf.getvalue()
+
+        self.assertEqual(run(compile(out, "<decompiled>", "exec")), run(compile(src, "<original>", "exec")))
+
+    def test_explicit_return_value_stays_in_the_try(self):
+        import contextlib
+        import io
+
+        src = (
+            "log = []\n"
+            "class X:\n    def go(self):\n        log.append('go')\n        return 7\n"
+            "def e(x):\n    try:\n        return x.go()\n    finally:\n        log.append('done')\n"
+            "print(e(X()), log)\n")
+        out = decompile(src)
+        self.assertLess(out.index("return x.go()"), out.index("finally:"))
+
+        def run(code):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                exec(code, {"__name__": "__main__"})
+            return buf.getvalue()
+
+        self.assertEqual(run(compile(out, "<decompiled>", "exec")), run(compile(src, "<original>", "exec")))
+
+    def _assert_same_ast(self, src):
+        import ast
+
+        out = decompile(src)
+        self.assertEqual(ast.dump(ast.parse(out)), ast.dump(ast.parse(src)), out)
+
+    def test_return_constant_stays_in_the_try(self):
+        # 3.12 returns the constant with RETURN_CONST right after the copy, 3.14 loads
+        # it there; only the line numbers tell it from a return after the try.
+        self._assert_same_ast("def f():\n    try:\n        print('c')\n        return 1\n    finally:\n        print('c')\n")
+
+    def test_return_after_the_try_stays_after_it(self):
+        self._assert_same_ast("def f():\n    try:\n        print('c')\n    finally:\n        print('c')\n    return 1\n")
+        self._assert_same_ast("def f(x):\n    try:\n        print('c')\n    finally:\n        print('c')\n    return x\n")
+
+    def test_return_from_a_loop_stays_in_the_try(self):
+        # The iterator is dropped between the copy and the return, and the loop's own
+        # exit code follows; the try body still ends at the return.
+        self._assert_same_ast(
+            "def f(xs):\n    for x in xs:\n        try:\n            print('c')\n            return x\n"
+            "        finally:\n            print('c')\n")
+        self._assert_same_ast(
+            "def f(xs):\n    for x in xs:\n        for y in x:\n            try:\n                return y\n"
+            "            finally:\n                print('c')\n    print('none')\n")
