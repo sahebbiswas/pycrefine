@@ -146,8 +146,6 @@
     "src/pycrefine/decompiler/py39.py::too-many-statements::Decompiler39._prescan_try_structure": 1,
     "src/pycrefine/decompiler/py39.py::trailing-whitespace::<module>": 5,
     "src/pycrefine/expr.py::arguments-differ::_BoolExpr.join": 1,
-    "src/pycrefine/instructions.py::too-complex::_render_func_tuple": 1,
-    "src/pycrefine/instructions.py::too-many-branches::_render_func_tuple": 1,
     "src/pycrefine/instructions.py::too-many-instance-attributes::BytecodeInstruction": 1,
     "src/pycrefine/loader.py::broad-exception-caught::get_decompiler": 2,
     "src/pycrefine/loader.py::superfluous-parens::<module>": 1,

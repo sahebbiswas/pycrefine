@@ -1,7 +1,8 @@
 """Disassembled-instruction record and small rendering helpers."""
+import ast
 import re
-from dataclasses import dataclass
-from typing import Any, List, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 
 # ---------------------------------------------------------------------------
@@ -19,6 +20,179 @@ class BytecodeInstruction:
     starts_line: Optional[int]
     is_jump_target: bool
     argrepr: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Comprehension bodies
+# ---------------------------------------------------------------------------
+
+_COMPLEMENT_OPS: Dict[Type[ast.cmpop], Type[ast.cmpop]] = {
+    ast.Is: ast.IsNot,
+    ast.IsNot: ast.Is,
+    ast.In: ast.NotIn,
+    ast.NotIn: ast.In,
+}
+
+
+def _negate_node(node: ast.expr) -> ast.expr:
+    """Return the logical negation of *node*, folding away a leading ``not``."""
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        return node.operand
+    if isinstance(node, ast.Compare) and len(node.ops) == 1:
+        complement = _COMPLEMENT_OPS.get(type(node.ops[0]))
+        if complement is not None:  # exact complements by language definition
+            return ast.Compare(left=node.left, ops=[complement()], comparators=node.comparators)
+    if isinstance(node, ast.BoolOp):
+        # De Morgan. Only the truthiness of a filter matters, so this is exact here.
+        flipped: ast.boolop = ast.Or() if isinstance(node.op, ast.And) else ast.And()
+        return ast.BoolOp(op=flipped, values=[_negate_node(v) for v in node.values])
+    return ast.UnaryOp(op=ast.Not(), operand=node)
+
+
+def _negate_filter(cond: str) -> str:
+    """Source text for ``not cond``, used when a comprehension filter is spelled ``if cond: continue``."""
+    try:
+        node = ast.parse(cond.strip(), mode="eval").body
+    except SyntaxError:
+        return f"not ({cond.strip()})"
+    return ast.unparse(_negate_node(node))
+
+
+@dataclass
+class _BodyLine:
+    """One line of a decompiled comprehension body with the lines nested under it."""
+    text: str
+    children: List["_BodyLine"] = field(default_factory=list)
+
+
+def _parse_body_lines(body_text: str) -> List[_BodyLine]:
+    """Arrange the lines of *body_text* into a tree by indentation."""
+    roots: List[_BodyLine] = []
+    stack: List[Tuple[int, _BodyLine]] = []
+    for raw in body_text.splitlines():
+        text = raw.strip()
+        if not text:
+            continue
+        indent = len(raw) - len(raw.lstrip())
+        node = _BodyLine(text)
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        (stack[-1][1].children if stack else roots).append(node)
+        stack.append((indent, node))
+    return roots
+
+
+def _only_continues(block: List[_BodyLine]) -> bool:
+    """True when *block* does nothing except ``continue`` (``pass`` is ignored)."""
+    return [n.text for n in block if n.text != "pass"] == ["continue"]
+
+
+class _ComprehensionCollector:
+    """
+    Reads the loop body of a decompiled ``<genexpr>`` / ``<listcomp>`` / ... code
+    object and gathers its ``for``/``if`` clauses and the yielded element.
+
+    Besides the plain ``if cond: yield x`` shape, CPython 3.13+ (and some
+    conditions on 3.12) compile a filter as a jump back to the loop head, which
+    the decompiler writes as ``if cond: continue``. Such a line *rejects* the
+    item, so the clause it stands for is the negation of ``cond``. A trailing
+    ``else: continue`` is the same rejection for the other branch, so the ``if``
+    keeps its own polarity.
+    """
+
+    def __init__(self, iterable: Optional[str]) -> None:
+        self.iterable = iterable
+        self.clauses: List[str] = []
+        self.element: Optional[str] = None
+
+    def collect(self, block: List[_BodyLine]) -> None:
+        i = 0
+        while i < len(block):
+            node = block[i]
+            i += 1
+            following = block[i] if i < len(block) else None
+            else_block: Optional[_BodyLine] = None
+            if following is not None and following.text == "else:":
+                else_block = following
+                i += 1
+            self._visit(node, else_block)
+
+    def render(self, wrapper: Tuple[str, str]) -> Optional[str]:
+        """The comprehension text, or None when no ``for`` clause and element were found."""
+        if self.clauses and self.clauses[0].startswith("for ") and self.element is not None:
+            return wrapper[0] + self.element + " " + " ".join(self.clauses) + wrapper[1]
+        return None
+
+    def _collect_else(self, else_block: Optional[_BodyLine]) -> None:
+        """Look inside an ``else:`` block unless it only rejects the item."""
+        if else_block is not None and not _only_continues(else_block.children):
+            self.collect(else_block.children)
+
+    def _visit(self, node: _BodyLine, else_block: Optional[_BodyLine]) -> None:
+        if self._visit_loop(node) or self._visit_filter(node, else_block) or self._visit_leaf(node):
+            return
+        # Unrecognised compound statement (elif, try, ...): keep looking inside it.
+        self.collect(node.children)
+        self._collect_else(else_block)
+
+    def _visit_loop(self, node: _BodyLine) -> bool:
+        text = node.text
+        if text in ("while True:", "while True"):
+            # 3.9 wraps the whole genexpr body in 'while True:'.
+            self.collect(node.children)
+            return True
+        if not text.startswith("for "):
+            return False
+        clause = text.rstrip(":")
+        # Only the outermost for-clause iterates the implicit .0 parameter.
+        if self.iterable is not None and not self.clauses:
+            clause = clause.replace(".0", self.iterable)
+        self.clauses.append(clause)
+        self.collect(node.children)
+        return True
+
+    def _visit_filter(self, node: _BodyLine, else_block: Optional[_BodyLine]) -> bool:
+        text = node.text
+        # A real `while` cannot occur inside a comprehension: the decompiler writes
+        # a filter whose false branch jumps back to the loop head that way.
+        if text.startswith("while ") and text not in ("while True:", "while True"):
+            cond = text[len("while "):].rstrip(":")
+        elif text.startswith("if "):
+            cond = text[len("if "):].rstrip(":")
+        else:
+            return False
+        if else_block is None and _only_continues(node.children):
+            self.clauses.append(f"if {_negate_filter(cond)}")
+            return True
+        self.clauses.append(f"if {cond}")
+        self.collect(node.children)
+        self._collect_else(else_block)
+        return True
+
+    def _visit_leaf(self, node: _BodyLine) -> bool:
+        text = node.text
+        if self.clauses and self.clauses[-1].startswith("for "):
+            # Nested unpacking is decompiled as `for _item in it:` followed by
+            # `(a, b), c = _item`; fold it back into the for-target.
+            m_unpack = re.match(r"^(.+?) = (\w+)$", text)
+            m_for = re.match(r"^for (\w+) in (.+)$", self.clauses[-1])
+            if m_unpack and m_for and m_unpack.group(2) == m_for.group(1):
+                self.clauses[-1] = f"for {m_unpack.group(1)} in {m_for.group(2)}"
+                return True
+        if text.startswith("yield "):
+            self.element = text[len("yield "):].strip()
+            return True
+        return False
+
+
+def _render_comprehension(body_text: str, args: List[str], wrapper: Tuple[str, str]) -> Optional[str]:
+    """Render a decompiled comprehension body as ``(elt for x in it if cond)``; None if it has no loop and element."""
+    roots = _parse_body_lines(body_text)
+    if not roots:
+        return None
+    collector = _ComprehensionCollector(str(args[0]) if args else None)
+    collector.collect(roots[0].children or roots[1:])
+    return collector.render(wrapper)
 
 
 def _render_func_tuple(body_text: str, args: List[str]) -> str:
@@ -44,47 +218,14 @@ def _render_func_tuple(body_text: str, args: List[str]) -> str:
     if any(name in lines[0] for name in _comp_names):
         # Choose the correct bracket style for each comprehension type.
         if "<listcomp>" in lines[0]:
-            wrapper_open, wrapper_close = "[", "]"
+            wrapper = ("[", "]")
         elif "<setcomp>" in lines[0] or "<dictcomp>" in lines[0]:
-            wrapper_open, wrapper_close = "{", "}"
+            wrapper = ("{", "}")
         else:  # genexpr
-            wrapper_open, wrapper_close = "(", ")"
-
-        clauses: List[str] = []   # for/if clauses in source order
-        yield_expr = None
-
-        for line in lines[1:]:
-            # Skip structural wrappers that appear in some versions:
-            # 3.9 wraps the genexpr body in 'while True:' before the for loop.
-            if line in ("while True:", "while True"):
-                continue
-            if line.startswith("for "):
-                fc = line.rstrip(":")
-                # Only the outermost for-clause iterates the implicit .0
-                # parameter; replace it with the actual iterable arg.
-                if args and not clauses:
-                    # Strip a trailing "()" suffix that may have been added by a
-                    # preceding CALL-0 misfire (GET_ITER treated as a no-arg call).
-                    # Strip exactly one trailing "()" so expressions like
-                    # range(10) are never mangled.
-                    fc = fc.replace(".0", str(args[0]))
-                clauses.append(fc)
-            elif line.startswith("if "):
-                clauses.append(line.rstrip(":"))
-            elif clauses and clauses[-1].startswith("for "):
-                # Nested unpacking is decompiled as `for _item in it:` followed
-                # by `(a, b), c = _item`; fold it back into the for-target.
-                m_unpack = re.match(r"^(.+?) = (\w+)$", line)
-                m_for = re.match(r"^for (\w+) in (.+)$", clauses[-1])
-                if m_unpack and m_for and m_unpack.group(2) == m_for.group(1):
-                    clauses[-1] = f"for {m_unpack.group(1)} in {m_for.group(2)}"
-                elif line.startswith("yield "):
-                    yield_expr = line[6:].strip()
-            elif line.startswith("yield "):
-                yield_expr = line[6:].strip()
-
-        if clauses and clauses[0].startswith("for ") and yield_expr is not None:
-            return wrapper_open + yield_expr + " " + " ".join(clauses) + wrapper_close
+            wrapper = ("(", ")")
+        rendered = _render_comprehension(body_text, args, wrapper)
+        if rendered is not None:
+            return rendered
 
     # ── Case 2: lambda ───────────────────────────────────────────────────
     if "<lambda>" in lines[0]:
