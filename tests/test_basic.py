@@ -977,3 +977,120 @@ class TestInlinedBuiltinCalls(unittest.TestCase):
         # The call must go to the parameter, not to the builtin.
         self.assertEqual(decompiled["h"]([0, 1], shadowed), original["h"]([0, 1], shadowed))
         self.assertEqual(decompiled["h"]([0, 1], shadowed), ("shadowed", [0, 1]))
+
+
+def _run_code(code):
+    import contextlib
+    import io
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        exec(code, {"__name__": "__main__"})
+    return buf.getvalue()
+
+
+@unittest.skipIf(sys.version_info[:2] in ((3, 10), (3, 11)), "3.10/3.11 have known control-flow failures")
+class TestWithBlockExits(unittest.TestCase):
+    """return/break/continue inside a with block, and nested with blocks (#142).
+
+    Every exit inlines the context manager's __exit__ call; only the exit itself is
+    source code.
+    """
+
+    def test_try_statement_that_ends_the_with_body(self):
+        # The try's merge label is the with block's inlined exit call.
+        src = (
+            "class Ctx:\n    def __init__(self, log):\n        self.log = log\n"
+            "    def __enter__(self):\n        self.log.append('enter')\n"
+            "    def __exit__(self, *a):\n        self.log.append('exit')\n"
+            "def boom(v):\n    if v:\n        raise ValueError(v)\n"
+            "def a(log, v):\n    with Ctx(log):\n        try:\n            boom(v)\n        except ValueError:\n"
+            "            log.append('caught')\n    log.append('after')\n"
+            "def d(log, v):\n    with Ctx(log):\n        try:\n            boom(v)\n        except ValueError:\n"
+            "            log.append('caught')\n        finally:\n            log.append('fin')\n"
+            "def f(log, v):\n    with Ctx(log):\n        with Ctx(log):\n            try:\n                boom(v)\n"
+            "            except ValueError:\n                log.append('caught')\n    log.append('after')\n"
+            "def g(log, v):\n    with Ctx(log):\n        try:\n            boom(v)\n        except ValueError:\n"
+            "            log.append('caught')\n        else:\n            log.append('else')\n"
+            "for fn in (a, d, f, g):\n    for v in (0, 1):\n        log = []\n        fn(log, v)\n"
+            "        print(fn.__name__, v, log)\n")
+        out = decompile(src)
+        self.assertEqual(_run_code(compile(out, "<decompiled>", "exec")), _run_code(compile(src, "<original>", "exec")))
+
+    def test_early_continue_before_a_raise_stays_in_the_body(self):
+        # The `continue` exit comes before more protected body (`raise`); the body ends
+        # with its last protected code, not at that exit.
+        src = ("def r(log, xs):\n    for x in xs:\n        with ctx(log):\n            if x:\n"
+               "                continue\n            raise ValueError(x)\n    return log\n")
+        out = decompile(src)
+        self.assertEqual(ast.dump(ast.parse(out)), ast.dump(ast.parse(src)), out)
+
+    def test_consecutive_with_blocks_with_early_exits(self):
+        # Each block's normal exit is its own: a later block's exit, or an early
+        # `continue` exit, does not end the earlier block.
+        src = (
+            "class Ctx:\n    def __init__(self, log, n):\n        self.log, self.n = log, n\n"
+            "    def __enter__(self):\n        self.log.append('enter' + self.n)\n"
+            "    def __exit__(self, *a):\n        self.log.append('exit' + self.n)\n"
+            "def first(log, xs):\n    for x in xs:\n        with Ctx(log, 'a'):\n            if x:\n"
+            "                continue\n            log.append('a-body')\n        with Ctx(log, 'b'):\n"
+            "            log.append('b-body')\n    return log\n"
+            "def second(log, xs):\n    for x in xs:\n        with Ctx(log, 'a'):\n            log.append('a')\n"
+            "        with Ctx(log, 'b'):\n            if x:\n                continue\n            log.append('b')\n"
+            "    return log\n"
+            "print(first([], [0, 1]), second([], [0, 1]))\n")
+        out = decompile(src)
+        self.assertEqual(_run_code(compile(out, "<decompiled>", "exec")), _run_code(compile(src, "<original>", "exec")))
+
+    def test_user_call_with_none_arguments_is_not_an_exit(self):
+        # Same tail as an inlined __exit__(None, None, None): LOAD_CONST None x3; CALL; POP_TOP.
+        src = (
+            "log = []\n"
+            "class Ctx:\n    def __enter__(self):\n        log.append('enter')\n"
+            "    def __exit__(self, *a):\n        log.append('exit')\n"
+            "def f(a, b, c):\n    log.append((a, b, c))\n"
+            "def g():\n    with Ctx():\n        f(None, None, None)\n        log.append('body')\n    log.append('after')\n"
+            "g()\nprint(log)\n")
+        out = decompile(src)
+        self.assertIn("f(None, None, None)", out)
+        self.assertEqual(_run_code(compile(out, "<decompiled>", "exec")), _run_code(compile(src, "<original>", "exec")))
+
+    SRC = 'import contextlib, io\n\nclass CM:\n    def __init__(self, log, name):\n        self.log, self.name = log, name\n    def __enter__(self):\n        self.log.append("enter " + self.name)\n        return self\n    def __exit__(self, *exc):\n        self.log.append("exit " + self.name)\n        return False\n\ndef r1(log):\n    with CM(log, "a") as a:\n        return a.name\n\ndef r2(log, xs):\n    out = []\n    for x in xs:\n        with CM(log, str(x)):\n            if x == 1:\n                continue\n            if x == 3:\n                break\n            out.append(x)\n    return out\n\ndef r3(log):\n    with CM(log, "a"), CM(log, "b") as b:\n        return b.name * 2\n\ndef r4(log):\n    i = 0\n    while i < 5:\n        i += 1\n        with CM(log, "w"):\n            if i == 2:\n                continue\n            if i == 4:\n                return i\n    return -1\n\ndef r6(log):\n    with CM(log, "x"):\n        pass\n\n' + (
+        "for name in ('r1', 'r2', 'r3', 'r4', 'r6'):\n"
+        "    log = []\n"
+        "    fn = globals()[name]\n"
+        "    if name == 'r2':\n"
+        "        res = fn(log, [0, 1, 2, 3, 4])\n"
+        "    else:\n"
+        "        res = fn(log)\n"
+        "    print(name, res, log)\n"
+    )
+
+    def test_output_has_no_exit_calls(self):
+        out = decompile(self.SRC)
+        compile(out, "<decompiled>", "exec")
+        for leak in ("None(None", "except:", "_exc_match", "_with_info", "(None, None, None)"):
+            self.assertNotIn(leak, out)
+        assert_contains(out, "return a.name", "continue", "return b.name * 2", "return i")
+
+    def test_behavior_is_preserved(self):
+        import contextlib
+        import io
+
+        def run(code):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                exec(code, {"__name__": "__main__"})
+            return buf.getvalue()
+
+        out = decompile(self.SRC)
+        self.assertEqual(run(compile(out, "<decompiled>", "exec")), run(compile(self.SRC, "<original>", "exec")))
+
+    def test_return_value_stays_inside_the_with(self):
+        out = decompile("def f(p):\n    with open(p) as fh:\n        return fh.read()\n")
+        lines = out.splitlines()
+        with_line = next(i for i, ln in enumerate(lines) if ln.strip().startswith("with open(p)"))
+        ret_line = next(i for i, ln in enumerate(lines) if "return fh.read()" in ln)
+        indent = lambda ln: len(ln) - len(ln.lstrip())
+        self.assertGreater(ret_line, with_line)
+        self.assertGreater(indent(lines[ret_line]), indent(lines[with_line]))

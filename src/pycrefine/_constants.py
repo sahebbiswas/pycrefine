@@ -123,3 +123,10 @@ _INPLACE_ASSIGN_MAP = {
     "INPLACE_OR": "|=", "INPLACE_XOR": "^=",
     "INPLACE_MATRIX_MULTIPLY": "@=",
 }
+
+
+# --- Value-pushing opcodes (prefixes) ---
+# Instructions that push a value, such as the callee of a call before its arguments;
+# an inlined `with` exit call never directly follows one of them.
+_VALUE_OPS = ("LOAD_", "PUSH_NULL", "CALL", "BINARY_", "BUILD_", "COPY", "GET_", "UNARY_",
+              "COMPARE_", "FORMAT_", "MAKE_FUNCTION", "CONTAINS_OP", "IS_OP")
