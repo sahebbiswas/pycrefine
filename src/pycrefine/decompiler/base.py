@@ -10,6 +10,8 @@ from ..instructions import BytecodeInstruction
 class DecompilerBase:
     def __init__(self, code_obj: types.CodeType, indent_level: int = 0, beautification_level: str = 'core', target_version: Optional[Tuple[int, int]] = None):
         self.code_obj = code_obj
+        # Exception table, filled in on first use by _exception_entries(); False = not yet read.
+        self._exception_entries_cache: Any = False
         self.instructions: List[BytecodeInstruction] = []
         self.reconstructed: List[str] = []
         self.indent_level = indent_level
@@ -95,10 +97,17 @@ class DecompilerBase:
         Returns:
             True if no meaningful instructions remain after the current program counter, False otherwise.
         """
+        # Code the prescans already placed elsewhere (a finally body's re-raise copy,
+        # handler sections rendered at their merge label) is not on the fall-through path.
+        placed = set()
+        for name in ("_finally_body_suppress", "_wrapper_body_suppress", "_handler_section_suppress"):
+            placed |= getattr(self, name, set())
         # Search ahead from current PC.
         for i in range(self.pc, len(self.instructions)):
             instr = self.instructions[i]
             op = instr.opname
+            if instr.offset in placed:
+                continue
             # Skip re-raise epilogue, filler, and terminal stack-clearing instructions
             # common in modern Python (3.11-3.14) exception handlers and epilogues.
             if op in (
@@ -159,6 +168,51 @@ class DecompilerBase:
             self._append_reconstructed("break")
         return True
 
+    def _exception_entries(self) -> Optional[list]:
+        """
+        The code object's exception table (3.11+), computed once; None before 3.11, whose
+        code objects have none (``dis.Bytecode`` has no ``exception_entries`` there).
+        """
+        cached = self._exception_entries_cache
+        if cached is False:
+            try:
+                cached = list(dis.Bytecode(self.code_obj).exception_entries)
+            except (AttributeError, TypeError, ValueError, IndexError):
+                cached = None
+            self._exception_entries_cache = cached
+        return cached
+
+    def _ends_try_before_handlers(self, instr_index: int) -> bool:
+        """
+        True if the return at *instr_index* is the normal exit of a `try` that ends the
+        function: the exception handlers start right after it (3.11+ lays them out after
+        the code they protect), so nothing but handler code follows on any path.
+        """
+        instrs = self.instructions
+        nxt = next((ins for ins in instrs[instr_index + 1:]
+                    if ins.opname not in ("CACHE", "NOP", "EXTENDED_ARG")), None)
+        if nxt is None or nxt.opname != "PUSH_EXC_INFO":
+            return False
+        # A handler that completes jumps to the code after the try statement. If that
+        # is more than the implicit `return None`, the try does not end the function
+        # (``try: ... except E: ... else: return None`` followed by more code).
+        by_offset = {ins.offset: i for i, ins in enumerate(instrs)}
+        for ins in instrs[instr_index + 1:]:
+            if ins.opname not in ("JUMP_FORWARD", "JUMP", "JUMP_NO_INTERRUPT"):
+                continue
+            k = by_offset.get(self._get_jump_target(ins))
+            while k is not None and k < len(instrs) and instrs[k].opname in ("CACHE", "NOP", "EXTENDED_ARG"):
+                k += 1
+            if k is None or k >= len(instrs):
+                continue
+            target = instrs[k]
+            implicit = (target.opname == "RETURN_CONST" and target.argval is None) or (
+                target.opname == "LOAD_CONST" and target.argval is None
+                and k + 1 < len(instrs) and instrs[k + 1].opname == "RETURN_VALUE")
+            if not implicit:
+                return False
+        return True
+
     def is_compiler_generated_return(self, instr_index: int) -> bool:
         """
         Determine whether the RETURN at the given instruction index is the implicit compiler-inserted `return None`.
@@ -178,25 +232,27 @@ class DecompilerBase:
         effectively_last = self.is_effectively_last()
         self.pc = old_pc
 
-        if not effectively_last:
+        # Robust check for Python 3.11+: if the return is within a protected
+        # range in the exception table, it's explicit. Compiler-generated
+        # returns for with/try blocks are always outside the protected range.
+        entries = self._exception_entries()
+        if entries and any(e.start <= instr.offset < e.end for e in entries):
+            return False
+
+        if not effectively_last and not (entries and self._ends_try_before_handlers(instr_index)):
             return False
 
         # If we're inside any user-facing control flow block, it's likely
-        # an explicit return in the source.
+        # an explicit return in the source. A `try` or `with` block is still open
+        # at the implicit return that follows it (its handlers come after), but
+        # that return lies outside every protected range, which the check above
+        # established: those blocks do not make it explicit.
         user_blocks = {"if", "else", "for", "while", "try_body", "except", "finally_body", "with", "with_body"}
+        if entries:
+            user_blocks -= {"try_body", "with", "with_body"}
         blocks = getattr(self, "blocks", [])
         for _, btype in blocks:
             if btype in user_blocks:
                 return False
-
-        # Robust check for Python 3.11+: if the return is within a protected
-        # range in the exception table, it's explicit. Compiler-generated
-        # returns for with/try blocks are always outside the protected range.
-        try:
-            for e in getattr(dis.Bytecode(self.code_obj), "exception_entries", []):
-                if e.start <= instr.offset < e.end:
-                    return False
-        except (AttributeError, TypeError, ValueError, IndexError):
-            pass
 
         return True
