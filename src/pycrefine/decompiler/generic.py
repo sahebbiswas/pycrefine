@@ -42,6 +42,11 @@ from ..postprocess import collapse_chained_comparisons, post_process_source
 # ---------------------------------------------------------------------------
 
 
+# Instructions that make up a value-context `and`/`or` inside an expression.
+_BOOLOP_PARTS = frozenset(("JUMP_IF_TRUE_OR_POP", "JUMP_IF_FALSE_OR_POP", "COPY", "TO_BOOL",
+                           "POP_JUMP_IF_TRUE", "POP_JUMP_IF_FALSE", "POP_TOP"))
+
+
 class DecompilerGeneric(DecompilerBase):
     def __init_subclass__(cls, **kw):
         super().__init_subclass__(**kw)
@@ -112,6 +117,7 @@ class DecompilerGeneric(DecompilerBase):
         self._pending_finally_merge: Optional[int] = None
         self._nop_to_push_exc: dict = {}
         self._nop_to_finally_merge: dict = {}
+        self._else_stack_snapshots: dict = {}  # second arm's offset -> stack to restore there
         self._finally_from_handler: dict = {}  # 3.9: finally rendered from its handler copy
         self._kw_names: Tuple[str, ...] = ()
         self._else_starts: dict = {}  # map of else_start_offset -> else_end_offset
@@ -179,6 +185,9 @@ class DecompilerGeneric(DecompilerBase):
 
             # Close any blocks whose end offset we have passed
             self._close_blocks(instr.offset)
+            snapshot = self._else_stack_snapshots.pop(instr.offset, None)
+            if snapshot is not None:
+                self.stack = list(snapshot)
             if self._boolop_step(instr):
                 continue
             self._handle_instruction(instr)
@@ -478,6 +487,8 @@ class DecompilerGeneric(DecompilerBase):
         for idx, ins in enumerate(self.instructions):
             if not self._is_compound_cjump(ins.opname):
                 continue
+            if ins.offset in self._ternary_suppress:
+                continue  # an and/or inside a branch of a conditional already found
             jump_target = self._get_jump_target(ins)
             t_idx = offset_to_idx.get(jump_target)
             if t_idx is None or t_idx <= idx:
@@ -552,17 +563,11 @@ class DecompilerGeneric(DecompilerBase):
                     actual_then_expr = [
                         x for x in before_jf[:ts_pos] if x.opname not in _TERNARY_SKIP
                     ]
-                    if not all(x.opname in _TERNARY_PURE for x in actual_then_expr):
-                        continue
-                    if any(x.opname == "POP_TOP" or "POP_JUMP_IF" in x.opname
-                           for x in actual_then_expr):
+                    if not self._branch_is_expression(actual_then_expr, then_s.offset):
                         continue
                     else_raw = self.instructions[t_idx: st_idx]
                     else_instrs = [x for x in else_raw if x.opname not in _TERNARY_SKIP]
-                    if any(x.opname == "POP_TOP" or "POP_JUMP_IF" in x.opname
-                           for x in else_instrs):
-                        continue
-                    if not all(x.opname in _TERNARY_PURE for x in else_instrs):
+                    if not self._branch_is_expression(else_instrs, store_instr.offset):
                         continue
                     store_name = str(store_instr.argval)
                     is_true = "IF_TRUE" in ins.opname
@@ -591,13 +596,10 @@ class DecompilerGeneric(DecompilerBase):
                     continue
 
                 # ── B1: no then-STORE before the jump ────────────────────
-                if not all(x.opname in _TERNARY_PURE for x in before_jf):
-                    continue
-                if any(x.opname == "POP_TOP" or "POP_JUMP_IF" in x.opname
-                       for x in before_jf):
+                store_target = self._get_jump_target(jf)
+                if not self._branch_is_expression(before_jf, store_target):
                     continue
 
-                store_target = self._get_jump_target(jf)
                 st_idx = offset_to_idx.get(store_target)
                 is_inplace = False
 
@@ -640,11 +642,8 @@ class DecompilerGeneric(DecompilerBase):
                         else_raw_ss = self.instructions[t_idx: else_end_ss]
                         else_instrs_ss = [x for x in else_raw_ss
                                           if x.opname not in _TERNARY_SKIP]
-                        # Validate: no control-flow ops in else branch
-                        if any(x.opname == "POP_TOP" or "POP_JUMP_IF" in x.opname
-                               for x in else_instrs_ss):
-                            is_stacksink = False
-                        elif not all(x.opname in _TERNARY_PURE for x in else_instrs_ss):
+                        # Validate: the else branch is an expression (and/or allowed)
+                        if not self._branch_is_expression(else_instrs_ss, self.instructions[st_idx].offset):
                             is_stacksink = False
                         if is_stacksink:
                             is_true_ss = "IF_TRUE" in ins.opname
@@ -671,14 +670,11 @@ class DecompilerGeneric(DecompilerBase):
                 else_end = st_idx - 1 if is_inplace else st_idx
                 else_raw = self.instructions[t_idx: else_end]
                 else_instrs = [x for x in else_raw if x.opname not in _TERNARY_SKIP]
-                if any(x.opname == "POP_TOP" or "POP_JUMP_IF" in x.opname
-                       for x in else_instrs):
-                    continue
-                if not all(x.opname in _TERNARY_PURE for x in else_instrs):
-                    continue
-
                 if st_idx >= len(self.instructions):
                     continue
+                if not self._branch_is_expression(else_instrs, self.instructions[else_end].offset):
+                    continue
+
                 store_instr = self.instructions[st_idx]
                 if store_instr.opname not in _TERNARY_STORES:
                     continue
@@ -716,11 +712,7 @@ class DecompilerGeneric(DecompilerBase):
             then_store = then_sig[store_pos]
             before_store = then_sig[:store_pos]
 
-            if any(x.opname == "POP_TOP" for x in before_store):
-                continue
-            if any("POP_JUMP_IF" in x.opname for x in before_store):
-                continue
-            if not all(x.opname in _TERNARY_PURE for x in before_store):
+            if not self._branch_is_expression(before_store, then_store.offset):
                 continue
 
             # Find the first STORE in the else-branch
@@ -730,18 +722,26 @@ class DecompilerGeneric(DecompilerBase):
                 if xi.opname in _TERNARY_STORES:
                     else_store = xi
                     break
-                if xi.opname not in _TERNARY_PURE:
+                if xi.opname not in _TERNARY_PURE and xi.opname not in _BOOLOP_PARTS:
                     break
 
             if else_store is None or else_store.argval != then_store.argval:
                 continue
 
             es_idx = offset_to_idx[else_store.offset]
+            # 3.12+ duplicates a short tail (`return y`) into both arms. Whatever follows
+            # the then-store must be that same tail after the else-store; anything else
+            # means the arms are separate statements, not one conditional expression.
+            then_tail = [x for x in then_sig[store_pos + 1:] if x.opname not in ("NOP",)]
+            else_tail = [x for x in self.instructions[es_idx + 1: es_idx + 1 + len(then_tail) * 2]
+                         if x.opname not in _TERNARY_SKIP and x.opname != "NOP"][:len(then_tail)]
+            if then_tail and _copy_signature(then_tail) != _copy_signature(else_tail):
+                continue
+            if self._uses_outer_stack(before_store):
+                continue  # the arm finishes an expression begun before the test
             else_raw = self.instructions[t_idx: es_idx]
             else_instrs = [x for x in else_raw if x.opname not in _TERNARY_SKIP]
-            if any(x.opname == "POP_TOP" for x in else_instrs):
-                continue
-            if any("POP_JUMP_IF" in x.opname for x in else_instrs):
+            if not self._branch_is_expression(else_instrs, else_store.offset):
                 continue
 
             store_name = str(then_store.argval)
@@ -1463,9 +1463,143 @@ class DecompilerGeneric(DecompilerBase):
         """
         return self._eval_ternary_branch(instrs)
 
+    _SHORT_CIRCUIT_WORDS = {"JUMP_IF_TRUE_OR_POP": "or", "JUMP_IF_FALSE_OR_POP": "and",
+                            "POP_JUMP_IF_TRUE": "or", "POP_JUMP_IF_FALSE": "and"}
+
+    def _short_circuit_at(self, instrs: list, i: int) -> Optional[Tuple[str, int, int]]:
+        """
+        Recognize a value-context `and`/`or` operator starting at ``instrs[i]``.
+
+        3.9 spells it ``JUMP_IF_TRUE_OR_POP`` / ``JUMP_IF_FALSE_OR_POP``; 3.12+ spells it
+        ``COPY 1; [TO_BOOL;] POP_JUMP_IF_TRUE/FALSE; [NOT_TAKEN;] POP_TOP``. Returns
+        ``(word, target_offset, index_of_right_operand)`` or None.
+        """
+        ins = instrs[i]
+        if ins.opname in ("JUMP_IF_TRUE_OR_POP", "JUMP_IF_FALSE_OR_POP"):
+            return self._SHORT_CIRCUIT_WORDS[ins.opname], self._get_jump_target(ins), i + 1
+        if ins.opname != "COPY" or ins.arg != 1:
+            return None
+        j = i + 1
+        while j < len(instrs) and instrs[j].opname in ("TO_BOOL", "NOT_TAKEN", "CACHE"):
+            j += 1
+        if j >= len(instrs) or instrs[j].opname not in ("POP_JUMP_IF_TRUE", "POP_JUMP_IF_FALSE"):
+            return None
+        k = j + 1
+        while k < len(instrs) and instrs[k].opname in ("NOT_TAKEN", "CACHE"):
+            k += 1
+        if k >= len(instrs) or instrs[k].opname != "POP_TOP":
+            return None
+        return self._SHORT_CIRCUIT_WORDS[instrs[j].opname], self._get_jump_target(instrs[j]), k + 1
+
+    def _guarded_boolop_at(self, instrs: list, i: int) -> Optional[Tuple[str, str, int, int, int]]:
+        """
+        Recognize ``X and Y or Z`` / ``X or Y and Z`` starting at ``instrs[i]``: when the
+        first operator decides, X is discarded and evaluation continues at Z, while Y ends
+        in the second operator, which jumps past Z. Two encodings:
+
+        * 3.9-3.13: the first operator is a plain ``POP_JUMP_IF_FALSE/TRUE`` to Z;
+        * 3.14: it is a full ``COPY 1 ...`` operator whose target is the ``POP_TOP`` it
+          shares with the second operator, just before Z.
+
+        Returns ``(first_word, second_word, y_start, unit_index, z_index)``, where
+        ``unit_index`` is where Y's operator starts, or None.
+        """
+        ins = instrs[i]
+        copy_unit = self._short_circuit_at(instrs, i) if ins.opname == "COPY" else None
+        if copy_unit is not None:
+            first, target, y_start = copy_unit
+            pop_idx = next((n for n in range(y_start, len(instrs)) if instrs[n].offset == target), None)
+            if pop_idx is None or instrs[pop_idx].opname != "POP_TOP":
+                return None
+            z_idx = pop_idx + 1
+        elif ins.opname in ("POP_JUMP_IF_FALSE", "POP_JUMP_IF_TRUE"):
+            target = self._get_jump_target(ins)
+            z_idx = next((n for n in range(i + 1, len(instrs)) if instrs[n].offset == target), None)
+            if z_idx is None:
+                return None
+            first = "and" if ins.opname == "POP_JUMP_IF_FALSE" else "or"
+            y_start = i + 1
+        else:
+            return None
+        for u in range(y_start, z_idx):
+            found = self._short_circuit_at(instrs, u)
+            if found is not None and found[2] == z_idx and found[0] != first:
+                return first, found[0], y_start, u, z_idx
+        return None
+
+    def _branch_is_expression(self, seq: list, end_offset: int) -> bool:
+        """
+        True if *seq* (one branch of a conditional expression, ending where its value is
+        consumed at *end_offset*) is a pure expression, value-context `and`/`or` included.
+        """
+        def lands_in_branch(ins, target):
+            return isinstance(target, int) and ins.offset < target <= end_offset
+
+        i = 0
+        ok = bool(seq)
+        while ok and i < len(seq):
+            guarded = self._guarded_boolop_at(seq, i)
+            found = self._short_circuit_at(seq, i)
+            if guarded is not None:
+                _, _, y_start, unit, z_idx = guarded
+                inner = self._short_circuit_at(seq, unit)
+                ok = (inner is not None and lands_in_branch(seq[unit], inner[1])
+                      and self._branch_is_expression(seq[y_start:unit], end_offset)
+                      and self._branch_is_expression(seq[z_idx:], end_offset))
+                break
+            if found is not None:
+                # an operator needs its right operand before the branch ends
+                ok = lands_in_branch(seq[i], found[1]) and found[2] < len(seq)
+                i = found[2]
+            else:
+                ok = seq[i].opname in _TERNARY_PURE
+                i += 1
+        return ok
+
+    def _uses_outer_stack(self, seq: list) -> bool:
+        """
+        True if evaluating *seq* would consume values pushed before it, i.e. the branch
+        is the tail of a larger expression (`foo(1, a)` where `foo` and `1` were pushed
+        before the test) rather than an expression of its own.
+        """
+        depth = 0
+        for ins in seq:
+            try:
+                arg = ins.arg if ins.opcode >= dis.HAVE_ARGUMENT else None
+                depth += dis.stack_effect(ins.opcode, arg, jump=False)
+            except (ValueError, TypeError):
+                continue
+            if depth < 0:
+                return True
+        return False
+
     def _eval_ternary_branch(self, instrs: list) -> str:
         mini_stack: list = []
-        for ins in instrs:
+        idx = 0
+        while idx < len(instrs):
+            guarded = self._guarded_boolop_at(instrs, idx) if mini_stack else None
+            if guarded is not None:
+                # `(X and Y) or Z` / `(X or Y) and Z`, with Z running to the end.
+                first, second, y_start, unit, z_idx = guarded
+                left = mini_stack.pop()
+                middle = self._eval_ternary_branch(instrs[y_start:unit])
+                right = self._eval_ternary_branch(instrs[z_idx:])
+                mini_stack.append(f"(({left} {first} {middle}) {second} {right})")
+                idx = len(instrs)
+                continue
+            found = self._short_circuit_at(instrs, idx)
+            if found is not None and mini_stack:
+                # `left and/or right`: the right operand runs up to the jump's target
+                # (or to the end of the branch, where the operator's value is used).
+                word, target, resume = found
+                end = next((n for n in range(resume, len(instrs)) if instrs[n].offset >= target), len(instrs))
+                left = mini_stack.pop()
+                right = self._eval_ternary_branch(instrs[resume:end])
+                mini_stack.append(f"({left} {word} {right})")
+                idx = end
+                continue
+            ins = instrs[idx]
+            idx += 1
             op = ins.opname
             if op in ("CACHE", "RESUME", "NOT_TAKEN", "COPY_FREE_VARS",
                       "PRECALL", "PUSH_NULL", "TO_BOOL",
@@ -4978,6 +5112,12 @@ class DecompilerGeneric(DecompilerBase):
 
             if meaning_idx > 0:
                 prev = self.instructions[meaning_idx - 1]
+                if prev.opname in ("RETURN_VALUE", "RETURN_CONST", "RAISE_VARARGS") and self.stack:
+                    # The compiler duplicated the rest of the statement into both arms
+                    # (`print(a if f else b)` at the end of a function on 3.12+). Values
+                    # pushed before the test (the callee, earlier arguments) are used up
+                    # by the first arm, and the second arm needs them again.
+                    self._else_stack_snapshots[jump_target] = list(self.stack)
                 if prev.opname in (
                     "RETURN_VALUE", "RETURN_CONST", "RAISE_VARARGS",
                     "BREAK_LOOP", "JUMP_FORWARD",
@@ -5016,9 +5156,21 @@ class DecompilerGeneric(DecompilerBase):
                 return True
             return instrs[k].opname == "SWAP" and k + 1 < len(instrs) and instrs[k + 1].opname == "POP_TOP"
 
+        def unthread_return(after, target):
+            # CPython 3.9 threads a jump to `RETURN_VALUE` onto a later identical return,
+            # skipping the right operand's own return: the operator really joins at the
+            # first return its right operand falls into.
+            k = by_offset.get(target)
+            if k is None or instrs[k].opname != "RETURN_VALUE":
+                return target
+            first = next((x.offset for x in instrs if after < x.offset < target and x.opname == "RETURN_VALUE"), None)
+            return target if first is None else first
+
         for k, ins in enumerate(instrs):
             if ins.opname in ("JUMP_IF_FALSE_OR_POP", "JUMP_IF_TRUE_OR_POP"):
                 target = self._get_jump_target(ins)
+                if isinstance(target, int):
+                    target = unthread_return(ins.offset, target)
                 if isinstance(target, int) and target > ins.offset and not is_chain_cleanup(target):
                     op = "and" if ins.opname == "JUMP_IF_FALSE_OR_POP" else "or"
                     self._boolop_or_pop[ins.offset] = (op, target)
@@ -5050,6 +5202,13 @@ class DecompilerGeneric(DecompilerBase):
                 continue
             for q_off, (_, join) in self._boolop_or_pop.items():
                 if ins.offset < q_off < target < join:
+                    # Code that cannot fall through to the target (a return in between)
+                    # makes the jump an `if` statement, not the first operator of an
+                    # expression. Checked only here, for a jump that could join a chain.
+                    if any(ins.offset < x.offset < target
+                           and x.opname in ("RETURN_VALUE", "RETURN_CONST", "RAISE_VARARGS")
+                           for x in instrs):
+                        break
                     self._boolop_groups[ins.offset] = ("and" if ins.opname == "POP_JUMP_IF_FALSE" else "or", target)
                     break
 
@@ -5060,6 +5219,8 @@ class DecompilerGeneric(DecompilerBase):
         Closes operators whose join point has been reached, then consumes the
         operator's jump instructions. Returns True if `instr` was fully handled here.
         """
+        if instr.offset in getattr(self, "_ternary_suppress", ()) or instr.offset in getattr(self, "_ternary_jumps", ()):
+            return False  # a conditional expression (or part of a branch), evaluated as a whole
         pending = self._boolop_pending
         if pending:
             # Reaching a join: the right operand is on top of the stack. A COPY/jump/POP_TOP
