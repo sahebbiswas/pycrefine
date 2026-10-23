@@ -1,0 +1,204 @@
+name: Release
+
+# Releases use PyPI trusted publishing (OIDC), so no API tokens are stored in the
+# repository. One-time setup (docs/releasing.md):
+#   pypi.org      -> pending/trusted publisher: owner sahebbiswas, repository pycrefine,
+#                    workflow release.yml, environment "pypi"
+#   test.pypi.org -> the same publisher with the environment left empty: the TestPyPI
+#                    job below runs without an environment
+#
+# Flow (CONTRIBUTING.md, "Releasing"):
+#   * Manual run (workflow_dispatch): build, check and test the distributions, then
+#     publish to TestPyPI only. Run it on a throwaway branch with a pre-release version
+#     (X.Y.Zrc1, rc2, ...): an index never accepts the same version twice.
+#   * GitHub release published (tag vX.Y.Z): the same checks, publish to TestPyPI, check
+#     the TestPyPI install, then publish to PyPI in the "pypi" environment. This is the
+#     only way to reach PyPI.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build:
+    name: Build and check distributions
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@v6
+      with:
+        python-version: '3.12'
+    - name: Install build tooling
+      run: python -m pip install --upgrade pip build twine
+    - name: Build sdist and wheel
+      run: python -m build
+    - name: Validate distribution metadata
+      run: python -m twine check --strict dist/*
+    - name: Read the package version
+      id: meta
+      run: |
+        version=$(python - <<'PY'
+        import email.parser, glob, zipfile
+        whl = glob.glob("dist/*.whl")[0]
+        with zipfile.ZipFile(whl) as z:
+            name = next(n for n in z.namelist() if n.endswith(".dist-info/METADATA"))
+            print(email.parser.Parser().parsestr(z.read(name).decode())["Version"])
+        PY
+        )
+        echo "Package version: $version"
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+    - name: Check the release tag matches the package version
+      if: github.event_name == 'release'
+      env:
+        TAG: ${{ github.event.release.tag_name }}
+        VERSION: ${{ steps.meta.outputs.version }}
+      run: |
+        if [ "${TAG#v}" != "$VERSION" ]; then
+          echo "::error::Release tag '$TAG' does not match package version '$VERSION'; expected 'v$VERSION'"
+          exit 1
+        fi
+    - name: Upload distributions
+      uses: actions/upload-artifact@v4
+      with:
+        name: dist
+        path: dist/
+        if-no-files-found: error
+
+  smoke-test:
+    name: Test ${{ matrix.artifact }} (Python ${{ matrix.python-version }})
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        artifact: [wheel, sdist]
+        python-version: ['3.9', '3.14']
+    steps:
+    - name: Check out the tests (the package itself comes from the distribution)
+      uses: actions/checkout@v6
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@v6
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Download distributions
+      uses: actions/download-artifact@v4
+      with:
+        name: dist
+        path: dist/
+    - name: Install into a clean virtual environment
+      env:
+        ARTIFACT: ${{ matrix.artifact }}
+      run: |
+        python -m venv "$RUNNER_TEMP/venv"
+        if [ "$ARTIFACT" = wheel ]; then pkg=$(ls dist/*.whl); else pkg=$(ls dist/*.tar.gz); fi
+        "$RUNNER_TEMP/venv/bin/python" -m pip install --upgrade pip
+        "$RUNNER_TEMP/venv/bin/python" -m pip install "${pkg}[test]"
+    - name: Exercise the installed package and command
+      # Outside the checkout, so nothing is imported from the source tree.
+      working-directory: ${{ runner.temp }}
+      run: |
+        export PATH="$RUNNER_TEMP/venv/bin:$PATH"
+        pycrefine --help > /dev/null
+        python -m pycrefine --help > /dev/null
+        printf 'def f(xs):\n    return [x * 2 for x in xs if x]\n' > sample.py
+        python -c "import py_compile; py_compile.compile('sample.py', cfile='sample.pyc', doraise=True)"
+        pycrefine sample.pyc -o sample_out.py
+        python - <<'PY'
+        import ast
+        import pycrefine
+        assert "site-packages" in pycrefine.__file__, pycrefine.__file__
+        assert ast.dump(ast.parse(open("sample_out.py").read())) == ast.dump(ast.parse(open("sample.py").read()))
+        print("pycrefine", pycrefine.__version__, "OK")
+        PY
+    - name: Run the test suite against the installed package
+      # From outside the checkout with importlib import mode, so the repository root
+      # (and its pycrefine.py launcher) is never on sys.path; tests/conftest.py fails
+      # the run if pycrefine would still come from the source tree.
+      working-directory: ${{ runner.temp }}
+      env:
+        PYCREFINE_REQUIRE_INSTALLED: '1'
+      run: '"$RUNNER_TEMP/venv/bin/pytest" -p no:cacheprovider --import-mode=importlib "$GITHUB_WORKSPACE/tests"'
+
+  publish-testpypi:
+    name: Publish to TestPyPI
+    needs: [build, smoke-test]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # trusted publishing
+    steps:
+    - name: Download distributions
+      uses: actions/download-artifact@v4
+      with:
+        name: dist
+        path: dist/
+    - name: Publish to TestPyPI
+      uses: pypa/gh-action-pypi-publish@release/v1
+      with:
+        repository-url: https://test.pypi.org/legacy/
+        # No skip-existing: TestPyPI never accepts a version twice, and the install
+        # check below must test the files this run built. Each dry run therefore needs
+        # a new pre-release version (CONTRIBUTING.md, "Releasing").
+
+  verify-testpypi:
+    name: Verify the TestPyPI install
+    needs: [build, publish-testpypi]
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/setup-python@v6
+      with:
+        python-version: '3.12'
+    - name: Install from TestPyPI
+      env:
+        VERSION: ${{ needs.build.outputs.version }}
+      run: |
+        python -m venv "$RUNNER_TEMP/venv"
+        # A new upload can take a moment to appear. pycrefine has no runtime
+        # dependencies, so install from TestPyPI only: with PyPI as an extra index pip
+        # could pick an identical version from there instead.
+        for attempt in 1 2 3 4 5 6; do
+          if "$RUNNER_TEMP/venv/bin/python" -m pip install --no-cache-dir \
+               --index-url https://test.pypi.org/simple/ "pycrefine==$VERSION"; then
+            break
+          fi
+          if [ "$attempt" = 6 ]; then exit 1; fi
+          sleep $((attempt * 15))
+        done
+        "$RUNNER_TEMP/venv/bin/pycrefine" --help > /dev/null
+        "$RUNNER_TEMP/venv/bin/python" -c "import os, pycrefine; assert pycrefine.__version__ == os.environ['VERSION'], pycrefine.__version__; print('pycrefine', pycrefine.__version__)"
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: [build, smoke-test, verify-testpypi]
+    # Only a published release reaches PyPI, and only after the TestPyPI upload and
+    # install check succeeded.
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/pycrefine/${{ needs.build.outputs.version }}/
+    permissions:
+      id-token: write  # trusted publishing
+    steps:
+    - name: Download distributions
+      uses: actions/download-artifact@v4
+      with:
+        name: dist
+        path: dist/
+    - name: Publish to PyPI
+      uses: pypa/gh-action-pypi-publish@release/v1
