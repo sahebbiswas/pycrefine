@@ -3,7 +3,7 @@ import sys
 from typing import Any
 from .._constants import _GENERIC_SKIP_OPS, _MAX_TERNARY_MINI_SEARCH_WINDOW
 from .generic import DecompilerGeneric
-from ..instructions import BytecodeInstruction
+from ..instructions import BytecodeInstruction, _copy_signature, _match_finally_copy
 from ..opcodes.py39 import _OPCODES_39
 
 
@@ -206,6 +206,7 @@ class Decompiler39(DecompilerGeneric):
                         self._finally_body_suppress.add(self.instructions[j].offset)
                         if self.instructions[j].offset == end_reraise:
                             break
+                    self._elide_early_finally_copies(i, t_idx, end_reraise)
 
             if is_except:
                 try_end_idx = next((k for k, x in enumerate(self.instructions) if x.offset == target), -1) - 1
@@ -278,6 +279,54 @@ class Decompiler39(DecompilerGeneric):
                                     and (jt in for_iter_targets or (hasattr(self, "_while_header_targets") and jt in self._while_header_targets.values()))):
                                 self._exc_handler_jump_offsets.add(kx.offset)
                                 self._exc_handler_continue_offsets.add(kx.offset)
+
+    def _elide_early_finally_copies(self, setup_idx: int, handler_idx: int, reraise_offset: int) -> None:
+        """
+        Suppress the copies of a `finally` body that the compiler inlines at early exits.
+
+        A `continue`, `break` or `return` inside `try`/`finally` compiles to
+        `POP_BLOCK`, a copy of the finally body, then the exit itself. Only the exit is
+        source code (the finally body runs when the exit leaves the `try`), so the
+        `POP_BLOCK` and the copy are suppressed and the exit renders as the plain
+        statement it is. The copy on the normal path, which ends right at the
+        exception-path copy, is the one that becomes the `finally:` block and is kept.
+
+        Parameters:
+            setup_idx (int): Index of the SETUP_FINALLY that opens the protected region.
+            handler_idx (int): Index of the first instruction of the exception-path copy.
+            reraise_offset (int): Offset of the RERAISE that ends the exception-path copy.
+        """
+        instrs = self.instructions
+        reraise_idx = next((k for k in range(handler_idx, len(instrs)) if instrs[k].offset == reraise_offset), None)
+        if reraise_idx is None:
+            return
+        template = _copy_signature(instrs[handler_idx:reraise_idx])
+        if not template and any(
+                instrs[k].opname in ("SETUP_FINALLY", "SETUP_WITH", "SETUP_EXCEPT")
+                for k in range(setup_idx + 1, handler_idx)):
+            # An empty finally body leaves nothing to tell its POP_BLOCK from a nested
+            # statement's, so only a try body without nested blocks can be handled.
+            return
+        handler_offset = instrs[handler_idx].offset
+        for k in range(setup_idx + 1, handler_idx):
+            if instrs[k].opname != "POP_BLOCK":
+                continue
+            end = _match_finally_copy(instrs, k + 1, template)
+            if end is None or end >= len(instrs):
+                continue
+            tail = end + 1 if instrs[end].opname in ("JUMP_ABSOLUTE", "JUMP_FORWARD") else end
+            if tail < len(instrs) and instrs[tail].offset == handler_offset:
+                # The normal path: this copy is the `finally:` body. The jump after it is
+                # the loop's own back-edge, not a `continue` written inside the finally.
+                if tail > end and instrs[end].opname == "JUMP_ABSOLUTE" and instrs[end].argval < instrs[end].offset:
+                    self._finally_body_suppress.add(instrs[end].offset)
+                continue
+            # Leaving several nested blocks pops them all, one POP_BLOCK each.
+            first = k
+            while first - 1 > setup_idx and instrs[first - 1].opname == "POP_BLOCK":
+                first -= 1
+            for idx in range(first, end):
+                self._finally_body_suppress.add(instrs[idx].offset)
 
     # clean instruction dispatch for 3.9-specific opcodes
     def _handle_instruction(self, instr: BytecodeInstruction):
