@@ -226,6 +226,8 @@ class DecompilerBase:
             `true` if the RETURN is likely the compiler-inserted implicit `return None`, `false` otherwise.
         """
         instr = self.instructions[instr_index]
+        if instr.offset in getattr(self, "_explicit_returns", ()):
+            return False
         # Save current state for lookahead
         old_pc = self.pc
         self.pc = instr_index + 1

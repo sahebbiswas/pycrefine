@@ -30,6 +30,9 @@ These change what the code does, or produce code that does not compile:
 | `try`/`except` around a `with` that always raises, inside another `with` | 3.12, 3.14 | the code after the outer `with` is misplaced | [#146](https://github.com/sahebbiswas/pycrefine/issues/146) |
 | Code after a `with` whose body never falls through (always `raise`s or `continue`s) | 3.12, 3.14 | lost; it runs only when `__exit__` suppresses the exception | [#177](https://github.com/sahebbiswas/pycrefine/issues/177) |
 | `except E: continue` inside a `with` block inside a loop | all | the `continue` or the code after the `with` lands in the wrong block | [#176](https://github.com/sahebbiswas/pycrefine/issues/176) |
+| `return` inside an `except` clause, with a `finally` | 3.12, 3.14 | the `finally:` block is lost when every path returns | [#171](https://github.com/sahebbiswas/pycrefine/issues/171) |
+| `try` nested at the very start of another `try` | 3.12, 3.14 | the outer `except` clauses attach to the inner `try` | [#169](https://github.com/sahebbiswas/pycrefine/issues/169) |
+| `while` loop whose `try` body returns and whose handler continues the loop | all | an `if` instead of the loop | [#170](https://github.com/sahebbiswas/pycrefine/issues/170) |
 | `try` / `except` / `else` | 3.12, 3.14 | the `else:` body is merged into the `try`, so exceptions it raises are caught | [#158](https://github.com/sahebbiswas/pycrefine/issues/158) |
 | `try` / `except` / `else` whose `else` returns, with code after the `try` | 3.12, 3.14 (3.9 with `finally`) | the code after the `try` lands in the last `except` clause; invalid output with `finally` on 3.9 | [#162](https://github.com/sahebbiswas/pycrefine/issues/162) |
 | Empty `finally: pass` in a loop | 3.9 | the `finally:` block is lost | [#141](https://github.com/sahebbiswas/pycrefine/issues/141) |
