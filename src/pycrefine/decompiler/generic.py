@@ -154,6 +154,47 @@ class DecompilerGeneric(DecompilerBase):
     # Main loop
     # ------------------------------------------------------------------
 
+    def _scope_declarations(self) -> List[str]:
+        """
+        The `global` and `nonlocal` statements a function or class body needs (#155).
+
+        They compile to no instruction of their own, only to how names are stored: a body
+        that assigns to or deletes a module-level name uses ``STORE_GLOBAL`` /
+        ``DELETE_GLOBAL``, and one that assigns to or deletes a variable of an enclosing
+        function uses ``STORE_DEREF`` / ``DELETE_DEREF`` on one of its free variables.
+        Reads need no declaration. Names are listed in order of first use. Module code
+        and the bodies rendered inline (lambdas, comprehensions, handler replays at indent
+        0) get none: the module's own names are global already, and a comprehension's
+        walrus target belongs to the scope it is written in.
+        """
+        code = self.code_obj
+        if self.indent_level <= 0 or code.co_name.startswith("<"):
+            return []
+        freevars = set(code.co_freevars)
+        globals_: List[str] = []
+        nonlocals: List[str] = []
+        for ins in self.instructions:
+            name = ins.argval
+            if not isinstance(name, str) or name.startswith("."):
+                continue
+            if ins.opname in ("STORE_GLOBAL", "DELETE_GLOBAL"):
+                if name not in globals_:
+                    globals_.append(name)
+            elif ins.opname in ("STORE_DEREF", "DELETE_DEREF") and name in freevars:
+                if name not in nonlocals:
+                    nonlocals.append(name)
+        lines = []
+        if globals_:
+            lines.append("global " + ", ".join(globals_))
+        if nonlocals:
+            lines.append("nonlocal " + ", ".join(nonlocals))
+        return lines
+
+    def _emit_scope_declarations(self) -> None:
+        """Emit the body's `global`/`nonlocal` statements, after its docstring."""
+        for line in self._scope_declarations():
+            self._append_reconstructed(line)
+
     def _fold_inlined_builtin_calls(self) -> None:
         """
         Undo CPython 3.14's inlining of ``all``/``any``/``tuple`` over a generator.
@@ -246,6 +287,8 @@ class DecompilerGeneric(DecompilerBase):
                     self._append_reconstructed('"""', indent_multiline=True)
                     self.has_doc = True
                     self.reconstructed.append("")
+
+        self._emit_scope_declarations()
 
         while self.pc < len(self.instructions):
             instr = self.instructions[self.pc]
@@ -3390,6 +3433,7 @@ class DecompilerGeneric(DecompilerBase):
 
             # Deletes
             "DELETE_NAME": self._op_delete, "DELETE_FAST": self._op_delete, "DELETE_GLOBAL": self._op_delete,
+            "DELETE_DEREF": self._op_delete,
 
             # Error
             "LOAD_ASSERTION_ERROR": self._op_load_assertion_error,
@@ -3814,7 +3858,8 @@ class DecompilerGeneric(DecompilerBase):
             ins_l = self.instructions[look]
             op = ins_l.opname
             # Step 3: found the 'as e' binding
-            if op in ("STORE_NAME", "STORE_FAST"):
+            # (STORE_DEREF when a closure captures the name, STORE_GLOBAL under `global`)
+            if op in ("STORE_NAME", "STORE_FAST", "STORE_DEREF", "STORE_GLOBAL"):
                 as_name = str(ins_l.argval)
                 self._exc_as_store_offset = ins_l.offset
                 break
