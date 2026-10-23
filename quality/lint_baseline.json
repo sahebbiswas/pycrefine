@@ -44,7 +44,6 @@
     "src/pycrefine/decompiler/generic.py::too-complex::DecompilerGeneric._prescan_try_structure": 1,
     "src/pycrefine/decompiler/generic.py::too-complex::DecompilerGeneric._prescan_value_boolops": 1,
     "src/pycrefine/decompiler/generic.py::too-complex::DecompilerGeneric._prescan_while_loops": 1,
-    "src/pycrefine/decompiler/generic.py::too-complex::DecompilerGeneric.decompile": 1,
     "src/pycrefine/decompiler/generic.py::too-many-branches::DecompilerGeneric._append_reconstructed": 1,
     "src/pycrefine/decompiler/generic.py::too-many-branches::DecompilerGeneric._close_blocks": 1,
     "src/pycrefine/decompiler/generic.py::too-many-branches::DecompilerGeneric._collection_mutator": 1,

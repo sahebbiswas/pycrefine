@@ -270,8 +270,57 @@ def flatten_elif(source: str) -> str:
     return res
 
 
+_MULTILINE_STRING_MARK = "__pycrefine_multiline_string_{}__"
+
+
+def _mask_multiline_strings(source: str):
+    """
+    Replace each multi-line string that is a statement of its own (a docstring) with a
+    one-line placeholder.
+
+    The clean-ups below are line- and regex-based; inside such a string they would
+    change its value (spacing after commas, collapsed blank lines, sorted imports).
+    Strings inside expressions are left to them. Returns the masked source and the
+    literals in order.
+    """
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return source, []
+    lines = source.split("\n")
+    offsets = [0]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line) + 1)
+    pieces, literals, pos = [], [], 0
+    boundary = (tokenize.NEWLINE, tokenize.NL, tokenize.INDENT, tokenize.DEDENT, tokenize.ENCODING)
+    significant = [t for t in tokens if t.type not in (tokenize.COMMENT,)]
+    for n, tok in enumerate(significant):
+        if tok.type != tokenize.STRING or tok.start[0] == tok.end[0]:
+            continue
+        before = significant[n - 1].type if n else tokenize.NEWLINE
+        after = significant[n + 1].type if n + 1 < len(significant) else tokenize.NEWLINE
+        if before not in boundary or after not in (tokenize.NEWLINE, tokenize.ENDMARKER):
+            continue  # part of an expression, which the clean-ups may rewrite
+        start = offsets[tok.start[0] - 1] + tok.start[1]
+        end = offsets[tok.end[0] - 1] + tok.end[1]
+        pieces.append(source[pos:start])
+        pieces.append(f'"{_MULTILINE_STRING_MARK.format(len(literals))}"')
+        literals.append(source[start:end])
+        pos = end
+    pieces.append(source[pos:])
+    return "".join(pieces), literals
+
+
+def _unmask_multiline_strings(source: str, literals: List[str]) -> str:
+    """Put back the literals that :func:`_mask_multiline_strings` replaced."""
+    for n, literal in enumerate(literals):
+        source = source.replace(f'"{_MULTILINE_STRING_MARK.format(n)}"', literal, 1)
+    return source
+
+
 def post_process_source(source: str, beautification_level: str = 'core') -> str:
     """Clean up decompiled output to be more Pythonic."""
+    source, literals = _mask_multiline_strings(source)
     lines = source.split('\n')
     out_lines = []
 
@@ -491,4 +540,4 @@ def post_process_source(source: str, beautification_level: str = 'core') -> str:
         # Stub for aggressive beautification - to be implemented in future
         pass
 
-    return text.strip('\r\n') + '\n'
+    return _unmask_multiline_strings(text.strip('\r\n') + '\n', literals)

@@ -141,7 +141,7 @@ python -m py_compile out.py && echo compiles
 | `# <genexpr/lambda — not reconstructable>` | a generator expression or `lambda` that could not be rebuilt |
 | `yield None` in a function that never yielded | `async def` or `yield from` (not supported yet) |
 | `if a < b:` followed by a stray `a < b` line | a chained comparison used as a value ([#154](https://github.com/sahebbiswas/pycrefine/issues/154)) |
-| `__annotations__['x'] = int` in a class | a class-level annotation, spelled the way the bytecode stores it (equivalent) |
+| `__annotations__['x'] = int` in a class | a variable annotation; the output raises `NameError` when it runs ([#173](https://github.com/sahebbiswas/pycrefine/issues/173)) |
 
 **What to do.**
 
@@ -155,8 +155,9 @@ python -m py_compile out.py && echo compiles
    (`python -m py_compile small.py`) and decompile `__pycache__/small.cpython-3XX.pyc`.
    A few lines that reproduce the problem make the best bug report.
 
-**Equivalent but different is expected.** Comments, docstring formatting, blank lines and
-parentheses are not in the bytecode. The compiler also rewrites some code, so you may get
+**Equivalent but different is expected.** Comments, blank lines and parentheses are not in
+the bytecode (docstrings are, and come back with the same text; 3.13+ stores them with the
+indentation removed and tabs expanded). The compiler also rewrites some code, so you may get
 `if not x: continue` instead of an `if` block at the end of a loop, an `if/else` spelled
 as separate `if` blocks that each `return`, `print(a)` and `return None` instead of a
 conditional expression at the end of a function, or `x = 2 if c else 3` instead of an
