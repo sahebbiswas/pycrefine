@@ -4,26 +4,26 @@
     "comprehensive.cpython-312.pyc": {
       "source": "corpus/comprehensive.py",
       "python": "3.12",
-      "cpython": null,
+      "cpython": "3.12.3",
       "magic": 3531,
-      "sha256": "a4d2fa13f9cacf15693de61d4f531c71e97596fb390d83f761d746e184757b3c",
-      "source_sha256": null
+      "sha256": "43fe1e48efbee6fc5cc75ca8d062129a5a4117bd31daf5aca261251b7ad9e8e6",
+      "source_sha256": "dc53560d86ef70388b114ca25af32226e9a9757868be361be3f6e24ae3f34bfb"
     },
     "comprehensive.cpython-314.pyc": {
       "source": "corpus/comprehensive.py",
       "python": "3.14",
-      "cpython": null,
+      "cpython": "3.14.6",
       "magic": 3627,
-      "sha256": "ae49803b52e0bf99108a49685bd799f42289991cafd8273362987c7ed5e5b7c4",
-      "source_sha256": null
+      "sha256": "b92f8adb06f59e13ac31a2d20f8e388de8e4640eb98921d22a016434b199345d",
+      "source_sha256": "dc53560d86ef70388b114ca25af32226e9a9757868be361be3f6e24ae3f34bfb"
     },
     "comprehensive.cpython-39.pyc": {
       "source": "corpus/comprehensive.py",
       "python": "3.9",
-      "cpython": null,
+      "cpython": "3.9.25",
       "magic": 3425,
-      "sha256": "04afda7fb3a45f8ce5da4b1f1bb58d49570ede20fd3275f1812456b54c07fef1",
-      "source_sha256": null
+      "sha256": "faa15b6b3c5952015863b5895e939334b6b3d51681b273fa1bf592aac8e7123e",
+      "source_sha256": "dc53560d86ef70388b114ca25af32226e9a9757868be361be3f6e24ae3f34bfb"
     },
     "simple.cpython-313.pyc": {
       "source": "corpus/simple.py",
