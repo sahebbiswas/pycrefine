@@ -84,6 +84,10 @@ _STATEMENT_BOUNDARY_OPS = frozenset({
 
 _TRY_SKIP_NOP = frozenset({"RESUME", "CACHE", "NOT_TAKEN"})
 
+# Placeholders between a protected range's end and the code that follows it (a with
+# block's inlined exit call, a finally copy): skipped when matching positions.
+_FILLER_OPS = frozenset({"NOP", "CACHE"})
+
 
 _TRY_LOAD_OPS = frozenset({"LOAD_NAME", "LOAD_GLOBAL", "LOAD_FAST",
                           "LOAD_DEREF", "LOAD_SMALL_INT", "LOAD_GLOBAL_MODULE"})

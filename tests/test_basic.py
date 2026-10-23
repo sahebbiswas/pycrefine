@@ -1042,6 +1042,13 @@ class TestWithBlockExits(unittest.TestCase):
         out = decompile(src)
         self.assertEqual(_run_code(compile(out, "<decompiled>", "exec")), _run_code(compile(src, "<original>", "exec")))
 
+    def test_branch_selected_callee_is_not_an_exit(self):
+        # `(f if c else g)(None, None, None)`: the arguments are a jump target, but a
+        # value (the callee) falls into them, which never happens for an exit call.
+        out = decompile("def h(c):\n    with ctx():\n        (f if c else g)(None, None, None)\n")
+        # The call is kept (the conditional callee itself is #178).
+        self.assertIn("None, None, None)", out)
+
     def test_user_call_with_none_arguments_is_not_an_exit(self):
         # Same tail as an inlined __exit__(None, None, None): LOAD_CONST None x3; CALL; POP_TOP.
         src = (
@@ -1094,3 +1101,43 @@ class TestWithBlockExits(unittest.TestCase):
         indent = lambda ln: len(ln) - len(ln.lstrip())
         self.assertGreater(ret_line, with_line)
         self.assertGreater(indent(lines[ret_line]), indent(lines[with_line]))
+
+
+@unittest.skipIf(sys.version_info[:2] in ((3, 10), (3, 11)), "3.10/3.11 have known control-flow failures")
+class TestSequentialWithBlocksInLoop(unittest.TestCase):
+    """Two `with` blocks and an `if` in a loop body keep their nesting (#97)."""
+
+    SRC = (
+        "import tempfile\n"
+        "def run(cases, func):\n"
+        "    for name, src in cases.items():\n"
+        "        with tempfile.NamedTemporaryFile(suffix='.py', mode='w', delete=False) as f:\n"
+        "            f.write(src)\n"
+        "            sp = f.name\n"
+        "        pp = sp + 'c'\n"
+        "        with open(pp, 'rb') as f:\n"
+        "            data = f.read()\n"
+        "        if func:\n"
+        "            print(name, data)\n"
+        "        print()\n"
+    )
+
+    def test_same_ast_as_the_source(self):
+        out = decompile(self.SRC)
+        self.assertEqual(ast.dump(ast.parse(out)), ast.dump(ast.parse(self.SRC)))
+
+    def test_with_blocks_in_sequence_and_exits(self):
+        src = (
+            "def g(paths, log):\n"
+            "    for p in paths:\n"
+            "        with open(p) as a:\n"
+            "            log.append(a.read())\n"
+            "        with open(p) as b:\n"
+            "            if b:\n"
+            "                continue\n"
+            "            log.append(1)\n"
+            "        log.append(2)\n"
+            "    return log\n"
+        )
+        out = decompile(src)
+        self.assertEqual(ast.dump(ast.parse(out)), ast.dump(ast.parse(src)))
