@@ -1,10 +1,38 @@
 """Decompiler backend for CPython 3.9 bytecode."""
 import sys
+import types
 from typing import Any
 from .._constants import _GENERIC_SKIP_OPS, _MAX_TERNARY_MINI_SEARCH_WINDOW
 from .generic import DecompilerGeneric
 from ..instructions import BytecodeInstruction, _copy_signature, _match_finally_copy
 from ..opcodes.py39 import _OPCODES_39
+
+
+def _lnotab_line_starts(code: Any) -> dict:
+    """``{offset: line}`` for each instruction that starts a source line (3.8-3.9 lnotab)."""
+    if isinstance(code, types.CodeType):
+        if sys.version_info >= (3, 10):
+            return {}  # a native code object of a later Python: not a 3.9 table
+        table = code.co_lnotab
+    else:
+        table = getattr(code, "co_linetable", b"") or b""
+    starts: dict = {}
+    code_len = len(getattr(code, "co_code", b"") or b"")
+    line = getattr(code, "co_firstlineno", 0)
+    last = None
+    addr = 0
+    for byte_incr, line_incr in zip(table[0::2], table[1::2]):
+        if byte_incr:
+            if line != last:
+                starts[addr] = line
+                last = line
+            addr += byte_incr
+            if addr >= code_len:
+                return starts
+        line += line_incr - 0x100 if line_incr >= 0x80 else line_incr
+    if line != last and addr < code_len:
+        starts[addr] = line
+    return starts
 
 
 class Decompiler39(DecompilerGeneric):
@@ -89,6 +117,16 @@ class Decompiler39(DecompilerGeneric):
                 starts_line=None,
                 is_jump_target=False,   # patched below after full pass
             ))
+
+        # Line starts from the 3.9 line-number table (co_lnotab; a ForeignCode keeps
+        # the same bytes in co_linetable), as dis.findlinestarts reads it on 3.9.
+        line_starts = _lnotab_line_starts(self.code_obj)
+        if line_starts:
+            self.instructions = [
+                BytecodeInstruction(ins.opcode, ins.opname, ins.arg, ins.argval, ins.offset,
+                                    line_starts.get(ins.offset), ins.is_jump_target)
+                for ins in self.instructions
+            ]
 
         # Patch is_jump_target: collect all argval targets for jump opcodes
         _jump_ops = {
@@ -1204,6 +1242,7 @@ class Decompiler39(DecompilerGeneric):
         # fall-through re-raise.  Nothing to emit — the decompiler has already
         # reached this via the jump target path, so just skip silently.
         elif opname == "POP_EXCEPT":
+            _deferred = False
             if self._except_header_indents:
                 # Peek ahead: if the next instruction is a backward JUMP_ABSOLUTE
                 # to a FOR_ITER loop head, this POP_EXCEPT is the exit from an
@@ -1252,6 +1291,10 @@ class Decompiler39(DecompilerGeneric):
                         if not is_compiler_gen:
                             self._append_reconstructed(f"return {ret_val}")
                         self.pc = look + 1  # consume RETURN_VALUE
+                    elif self._defer_close_to_handler_return():
+                        # The clause ends in `return` after its clean-up, or computes the
+                        # returned value here: it stays open until that return (#165).
+                        _deferred = True
                     else:
                         last_idx = len(self.reconstructed) - 1
                         while last_idx >= 0 and not self.reconstructed[last_idx].strip():
@@ -1259,9 +1302,13 @@ class Decompiler39(DecompilerGeneric):
                         if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
                             self._append_reconstructed("pass")
 
-                self.indent_level = self._except_header_indents.pop()
+                if not _deferred:
+                    self.indent_level = self._except_header_indents.pop()
             if self.stack and self.stack[-1] == "_exc_match":
                 self.stack.pop()
+            elif _deferred and "_exc_match" in self.stack:
+                # The returned value sits above the match sentinel.
+                del self.stack[len(self.stack) - 1 - self.stack[::-1].index("_exc_match")]
         elif opname == "RERAISE":
             pass  # already handled by the JUMP target structure; no source emission
 
