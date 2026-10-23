@@ -118,7 +118,7 @@
         "def issue_2": "compiles",
         "def issue_3": "compiles",
         "def issue_4": "compiles",
-        "def issue_5": "syntax_error"
+        "def issue_5": "compiles"
       }
     },
     "tests/fixtures/foreign_pyc/comprehensive.cpython-312.pyc": {
