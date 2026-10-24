@@ -171,11 +171,11 @@ class Decompiler39(DecompilerGeneric):
                 is_cleanup = False
                 for k in range(t_idx, min(t_idx + _MAX_TERNARY_MINI_SEARCH_WINDOW, len(self.instructions))):
                     op = self.instructions[k].opname
-                    if op in ("DELETE_FAST", "DELETE_NAME", "DELETE_GLOBAL", "RERAISE"):
+                    if op in ("DELETE_FAST", "DELETE_NAME", "DELETE_GLOBAL", "DELETE_DEREF", "RERAISE"):
                         is_cleanup = True
                         break
                     elif op not in ("LOAD_CONST", "STORE_FAST", "STORE_NAME",
-                                    "STORE_GLOBAL", "POP_BLOCK", "NOP"):
+                                    "STORE_GLOBAL", "STORE_DEREF", "POP_BLOCK", "NOP"):
                         break
                 if is_cleanup:
                     is_except = True   # treat as cleanup, not a user finally
@@ -1041,7 +1041,7 @@ class Decompiler39(DecompilerGeneric):
                         nxt = look + 1
                         if (nxt < len(self.instructions)
                                 and self.instructions[nxt].opname in (
-                                    "STORE_NAME", "STORE_FAST"
+                                    "STORE_NAME", "STORE_FAST", "STORE_DEREF", "STORE_GLOBAL"
                         )):
                             look += 1  # skip this POP_TOP
                             break      # next iteration: handle STORE_NAME below
@@ -1049,13 +1049,11 @@ class Decompiler39(DecompilerGeneric):
                     # Now check for 'as e' STORE_NAME
                     if (look < len(self.instructions)
                             and self.instructions[look].opname in (
-                                "STORE_NAME", "STORE_FAST"
+                                "STORE_NAME", "STORE_FAST", "STORE_DEREF", "STORE_GLOBAL"
                     )):
                         as_name = str(self.instructions[look].argval)
                         self._exc_as_store_offset = self.instructions[look].offset
-                        self._exc_cleanup_name = as_name
-                        if as_name:
-                            self._exc_bound_names.add(as_name)
+                        self._record_exc_cleanup_offsets(look, as_name)
                         look += 1
 
                     # Close any still-open try_body block

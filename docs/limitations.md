@@ -20,7 +20,6 @@ These change what the code does, or produce code that does not compile:
 
 | Construct | Versions | What you get | Issue |
 |---|---|---|---|
-| `global` and `nonlocal` declarations | all | the declaration is dropped, so assignments become local | [#155](https://github.com/sahebbiswas/pycrefine/issues/155) |
 | Starred assignment, `first, *rest = x` | all | `first = x` (3.9, 3.12) or `first, rest = x` (3.14) | [#156](https://github.com/sahebbiswas/pycrefine/issues/156) |
 | `match` / `case` | 3.10+ | a single `if` with the wrong condition | [#85](https://github.com/sahebbiswas/pycrefine/issues/85) |
 | `async def`, `await`, `async for`, `async with` | all | a generator full of `yield None` | [#85](https://github.com/sahebbiswas/pycrefine/issues/85) |
