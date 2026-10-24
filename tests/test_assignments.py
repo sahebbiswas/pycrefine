@@ -77,6 +77,15 @@ class TestStarredAssignment(unittest.TestCase):
             "def f(values):\n    o = O()\n    a, *o.b = iter(values)\n    return a, o.b\n"
             "print(f([10, 20, 30]))\n")
 
+    def test_attribute_and_subscript_targets_arity_error(self):
+        """Test UNPACK_EX fallback raises ValueError when RHS has insufficient elements."""
+        self.assert_same_behavior(
+            "class O:\n    x = 0\n"
+            "def f():\n    o = O()\n    d = {}\n    try:\n"
+            "        d['x'], *mid, d['y'] = [1]\n    except ValueError:\n"
+            "        return 'caught'\n    return 'not caught'\n"
+            "print(f())\n")
+
     def test_plain_unpacking_still_works(self):
         """Test that plain (non-starred) unpacking assignments remain functional."""
         self.assert_same_ast("def f(x):\n    a, (b, c) = x\n    (d,) = c\n    return a, b, d\n")

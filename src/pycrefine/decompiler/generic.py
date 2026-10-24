@@ -3777,6 +3777,12 @@ class DecompilerGeneric(DecompilerBase):
             # serves them up in 0..n-1 order.
             if instr.opname == "UNPACK_EX" and isinstance(instr.arg, int):
                 before, after = instr.arg & 0xFF, instr.arg >> 8
+                required = before + after
+                if required:
+                    self._append_reconstructed(
+                        f"if len({val_str}) < {required}: "
+                        "raise ValueError('not enough values to unpack')"
+                    )
                 stop = f"-{after}" if after else ""
                 accessors = ([f"{val_str}[{i}]" for i in range(before)]
                              + [f"list({val_str}[{before}:{stop}])"]
