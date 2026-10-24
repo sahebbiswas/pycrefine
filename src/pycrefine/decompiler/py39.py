@@ -1053,9 +1053,7 @@ class Decompiler39(DecompilerGeneric):
                     )):
                         as_name = str(self.instructions[look].argval)
                         self._exc_as_store_offset = self.instructions[look].offset
-                        self._exc_cleanup_name = as_name
-                        if as_name:
-                            self._exc_bound_names.add(as_name)
+                        self._record_exc_cleanup_offsets(look, as_name)
                         look += 1
 
                     # Close any still-open try_body block

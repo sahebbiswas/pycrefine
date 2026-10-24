@@ -89,10 +89,11 @@ class DecompilerGeneric(DecompilerBase):
                 trailing condition checks emitted by some bytecode patterns (notably 3.11+).
             _exc_as_store_offset (int): Bytecode offset of a STORE_* that implements `except ... as name`
                 and should be skipped during normal emission (-1 when none).
-            _exc_cleanup_name (Optional[str]): Exception cleanup temporary name to suppress from output.
+            _exc_cleanup_offsets (set): Bytecode offsets of compiler-generated `name = None; del name`
+                cleanup instructions for `except ... as name` bindings.
             _except_header_indents (List[int]): Stack of indentation levels for except headers.
             _except_end_offsets (List[int]): Stack of end-offsets for exception regions used to suppress intervening jumps.
-            _exc_bound_names (set): Names that have been bound via `except ... as name`.
+            _enclosing_locals (set): Names bound in enclosing function scopes.
             _try_nop_offsets (set): Offsets of NOP markers that indicate try-entry points (filled by prescan).
             _suppress_push_exc_offsets (set): Offsets of PUSH_EXC_INFO instructions to suppress (filled by prescan).
             _finally_merge_offsets (set): Merge-label offsets where deferred finally/except content must be emitted.
@@ -122,10 +123,10 @@ class DecompilerGeneric(DecompilerBase):
         self._dup_guard_exits: set = set()  # exit targets of suppressed bottom-of-loop condition copies
         # Exception-handler bookkeeping
         self._exc_as_store_offset: int = -1      # offset of 'as e' STORE to skip
-        self._exc_cleanup_name: Optional[str] = None   # name to suppress in cleanup
+        self._exc_cleanup_offsets: set = set()   # offsets of compiler-generated except-as cleanup ops
         self._except_header_indents: List[int] = []    # stack of indent levels for except headers
         self._except_end_offsets: List[int] = []      # stack of end-offsets for exception zones
-        self._exc_bound_names: set = set()             # all names ever bound in except-as
+        self._enclosing_locals: set = set()           # names bound in enclosing function scopes
         # The following sets are populated by _prescan_try_structure() which runs in decompile()
         self._try_nop_offsets: set = set()
         self._suppress_push_exc_offsets: set = set()
@@ -158,26 +159,30 @@ class DecompilerGeneric(DecompilerBase):
         """
         The `global` and `nonlocal` statements a function or class body needs (#155).
 
-        They compile to no instruction of their own, only to how names are stored: a body
+        They compile to no instruction of their own, only to how names are accessed: a body
         that assigns to or deletes a module-level name uses ``STORE_GLOBAL`` /
         ``DELETE_GLOBAL``, and one that assigns to or deletes a variable of an enclosing
         function uses ``STORE_DEREF`` / ``DELETE_DEREF`` on one of its free variables.
-        Reads need no declaration. Names are listed in order of first use. Module code
-        and the bodies rendered inline (lambdas, comprehensions, handler replays at indent
-        0) get none: the module's own names are global already, and a comprehension's
-        walrus target belongs to the scope it is written in.
+        Reads need no declaration unless an enclosing function binds the same name, in
+        which case ``LOAD_GLOBAL`` needs ``global`` so recompiling does not capture the
+        enclosing variable. Names are listed in order of first use. Module code and the
+        bodies rendered inline (lambdas, comprehensions, handler replays at indent 0) get
+        none: the module's own names are global already, and a comprehension's walrus
+        target belongs to the scope it is written in.
         """
         code = self.code_obj
         if self.indent_level <= 0 or code.co_name.startswith("<"):
             return []
         freevars = set(code.co_freevars)
+        enclosing = self._enclosing_locals
         globals_: List[str] = []
         nonlocals: List[str] = []
         for ins in self.instructions:
             name = ins.argval
             if not isinstance(name, str) or name.startswith("."):
                 continue
-            if ins.opname in ("STORE_GLOBAL", "DELETE_GLOBAL"):
+            if (ins.opname in ("STORE_GLOBAL", "DELETE_GLOBAL")
+                    or (ins.opname == "LOAD_GLOBAL" and name in enclosing)):
                 if name not in globals_:
                     globals_.append(name)
             elif ins.opname in ("STORE_DEREF", "DELETE_DEREF") and name in freevars:
@@ -189,6 +194,36 @@ class DecompilerGeneric(DecompilerBase):
         if nonlocals:
             lines.append("nonlocal " + ", ".join(nonlocals))
         return lines
+
+    def _child_enclosing_locals(self) -> set:
+        """Names bound in this or an enclosing function scope (``CO_OPTIMIZED`` = 0x01)."""
+        enclosing = set(self._enclosing_locals)
+        code = self.code_obj
+        if code.co_flags & 0x01:
+            enclosing.update(code.co_varnames)
+            enclosing.update(code.co_cellvars)
+            enclosing.update(code.co_freevars)
+        return enclosing
+
+    def _record_exc_cleanup_offsets(self, start_idx: int, as_name: str) -> None:
+        """
+        Record the ``STORE_*`` and ``DELETE_*`` offsets of the compiler-generated
+        ``as_name = None; del as_name`` cleanup sequences for an ``except ... as``
+        binding at *start_idx*, leaving user-written stores and deletes of *as_name*
+        alone.
+        """
+        stores = ("STORE_NAME", "STORE_FAST", "STORE_DEREF", "STORE_GLOBAL")
+        deletes = ("DELETE_NAME", "DELETE_FAST", "DELETE_DEREF", "DELETE_GLOBAL")
+        seq = [ins for ins in self.instructions[start_idx:]
+               if ins.opname not in ("NOP", "CACHE", "NOT_TAKEN")]
+        for i in range(1, len(seq) - 2):
+            load_i, store_i, del_i = seq[i], seq[i + 1], seq[i + 2]
+            if ((load_i.opname, load_i.argval, store_i.argval, del_i.argval)
+                    == ("LOAD_CONST", None, as_name, as_name)
+                    and store_i.opname in stores and del_i.opname in deletes):
+                next_op = seq[i + 3].opname if i + 3 < len(seq) else None
+                if seq[i - 1].opname in ("POP_EXCEPT", "POP_BLOCK") or next_op == "RERAISE":
+                    self._exc_cleanup_offsets.update((store_i.offset, del_i.offset))
 
     def _emit_scope_declarations(self) -> None:
         """Emit the body's `global`/`nonlocal` statements, after its docstring."""
@@ -3293,7 +3328,8 @@ class DecompilerGeneric(DecompilerBase):
         sub._compound_cond_map = {}
         sub._compound_suppress = set()
         sub._except_header_indents = [0]
-        sub._exc_bound_names = set()
+        sub._exc_cleanup_offsets = set()
+        sub._enclosing_locals = self._enclosing_locals
         # Install only the handler instructions
         sub.instructions = handler_instrs
         sub.pc = 0
@@ -3575,10 +3611,7 @@ class DecompilerGeneric(DecompilerBase):
                 return
             name = str(instr.argval)
             # Suppress except-cleanup: `e = None` before `del e`
-            # This covers both the normal-exit path AND the re-raise path.
-            cleanup = getattr(self, "_exc_cleanup_name", None)
-            bound = getattr(self, "_exc_bound_names", set())
-            if (cleanup and name == cleanup and str(val) == "None") or (name in bound and str(val) == "None"):
+            if instr.offset in getattr(self, "_exc_cleanup_offsets", ()):
                 return
             if name in (
                 "__module__", "__qualname__", "__firstlineno__",
@@ -3862,6 +3895,7 @@ class DecompilerGeneric(DecompilerBase):
             if op in ("STORE_NAME", "STORE_FAST", "STORE_DEREF", "STORE_GLOBAL"):
                 as_name = str(ins_l.argval)
                 self._exc_as_store_offset = ins_l.offset
+                self._record_exc_cleanup_offsets(look, as_name)
                 break
             # Step 4: definitively in handler body — no binding
             if op in _IS_COMP_GEN_STOP or self._is_backward_jump(op):
@@ -3877,10 +3911,6 @@ class DecompilerGeneric(DecompilerBase):
             break
         if as_name is None:
             self._exc_as_store_offset = -1
-        self._exc_cleanup_name = as_name
-        # Also record in a persistent set for re-raise-path cleanup suppression
-        if as_name:
-            self._exc_bound_names.add(as_name)
         if as_name:
             self._append_reconstructed(f"except {exc_type} as {as_name}:")
         else:
@@ -4205,6 +4235,7 @@ class DecompilerGeneric(DecompilerBase):
 
             dec_class = _pick_decompiler_class(self)
             dec = dec_class(inner_code, indent_level=1, beautification_level=self.beautification_level, target_version=self.target_version)
+            dec._enclosing_locals = self._child_enclosing_locals()
             body = dec.decompile()
             sig = f"def {inner_code.co_name}({', '.join(params)}):"
             
@@ -5954,11 +5985,7 @@ class DecompilerGeneric(DecompilerBase):
 
     def _op_delete(self, instr: BytecodeInstruction):
         opname = instr.opname
-        # Suppress except-cleanup `del e` for any except-bound name.
-        bound = getattr(self, "_exc_bound_names", set())
-        if str(instr.argval) in bound:
-            if str(instr.argval) == getattr(self, "_exc_cleanup_name", None):
-                self._exc_cleanup_name = None
+        if instr.offset in getattr(self, "_exc_cleanup_offsets", ()):
             return
         self._append_reconstructed(f"del {instr.argval}")
 
