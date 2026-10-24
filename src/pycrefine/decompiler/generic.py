@@ -171,25 +171,6 @@ class DecompilerGeneric(DecompilerBase):
     # Main loop
     # ------------------------------------------------------------------
 
-    def _scope_instructions(self):
-        """Yield instructions in this scope and any inline comprehension code objects."""
-        yield from self.instructions
-        seen_codes = set()
-
-        def _comp_instructions(co):
-            for const in getattr(co, "co_consts", ()):
-                if not hasattr(const, "co_code") or id(const) in seen_codes:
-                    continue
-                seen_codes.add(id(const))
-                if const.co_name in ("<listcomp>", "<setcomp>", "<dictcomp>", "<genexpr>"):
-                    instrs = getattr(const, "instructions", None)
-                    if instrs is None:
-                        instrs = dis.get_instructions(const)
-                    yield from instrs
-                    yield from _comp_instructions(const)
-
-        yield from _comp_instructions(self.code_obj)
-
     def _scope_declarations(self) -> List[str]:
         """
         The `global` and `nonlocal` statements a function or class body needs (#155).
@@ -200,11 +181,10 @@ class DecompilerGeneric(DecompilerBase):
         function uses ``STORE_DEREF`` / ``DELETE_DEREF`` on one of its free variables.
         Reads need no declaration unless an enclosing function binds the same name, in
         which case ``LOAD_GLOBAL`` needs ``global`` so recompiling does not capture the
-        enclosing variable. Declarations required by assignment expressions inside inline
-        comprehensions are included for the containing scope. Names are listed in order of
-        first use. Module code and the bodies rendered inline (lambdas, comprehensions,
-        handler replays at indent 0) get none: the module's own names are global already,
-        and a comprehension's walrus target belongs to the scope it is written in.
+        enclosing variable. Names are listed in order of first use. Module code and the
+        bodies rendered inline (lambdas, comprehensions, handler replays at indent 0) get
+        none: the module's own names are global already, and a comprehension's walrus
+        target belongs to the scope it is written in.
         """
         code = self.code_obj
         if self.indent_level <= 0 or code.co_name.startswith("<"):
@@ -213,7 +193,7 @@ class DecompilerGeneric(DecompilerBase):
         enclosing = self._enclosing_locals
         globals_: List[str] = []
         nonlocals: List[str] = []
-        for ins in self._scope_instructions():
+        for ins in self.instructions:
             name = ins.argval
             if not isinstance(name, str) or name.startswith("."):
                 continue
@@ -3787,6 +3767,10 @@ class DecompilerGeneric(DecompilerBase):
             # discrete indexed extraction from the stack value
             val = self.stack.pop()
             val_str = str(val)
+            if instr.opname == "UNPACK_EX":
+                temp = self._fresh_accum_name()
+                self._append_reconstructed(f"{temp} = list({val_str})")
+                val_str = temp
             # Push discrete accessors onto the stack for subsequent STORE_*
             # to consume.  Since STOREs are processed sequentially, we push
             # item[n-1], then item[n-2], ..., item[0] so that the stack
