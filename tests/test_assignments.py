@@ -63,6 +63,43 @@ class TestStarredAssignment(unittest.TestCase):
     def test_plain_unpacking_still_works(self):
         self.assert_same_ast("def f(x):\n    a, (b, c) = x\n    (d,) = c\n    return a, b, d\n")
 
+    def test_nested_fused_target_pending(self):
+        from pycrefine import BytecodeInstruction as Instr
+        from pycrefine.decompiler.generic import DecompilerGeneric
+
+        code = compile("pass", "<test>", "exec")
+        dec = DecompilerGeneric(code)
+        instructions = [
+            Instr(100, "LOAD_FAST", 0, "t", 0, None, False),
+            Instr(92, "UNPACK_SEQUENCE", 2, 2, 2, None, False),
+            Instr(92, "UNPACK_SEQUENCE", 2, 2, 4, None, False),
+            Instr(125, "STORE_FAST", 0, "x", 6, None, False),
+            Instr(160, "STORE_FAST_STORE_FAST", 0, ("a", "b"), 8, None, False),
+        ]
+        dec.instructions = instructions
+        pending = []
+        parsed = dec._parse_store_target(instructions, 1, pending)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed[0], "(x, a), b")
+        self.assertEqual(pending, [])
+
+    def test_unpack_at_start_of_instructions(self):
+        from pycrefine import BytecodeInstruction as Instr
+        from pycrefine.decompiler.generic import DecompilerGeneric
+
+        code = compile("pass", "<test>", "exec")
+        dec = DecompilerGeneric(code)
+        instructions = [
+            Instr(93, "UNPACK_EX", 1, 1, 0, None, False),
+            Instr(125, "STORE_FAST", 0, "a", 2, None, False),
+            Instr(125, "STORE_FAST", 1, "b", 4, None, False),
+        ]
+        dec.instructions = instructions
+        dec.pc = 0
+        dec.stack = ["val"]
+        dec._op_unpack_sequence(instructions[0])
+        self.assertEqual(dec.reconstructed, ["a, *b = val"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -171,6 +171,25 @@ class DecompilerGeneric(DecompilerBase):
     # Main loop
     # ------------------------------------------------------------------
 
+    def _scope_instructions(self):
+        """Yield instructions in this scope and any inline comprehension code objects."""
+        yield from self.instructions
+        seen_codes = set()
+
+        def _comp_instructions(co):
+            for const in getattr(co, "co_consts", ()):
+                if not hasattr(const, "co_code") or id(const) in seen_codes:
+                    continue
+                seen_codes.add(id(const))
+                if const.co_name in ("<listcomp>", "<setcomp>", "<dictcomp>", "<genexpr>"):
+                    instrs = getattr(const, "instructions", None)
+                    if instrs is None:
+                        instrs = dis.get_instructions(const)
+                    yield from instrs
+                    yield from _comp_instructions(const)
+
+        yield from _comp_instructions(self.code_obj)
+
     def _scope_declarations(self) -> List[str]:
         """
         The `global` and `nonlocal` statements a function or class body needs (#155).
@@ -181,10 +200,11 @@ class DecompilerGeneric(DecompilerBase):
         function uses ``STORE_DEREF`` / ``DELETE_DEREF`` on one of its free variables.
         Reads need no declaration unless an enclosing function binds the same name, in
         which case ``LOAD_GLOBAL`` needs ``global`` so recompiling does not capture the
-        enclosing variable. Names are listed in order of first use. Module code and the
-        bodies rendered inline (lambdas, comprehensions, handler replays at indent 0) get
-        none: the module's own names are global already, and a comprehension's walrus
-        target belongs to the scope it is written in.
+        enclosing variable. Declarations required by assignment expressions inside inline
+        comprehensions are included for the containing scope. Names are listed in order of
+        first use. Module code and the bodies rendered inline (lambdas, comprehensions,
+        handler replays at indent 0) get none: the module's own names are global already,
+        and a comprehension's walrus target belongs to the scope it is written in.
         """
         code = self.code_obj
         if self.indent_level <= 0 or code.co_name.startswith("<"):
@@ -193,7 +213,7 @@ class DecompilerGeneric(DecompilerBase):
         enclosing = self._enclosing_locals
         globals_: List[str] = []
         nonlocals: List[str] = []
-        for ins in self.instructions:
+        for ins in self._scope_instructions():
             name = ins.argval
             if not isinstance(name, str) or name.startswith("."):
                 continue
@@ -1448,6 +1468,10 @@ class DecompilerGeneric(DecompilerBase):
         """
         Parse the assignment target that starts at ``body[pos]``.
 
+        ``pos`` must point at the unpacking instruction (``UNPACK_SEQUENCE``/``UNPACK_EX``)
+        or at the first STORE_* of a simple name target. The returned ``next_pos`` is the
+        index of the first instruction *after* the entire target.
+
         A target is a name (``STORE_FAST``/``STORE_NAME``/``STORE_GLOBAL``/
         ``STORE_DEREF``), or an unpacking: ``UNPACK_SEQUENCE n`` followed by *n* targets,
         or ``UNPACK_EX`` for a starred one (#156), whose operand holds the number of
@@ -1463,7 +1487,7 @@ class DecompilerGeneric(DecompilerBase):
             pending = []
         if pending:
             return pending.pop(0), False, pos
-        while pos < len(body) and body[pos].opname in ("NOP", "CACHE", "NOT_TAKEN", "RESUME"):
+        while pos < len(body) and body[pos].opname in _GENERIC_SKIP_OPS:
             pos += 1
         ins = body[pos] if pos < len(body) else None
         names = self._store_names(ins) if ins is not None else None
@@ -1485,7 +1509,7 @@ class DecompilerGeneric(DecompilerBase):
                 text = f"({text})"
             parts.append("*" + text if i == star else text)
         text = ", ".join(parts) + ("," if count == 1 else "")
-        return (text, True, pos) if not pending else None
+        return text, True, pos
 
     def _eval_comp_slice(self, instrs: list, count: int = 1, consumer=None) -> Optional[List[str]]:
         """
@@ -3739,8 +3763,16 @@ class DecompilerGeneric(DecompilerBase):
         n = shape[0] if shape is not None else 0
         if n < 1:
             return
+        unpack_idx = self.pc - 1
+        if (unpack_idx < 0 or unpack_idx >= len(self.instructions)
+                or self.instructions[unpack_idx] is not instr):
+            unpack_idx = next(
+                (i for i, ins in enumerate(self.instructions) if ins is instr), -1
+            )
+        if unpack_idx < 0:
+            return
         pending: List[str] = []
-        parsed = self._parse_store_target(self.instructions, self.pc - 1, pending)
+        parsed = self._parse_store_target(self.instructions, unpack_idx, pending)
         targets = None
         next_pc = self.pc
         if parsed is not None and not pending:
@@ -5722,15 +5754,14 @@ class DecompilerGeneric(DecompilerBase):
             # and the STORE in some Python versions (e.g. NOT_TAKEN on 3.14).
 
             if self.pc < len(self.instructions):
-                peek_pc = self.pc
                 while (peek_pc < len(self.instructions)
                        and self.instructions[peek_pc].opname in _GENERIC_SKIP_OPS):
                     peek_pc += 1
                 if peek_pc < len(self.instructions):
                     next_instr = self.instructions[peek_pc]
-                    if next_instr.opname in ("STORE_NAME", "STORE_FAST", 
+                    if next_instr.opname in ("STORE_NAME", "STORE_FAST",
                                              "STORE_FAST_STORE_FAST", "STORE_FAST_LOAD_FAST"):
-                        if "STORE_FAST_STORE_FAST" in next_instr.opname:
+                        if next_instr.opname == "STORE_FAST_STORE_FAST":
                             var_name = ", ".join([str(v) for v in next_instr.argval])
                             self.pc = peek_pc + 1
                         else:

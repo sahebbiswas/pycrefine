@@ -129,6 +129,144 @@ class TestGlobalAndNonlocal(unittest.TestCase):
         self.assertEqual(out.count("Z = None"), 1, out)
         self.assertEqual(out.count("del Z"), 1, out)
 
+    def test_global_in_39_comprehension_code_object(self):
+        from pycrefine import BytecodeInstruction as Instr
+        from pycrefine.codeobj import ForeignCode
+        from pycrefine.decompiler.py39 import Decompiler39
+
+        comp_code = ForeignCode(
+            co_name="<listcomp>",
+            instructions=[
+                Instr(100, "LOAD_FAST", 0, "x", 0, None, False),
+                Instr(97, "STORE_GLOBAL", 0, "Z", 2, None, False),
+            ],
+            co_consts=(),
+        )
+        comp_code.co_code = b"dummy"
+        inner_func = ForeignCode(
+            co_name="inner",
+            instructions=[
+                Instr(97, "STORE_GLOBAL", 0, "OTHER", 0, None, False),
+            ],
+            co_consts=(),
+        )
+        inner_func.co_code = b"dummy"
+        parent_code = ForeignCode(
+            co_name="f",
+            co_flags=0x01,
+            co_varnames=("x",),
+            co_cellvars=(),
+            co_freevars=(),
+            co_consts=(comp_code, inner_func),
+            instructions=[
+                Instr(100, "LOAD_CONST", 0, comp_code, 0, None, False),
+                Instr(100, "LOAD_CONST", 1, inner_func, 2, None, False),
+                Instr(83, "RETURN_VALUE", None, None, 4, None, False),
+            ],
+        )
+        parent_code.co_code = b"dummy"
+        dec = Decompiler39(parent_code, indent_level=1)
+        # Should include global Z from <listcomp>, but exclude OTHER from ordinary function inner
+        self.assertEqual(dec._scope_declarations(), ["global Z"])
+
+    def test_nonlocal_in_39_comprehension_code_object(self):
+        from pycrefine import BytecodeInstruction as Instr
+        from pycrefine.codeobj import ForeignCode
+        from pycrefine.decompiler.py39 import Decompiler39
+
+        comp_code = ForeignCode(
+            co_name="<listcomp>",
+            instructions=[
+                Instr(100, "LOAD_FAST", 0, "x", 0, None, False),
+                Instr(136, "STORE_DEREF", 0, "n", 2, None, False),
+            ],
+            co_consts=(),
+        )
+        comp_code.co_code = b"dummy"
+        parent_code = ForeignCode(
+            co_name="inner",
+            co_flags=0x01,
+            co_varnames=("x",),
+            co_cellvars=(),
+            co_freevars=("n",),
+            co_consts=(comp_code,),
+            instructions=[
+                Instr(100, "LOAD_CONST", 0, comp_code, 0, None, False),
+                Instr(83, "RETURN_VALUE", None, None, 2, None, False),
+            ],
+        )
+        parent_code.co_code = b"dummy"
+        dec = Decompiler39(parent_code, indent_level=1)
+        self.assertEqual(dec._scope_declarations(), ["nonlocal n"])
+
+    def test_nested_39_comprehension_code_object(self):
+        from pycrefine import BytecodeInstruction as Instr
+        from pycrefine.codeobj import ForeignCode
+        from pycrefine.decompiler.py39 import Decompiler39
+
+        inner_comp = ForeignCode(
+            co_name="<setcomp>",
+            instructions=[
+                Instr(100, "LOAD_FAST", 0, "x", 0, None, False),
+                Instr(97, "STORE_GLOBAL", 0, "Z", 2, None, False),
+            ],
+            co_consts=(),
+        )
+        inner_comp.co_code = b"dummy"
+        outer_comp = ForeignCode(
+            co_name="<listcomp>",
+            instructions=[
+                Instr(100, "LOAD_CONST", 0, inner_comp, 0, None, False),
+            ],
+            co_consts=(inner_comp,),
+        )
+        outer_comp.co_code = b"dummy"
+        parent_code = ForeignCode(
+            co_name="f",
+            co_flags=0x01,
+            co_varnames=(),
+            co_cellvars=(),
+            co_freevars=(),
+            co_consts=(outer_comp,),
+            instructions=[
+                Instr(100, "LOAD_CONST", 0, outer_comp, 0, None, False),
+                Instr(83, "RETURN_VALUE", None, None, 2, None, False),
+            ],
+        )
+        parent_code.co_code = b"dummy"
+        dec = Decompiler39(parent_code, indent_level=1)
+        self.assertEqual(dec._scope_declarations(), ["global Z"])
+
+    def test_shadowed_global_read_in_39_comprehension_code_object(self):
+        from pycrefine import BytecodeInstruction as Instr
+        from pycrefine.codeobj import ForeignCode
+        from pycrefine.decompiler.py39 import Decompiler39
+
+        inner_comp = ForeignCode(
+            co_name="<listcomp>",
+            instructions=[
+                Instr(116, "LOAD_GLOBAL", 0, "x", 0, None, False),
+            ],
+            co_consts=(),
+        )
+        inner_comp.co_code = b"dummy"
+        parent_code = ForeignCode(
+            co_name="inner",
+            co_flags=0x01,
+            co_varnames=(),
+            co_cellvars=(),
+            co_freevars=(),
+            co_consts=(inner_comp,),
+            instructions=[
+                Instr(100, "LOAD_CONST", 0, inner_comp, 0, None, False),
+                Instr(83, "RETURN_VALUE", None, None, 2, None, False),
+            ],
+        )
+        parent_code.co_code = b"dummy"
+        dec = Decompiler39(parent_code, indent_level=1)
+        dec._enclosing_locals = {"x"}
+        self.assertEqual(dec._scope_declarations(), ["global x"])
+
 
 if __name__ == "__main__":
     unittest.main()
