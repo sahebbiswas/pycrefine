@@ -3780,8 +3780,9 @@ class DecompilerGeneric(DecompilerBase):
                 required = before + after
                 if required:
                     self._append_reconstructed(
-                        f"if len({val_str}) < {required}: "
-                        "raise ValueError('not enough values to unpack')"
+                        f"if {val_str}.__len__() < {required}: "
+                        "raise (getattr(__builtins__, 'ValueError', None) "
+                        "or __builtins__['ValueError'])('not enough values to unpack')"
                     )
                 stop = f"-{after}" if after else ""
                 accessors = ([f"{val_str}[{i}]" for i in range(before)]

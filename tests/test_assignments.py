@@ -86,6 +86,21 @@ class TestStarredAssignment(unittest.TestCase):
             "        return 'caught'\n    return 'not caught'\n"
             "print(f())\n")
 
+    def test_attribute_and_subscript_targets_shadowed_builtins(self):
+        """Test UNPACK_EX fallback arity check when len and ValueError are shadowed by parameters."""
+        self.assert_same_behavior(
+            "class O:\n    b = []\n"
+            "def f(len, ValueError, o):\n    a, *o.b = [1, 2]\n    return a, o.b\n"
+            "print(f(10, 'custom', O()))\n"
+            "def g(len, ValueError, o):\n"
+            "    import builtins\n"
+            "    try:\n"
+            "        a, *o.b = []\n"
+            "    except builtins.ValueError:\n"
+            "        return 'caught built-in'\n"
+            "    return 'not caught'\n"
+            "print(g(10, 'custom', O()))\n")
+
     def test_plain_unpacking_still_works(self):
         """Test that plain (non-starred) unpacking assignments remain functional."""
         self.assert_same_ast("def f(x):\n    a, (b, c) = x\n    (d,) = c\n    return a, b, d\n")
