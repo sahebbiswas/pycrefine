@@ -4089,6 +4089,9 @@ class DecompilerGeneric(DecompilerBase):
         At an except clause's POP_EXCEPT: when the clause ends in `return`, keep it open
         until that return has been emitted, so the return stays inside the clause
         instead of landing after the try statement (#165).
+
+        Returns True only when it defers, and then it has moved ``self.pc`` past the
+        handler's clean-up to the resume point; on False ``self.pc`` is unchanged.
         """
         found = self._handler_exit_return(self.pc)
         if found is None:
