@@ -48,6 +48,7 @@ CI runs all of these on every pull request; run them locally first.
 |---|---|---|
 | Tests | `python -m pytest` | `Python 3.9`, `3.10`, `3.11`, `3.12`, `3.13`, `3.14` |
 | Correctness gate | `python quality/check_correctness.py` | the same six |
+| Differential behavior check | `python quality/check_differential.py` | the same six |
 | Lint ratchet (pylint) | `python quality/check_lint.py` (on Python 3.12) | `Lint` |
 | Types (mypy) | `mypy` | `Lint` |
 | Version bumped | see [Versioning](#versioning) | `Version` |
@@ -79,6 +80,16 @@ python quality/check_correctness.py --update-baseline
 ```
 
 [docs/correctness.md](docs/correctness.md) explains the model and the report.
+
+**Differential behavior check.** `quality/check_differential.py` runs the programs in
+`quality/differential/fixtures/` and their decompiled versions and compares what they do
+(exception, stdout, stderr and `RESULT`). It fails when a fixture behaves worse than its
+baseline in `quality/differential/baselines/`. When a change makes fixtures behave
+correctly, record it on each CI Python version with
+`python quality/check_differential.py --update-baseline`, and remove the fixture's entry
+from `issues` if the issue is fixed. A new fixture that exposes a gap needs an issue
+(see [Reporting gaps](#reporting-gaps)) before it goes into the baseline. See
+[docs/correctness.md](docs/correctness.md#differential-behavior-check).
 
 **Lint and types.** The lint ratchet allows the findings recorded in
 `quality/lint_baseline.json` and fails on any new one; when you remove findings, lower

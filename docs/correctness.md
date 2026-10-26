@@ -113,7 +113,59 @@ fixtures in `tests/fixtures/foreign_pyc/`. Any other file or directory can be me
 python quality/check_correctness.py src/pycrefine/ src/pycrefine/decompiler/ src/pycrefine/opcodes/ tests/ --no-baseline -v
 ```
 
-A larger, versioned corpus is tracked in #78.
+A larger, versioned corpus is tracked in #78; the differential check above
+covers behavior.
+
+## Differential behavior check
+
+The gate above asks whether the output *compiles*. `quality/check_differential.py` asks
+whether it *behaves*: for each program in `quality/differential/fixtures/` it compiles
+the source, decompiles it, compiles the result, runs the original and the reconstructed
+source in separate subprocesses, and compares the exception (type and message), stdout,
+stderr and the repr of a module-level `RESULT` if the program defines one. Each fixture
+lands on a ladder, lowest to highest:
+
+| Status | Meaning |
+|---|---|
+| `decompile_error` | pycrefine raised, produced nothing, or ran out of time |
+| `syntax_error` | the decompiled source does not compile |
+| `mismatch` | it runs, but not like the original; the report shows the differing field |
+| `equivalent` | same exception, output and `RESULT` |
+
+A fixture that cannot run on the interpreter at all (`source_error`) is reported but not
+scored.
+
+```bash
+python quality/check_differential.py                       # all fixtures, against the baseline
+python quality/check_differential.py flow_while -v         # one fixture, with the generated source
+python quality/check_differential.py --update-baseline     # record the current results
+python quality/check_differential.py --python python3.9 --python python3.12   # other interpreters
+```
+
+Like the gate, it compares each run with a committed baseline for the Python it runs
+under (`quality/differential/baselines/py3.X.json`) and fails when a fixture does worse
+than its baseline, or when a fixture is added or removed without updating the baseline.
+Improvements never fail; record them with `--update-baseline` on every CI Python
+version. The baseline also has an `issues` entry for every fixture that is not
+`equivalent`, naming the issues that track why; a fixture that exposes a new gap gets an
+issue before it gets a baseline entry (`tests/test_differential.py` checks that every
+failing fixture has one). CI runs the check after the gate, on every Python version, and
+uploads the JSON report with the correctness report.
+
+Bytecode from 3.10 onwards can only be decompiled by the interpreter that wrote it, so each run covers
+the interpreter it runs under; `--python` runs the whole check under others in turn.
+
+**Safety.** The fixtures are committed and trusted, but they are executed, so every step
+runs in a subprocess with a wall-clock timeout, an empty environment and working
+directory, and (on POSIX) limits on CPU time, memory and file size. That bounds a
+runaway fixture; it is not a sandbox. Do not point `--fixtures` at code you do not trust
+without running the whole check in a container.
+
+**Adding a fixture.** Put a small `.py` program in `quality/differential/fixtures/`. It
+should print what it computes and may set `RESULT`; avoid anything that depends on the
+time, randomness, the network or the file system. Run it on every Python version, file an
+issue for each gap it exposes, and record the baselines (with the issue numbers under
+`issues`).
 
 ## Machine-readable output
 
