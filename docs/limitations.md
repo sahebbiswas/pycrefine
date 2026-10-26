@@ -9,8 +9,7 @@ Everything here was checked against the current `main`.
 | Bytecode written by | Status |
 |---|---|
 | 3.9 | Supported and tested in CI. Decompiles under any Python 3.9 or later. |
-| 3.12, 3.14 | Supported and tested in CI. Needs the same Python minor version to run pycrefine ([#94](https://github.com/sahebbiswas/pycrefine/issues/94)). |
-| 3.13 | Mostly works (the test suite has two known failures); not in CI ([#6](https://github.com/sahebbiswas/pycrefine/issues/6)). |
+| 3.12, 3.13, 3.14 | Supported and tested in CI. Needs the same Python minor version to run pycrefine ([#94](https://github.com/sahebbiswas/pycrefine/issues/94)). |
 | 3.10, 3.11 | Partial. Loops, exception handling and `try`/`finally` often come out wrong ([#3](https://github.com/sahebbiswas/pycrefine/issues/3), [#4](https://github.com/sahebbiswas/pycrefine/issues/4), [#105](https://github.com/sahebbiswas/pycrefine/issues/105)). |
 | 3.8 and older | Not supported. |
 

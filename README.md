@@ -2,6 +2,7 @@
 
 [![Python 3.9](https://github.com/sahebbiswas/pycrefine/actions/workflows/ci-py39.yml/badge.svg?branch=main&event=push)](https://github.com/sahebbiswas/pycrefine/actions/workflows/ci-py39.yml)
 [![Python 3.12](https://github.com/sahebbiswas/pycrefine/actions/workflows/ci-py312.yml/badge.svg?branch=main&event=push)](https://github.com/sahebbiswas/pycrefine/actions/workflows/ci-py312.yml)
+[![Python 3.13](https://github.com/sahebbiswas/pycrefine/actions/workflows/ci-py313.yml/badge.svg?branch=main&event=push)](https://github.com/sahebbiswas/pycrefine/actions/workflows/ci-py313.yml)
 [![Python 3.14](https://github.com/sahebbiswas/pycrefine/actions/workflows/ci-py314.yml/badge.svg?branch=main&event=push)](https://github.com/sahebbiswas/pycrefine/actions/workflows/ci-py314.yml)
 [![Lint](https://github.com/sahebbiswas/pycrefine/actions/workflows/lint.yml/badge.svg?branch=main&event=push)](https://github.com/sahebbiswas/pycrefine/actions/workflows/lint.yml)
 
@@ -23,8 +24,7 @@ def summarize(rows, limit=10):
 | Bytecode written by | Status | Run pycrefine under |
 |---|---|---|
 | Python 3.9 | supported, tested in CI | any Python 3.9 or later |
-| Python 3.12, 3.14 | supported, tested in CI | the same minor version (3.12 for 3.12 bytecode) |
-| Python 3.13 | works, not in CI | Python 3.13 |
+| Python 3.12, 3.13, 3.14 | supported, tested in CI | the same minor version (3.12 for 3.12 bytecode) |
 | Python 3.10, 3.11 | partial: loops and exception handling often come out wrong | the same minor version |
 | Python 3.8 and older | not supported | |
 
