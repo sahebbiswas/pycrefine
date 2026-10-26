@@ -101,6 +101,53 @@ class TestStarredAssignment(unittest.TestCase):
             "    return 'not caught'\n"
             "print(g(10, 'custom', O()))\n")
 
+    def test_nested_fallback_unpackings_do_not_share_temporaries(self):
+        """Test (a, *o.b), *tail = ...: the inner unpacking must not overwrite the outer sequence."""
+        self.assert_same_behavior(
+            "class O:\n    b = []\n"
+            "def f():\n    o = O()\n    (a, *o.b), *tail = [[1, 2], [3, 4]]\n"
+            "    return a, o.b, tail\n"
+            "print(f())\n")
+
+    def test_fallback_does_not_look_up_shadowed_list(self):
+        """Test the UNPACK_EX fallback works when the function binds the name `list`."""
+        self.assert_same_behavior(
+            "class O:\n    b = []\n"
+            "def f(list):\n    o = O()\n    a, *o.b = iter((1, 2))\n    return a, o.b\n"
+            "print(f(None))\n")
+
+    def test_fallback_arity_error_with_shadowed_getattr(self):
+        """Test too few values still raises ValueError when `getattr` is a non-callable parameter."""
+        self.assert_same_behavior(
+            "class O:\n    b = []\n"
+            "def f(getattr):\n    o = O()\n    try:\n        a, *o.b = []\n"
+            "    except ValueError:\n        return 'caught'\n    return 'not caught'\n"
+            "print(f(None))\n")
+
+    def test_fallback_lone_star_target(self):
+        """Test a lone starred attribute target, which needs a trailing comma: *o.b, = x."""
+        self.assert_same_behavior(
+            "class O:\n    b = []\n"
+            "def f():\n    o = O()\n    *o.b, = iter((1, 2, 3))\n    return o.b\n"
+            "print(f())\n")
+
+    def test_fresh_accum_name_is_never_repeated(self):
+        """Test _fresh_accum_name returns a new name each call and skips names the code uses."""
+        from pycrefine.decompiler.generic import DecompilerGeneric
+
+        def outer(_res):
+            _res0 = 0
+
+            def inner():
+                return _res, _res0
+            return inner
+
+        dec = DecompilerGeneric(outer.__code__)
+        names = [dec._fresh_accum_name() for _ in range(4)]
+        self.assertEqual(len(set(names)), 4, names)
+        self.assertFalse({"_res", "_res0"} & set(names), names)
+        self.assertNotIn(dec._fresh_accum_name("_unpack"), names)
+
     def test_plain_unpacking_still_works(self):
         """Test that plain (non-starred) unpacking assignments remain functional."""
         self.assert_same_ast("def f(x):\n    a, (b, c) = x\n    (d,) = c\n    return a, b, d\n")

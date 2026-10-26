@@ -3,7 +3,7 @@ import ast
 import dis
 import sys
 import types
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Set, Tuple
 from ..instructions import BytecodeInstruction
 
 
@@ -23,6 +23,8 @@ class DecompilerBase:
         self.beautification_level = beautification_level
         self.target_version = target_version or sys.version_info[:2]
         self._accum_counter = 0
+        # Names _fresh_accum_name has already handed out for this code object.
+        self._issued_temp_names: Set[str] = set()
 
     def _disassemble(self):
         """Convert code object bytecode into a list of BytecodeInstruction."""
@@ -51,31 +53,32 @@ class DecompilerBase:
         """
         raise NotImplementedError("Subclasses must implement decompile()")
 
-    def _fresh_accum_name(self) -> str:
+    def _fresh_accum_name(self, base_name: str = "_res") -> str:
         """
-        Generate a fresh accumulator variable name that doesn't collide with existing names.
+        Generate a temporary variable name that is unique within this code object.
+
+        A name is never returned twice, so two temporaries that are live at the same time
+        (for example the outer and inner sequence of a nested unpacking) cannot overwrite
+        each other. Names the code object already uses (locals, globals/attributes,
+        cell and free variables) are skipped too.
+
+        Args:
+            base_name: Stem of the name; later calls add a numeric suffix to it.
 
         Returns:
-            str: A unique accumulator name like "_res", "_res1", "_res2", etc.
+            str: A name like "_res", "_res0", "_res1", etc. (or the same with another stem).
         """
-        base_name = "_res"
         # Collect all existing names from the code object
-        existing_names = set()
-        if hasattr(self.code_obj, 'co_varnames'):
-            existing_names.update(self.code_obj.co_varnames)
-        if hasattr(self.code_obj, 'co_names'):
-            existing_names.update(self.code_obj.co_names)
+        taken = set(self._issued_temp_names)
+        for attr in ('co_varnames', 'co_names', 'co_cellvars', 'co_freevars'):
+            taken.update(getattr(self.code_obj, attr, ()))
 
-        # Try base name first
-        if base_name not in existing_names:
-            return base_name
-
-        # Otherwise use counter to generate unique name
-        while True:
+        candidate = base_name
+        while candidate in taken:
             candidate = f"{base_name}{self._accum_counter}"
             self._accum_counter += 1
-            if candidate not in existing_names:
-                return candidate
+        self._issued_temp_names.add(candidate)
+        return candidate
 
     def _get_jump_target(self, instr: BytecodeInstruction) -> int:
         """

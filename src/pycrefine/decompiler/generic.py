@@ -3767,27 +3767,27 @@ class DecompilerGeneric(DecompilerBase):
             # discrete indexed extraction from the stack value
             val = self.stack.pop()
             val_str = str(val)
-            if instr.opname == "UNPACK_EX":
-                temp = self._fresh_accum_name()
-                self._append_reconstructed(f"{temp} = list({val_str})")
-                val_str = temp
             # Push discrete accessors onto the stack for subsequent STORE_*
             # to consume.  Since STOREs are processed sequentially, we push
             # item[n-1], then item[n-2], ..., item[0] so that the stack
             # serves them up in 0..n-1 order.
             if instr.opname == "UNPACK_EX" and isinstance(instr.arg, int):
+                # Unpack once, natively, into fresh temporaries and let the stores
+                # that follow read those.  Python itself then consumes an iterator
+                # a single time, builds the starred list, and raises the same
+                # ValueError on too few values, without the generated code looking
+                # up list, getattr or ValueError in a scope that may rebind them.
+                # Every temporary is unique, so a nested unpacking cannot overwrite
+                # the sequence its enclosing unpacking still has to read.
                 before, after = instr.arg & 0xFF, instr.arg >> 8
-                required = before + after
-                if required:
-                    self._append_reconstructed(
-                        f"if {val_str}.__len__() < {required}: "
-                        "raise (getattr(__builtins__, 'ValueError', None) "
-                        "or __builtins__['ValueError'])('not enough values to unpack')"
-                    )
-                stop = f"-{after}" if after else ""
-                accessors = ([f"{val_str}[{i}]" for i in range(before)]
-                             + [f"list({val_str}[{before}:{stop}])"]
-                             + [f"{val_str}[{i - after}]" for i in range(after)])
+                head = [self._fresh_accum_name("_unpack") for _ in range(before)]
+                star = self._fresh_accum_name("_unpack")
+                tail = [self._fresh_accum_name("_unpack") for _ in range(after)]
+                lhs = ", ".join(head + [f"*{star}"] + tail)
+                if not head and not tail:
+                    lhs += ","  # a lone starred target needs its trailing comma
+                self._append_reconstructed(f"{lhs} = {val_str}")
+                accessors = head + [star] + tail
             else:
                 accessors = [f"{val_str}[{i}]" for i in range(n)]
             self.stack.extend(reversed(accessors))
