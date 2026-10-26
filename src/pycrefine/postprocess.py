@@ -3,7 +3,7 @@ import ast
 import io
 import re
 import tokenize
-from typing import List, Optional
+from typing import List, Optional, Set
 
 
 def _line_is_in_triple_quoted_string(lines: List[str], line_idx: int) -> bool:
@@ -270,8 +270,82 @@ def flatten_elif(source: str) -> str:
     return res
 
 
+_MULTILINE_STRING_MARK = "__pycrefine_multiline_string_{}__"
+
+
+def _string_continuation_rows(text: str) -> Set[int]:
+    """
+    0-based rows of *text* that continue a multi-line string begun on an earlier row.
+
+    Those rows are part of the string's value (a docstring's later lines, a triple-quoted
+    literal), so nothing may be added to their start. Returns an empty set when *text* does
+    not tokenize.
+    """
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return set()
+    rows: Set[int] = set()
+    fstring_starts: List[int] = []
+    for tok in tokens:
+        name = tokenize.tok_name.get(tok.type, "")
+        if name == "FSTRING_START":  # 3.12+ tokenizes an f-string in pieces
+            fstring_starts.append(tok.start[0])
+        elif name == "FSTRING_END" and fstring_starts:
+            rows.update(range(fstring_starts.pop(), tok.end[0]))
+        elif tok.type == tokenize.STRING and tok.end[0] > tok.start[0]:
+            rows.update(range(tok.start[0], tok.end[0]))
+    return rows
+
+
+def _mask_multiline_strings(source: str):
+    """
+    Replace each multi-line string that is a statement of its own (a docstring) with a
+    one-line placeholder.
+
+    The clean-ups below are line- and regex-based; inside such a string they would
+    change its value (spacing after commas, collapsed blank lines, sorted imports).
+    Strings inside expressions are left to them. Returns the masked source and the
+    literals in order.
+    """
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return source, []
+    lines = source.split("\n")
+    offsets = [0]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line) + 1)
+    pieces, literals, pos = [], [], 0
+    boundary = (tokenize.NEWLINE, tokenize.NL, tokenize.INDENT, tokenize.DEDENT, tokenize.ENCODING)
+    significant = [t for t in tokens if t.type not in (tokenize.COMMENT,)]
+    for n, tok in enumerate(significant):
+        if tok.type != tokenize.STRING or tok.start[0] == tok.end[0]:
+            continue
+        before = significant[n - 1].type if n else tokenize.NEWLINE
+        after = significant[n + 1].type if n + 1 < len(significant) else tokenize.NEWLINE
+        if before not in boundary or after not in (tokenize.NEWLINE, tokenize.ENDMARKER):
+            continue  # part of an expression, which the clean-ups may rewrite
+        start = offsets[tok.start[0] - 1] + tok.start[1]
+        end = offsets[tok.end[0] - 1] + tok.end[1]
+        pieces.append(source[pos:start])
+        pieces.append(f'"{_MULTILINE_STRING_MARK.format(len(literals))}"')
+        literals.append(source[start:end])
+        pos = end
+    pieces.append(source[pos:])
+    return "".join(pieces), literals
+
+
+def _unmask_multiline_strings(source: str, literals: List[str]) -> str:
+    """Put back the literals that :func:`_mask_multiline_strings` replaced."""
+    for n, literal in enumerate(literals):
+        source = source.replace(f'"{_MULTILINE_STRING_MARK.format(n)}"', literal, 1)
+    return source
+
+
 def post_process_source(source: str, beautification_level: str = 'core') -> str:
     """Clean up decompiled output to be more Pythonic."""
+    source, literals = _mask_multiline_strings(source)
     lines = source.split('\n')
     out_lines = []
 
@@ -491,4 +565,4 @@ def post_process_source(source: str, beautification_level: str = 'core') -> str:
         # Stub for aggressive beautification - to be implemented in future
         pass
 
-    return text.strip('\r\n') + '\n'
+    return _unmask_multiline_strings(text.strip('\r\n') + '\n', literals)

@@ -36,7 +36,7 @@ from .base import DecompilerBase
 from ..expr import StackNULL, _BoolExpr, _CollectionAccumSentinel, _UnpackAccessor, _unary_operand
 from ..instructions import (BytecodeInstruction, _const_repr, _copy_signature, _is_anonymous_func_body,
                             _match_finally_copy, _render_func_tuple)
-from ..postprocess import collapse_chained_comparisons, post_process_source
+from ..postprocess import _string_continuation_rows, collapse_chained_comparisons, post_process_source
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +126,9 @@ class DecompilerGeneric(DecompilerBase):
         """
         super().__init__(code_obj, indent_level, beautification_level, target_version)
         self.has_doc = False
+        self._doc_load_offset: Optional[int] = None    # LOAD_CONST of a module/class docstring
+        self._class_doc_store_offsets: dict = {}       # STORE_NAME __doc__ of a class docstring
+        self._doc_line_count = 0                       # output lines the docstring takes
         self._pei_indents: Dict[int, int] = {}
         # Tracks offsets of while-loop body starts so we can suppress the
         # duplicated condition check emitted at the bottom of 3.11+ while loops.
@@ -174,6 +177,78 @@ class DecompilerGeneric(DecompilerBase):
     # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
+
+    def _function_docstring(self) -> Optional[str]:
+        """
+        The docstring of a function body, or None (#166).
+
+        No instruction loads it. Up to 3.13 the compiler reserves ``co_consts[0]`` of
+        every function for it (None when there is none); 3.14 drops that slot and sets
+        ``CO_HAS_DOCSTRING`` (0x4000000) when ``co_consts[0]`` is the docstring.
+        """
+        code = self.code_obj
+        is_function = bool(code.co_flags & 0x1)  # CO_OPTIMIZED: a function body
+        if self.indent_level <= 0 or not is_function or code.co_name.startswith("<") or not code.co_consts:
+            return None
+        if self.target_version >= (3, 14) and not code.co_flags & 0x4000000:
+            return None
+        first = code.co_consts[0]
+        return first if isinstance(first, str) else None
+
+    def _find_class_docstring(self) -> dict:
+        """
+        ``{offset of its STORE_NAME __doc__: text}`` for a class body's docstring: the
+        first statement after the class preamble (``__module__``, ``__qualname__``, and
+        on newer versions ``__firstlineno__`` and the ``__classdict__`` cell), a constant
+        string stored to ``__doc__``.
+        """
+        if self.indent_level <= 0 or self.code_obj.co_flags & 0x1:
+            return {}
+        preamble = ("__module__", "__qualname__", "__firstlineno__", "__classdict__", "__type_params__",
+                    ".type_params")
+        instrs = [x for x in self.instructions
+                  if x.opname not in ("RESUME", "NOP", "CACHE", "NOT_TAKEN", "MAKE_CELL", "COPY_FREE_VARS",
+                                      "SETUP_ANNOTATIONS")]
+        k = 0
+        while (k + 1 < len(instrs) and instrs[k + 1].opname in ("STORE_NAME", "STORE_DEREF", "STORE_FAST")
+               and instrs[k + 1].argval in preamble):
+            k += 2
+        if (k + 1 < len(instrs) and instrs[k].opname == "LOAD_CONST" and isinstance(instrs[k].argval, str)
+                and instrs[k + 1].opname == "STORE_NAME" and instrs[k + 1].argval == "__doc__"):
+            return {instrs[k + 1].offset: instrs[k].argval}
+        return {}
+
+    def _docstring_literal(self, doc: str) -> str:
+        """
+        Source text for the docstring *doc* that compiles back to exactly *doc*.
+
+        A triple-quoted string keeps the text as written; when it cannot (the text has
+        backslashes, carriage returns or other unprintable characters, or the quotes),
+        ``repr`` does. 3.13+ strips the common indentation of a docstring's later lines
+        when compiling, so for those the body indentation is put back, as in the source.
+        """
+        if not doc:
+            return '""'
+        text = doc
+        if self.target_version >= (3, 13) and "\n" in text and self.indent_level > 0:
+            pad = "    " * self.indent_level
+            first, *rest = text.split("\n")
+            rest = [pad + ln if ln else "" for ln in rest]
+            if rest and not rest[-1]:
+                rest[-1] = pad  # the closing quotes' own line
+            text = "\n".join([first] + rest)
+        printable = all(c.isprintable() or c in "\n\t" for c in text)
+        for quote in ('"""', "'''"):
+            if printable and "\\" not in text and quote not in text and not text.endswith(quote[0]):
+                return quote + text + quote
+        return repr(doc)
+
+    def _emit_docstring(self, doc: str) -> None:
+        """Emit *doc* as the body's first statement; later lines are written as they are."""
+        before = len(self.reconstructed)
+        self._append_reconstructed(self._docstring_literal(doc))
+        self._doc_line_count = len(self.reconstructed) - before
+        self.has_doc = True
 
     def _scope_declarations(self) -> List[str]:
         """
@@ -312,36 +387,25 @@ class DecompilerGeneric(DecompilerBase):
         self._prescan_compound_conds()
         self._prescan_value_boolops()
 
-        # Check for docstring.
-        # co_consts[0] is a docstring ONLY if the first meaningful instruction
-        # is LOAD_CONST 0 followed by POP_TOP (expression statement) OR
-        # LOAD_CONST 0 followed by STORE_NAME __doc__.
-        # If co_consts[0] is a string but is also used as a default value or
-        # in an expression, do NOT treat it as a docstring.
+        # Docstring (#166). A function's lives in its constants (no instruction loads
+        # it); a module's or class's is the first statement, stored to __doc__.
         self.has_doc = False
-        if self.code_obj.co_consts and isinstance(self.code_obj.co_consts[0], str):
-            # Find first non-trivial instruction
-            first_meaningful = None
-            for ins in self.instructions:
-                if ins.opname not in ("RESUME", "NOP", "CACHE", "NOT_TAKEN"):
-                    first_meaningful = ins
-                    break
-            is_docstring = False
-            if first_meaningful and first_meaningful.opname == "LOAD_CONST" and first_meaningful.arg == 0:
-                # Peek at the instruction after it
-                idx = self.instructions.index(first_meaningful)
-                if idx + 1 < len(self.instructions):
-                    next_ins = self.instructions[idx + 1]
-                    if next_ins.opname == "POP_TOP" or (next_ins.opname == "STORE_NAME" and next_ins.argval == "__doc__"):
-                        is_docstring = True
-            if is_docstring:
-                doc = self.code_obj.co_consts[0]
-                if doc:
-                    self._append_reconstructed('"""', indent_multiline=True)
-                    self._append_reconstructed(doc.strip(), indent_multiline=True)
-                    self._append_reconstructed('"""', indent_multiline=True)
-                    self.has_doc = True
-                    self.reconstructed.append("")
+        self._doc_load_offset = None
+        doc = self._function_docstring()
+        if doc is None:
+            first = next((ins for ins in self.instructions
+                          if ins.opname not in ("RESUME", "NOP", "CACHE", "NOT_TAKEN")), None)
+            if first is not None and first.opname == "LOAD_CONST" and isinstance(first.argval, str):
+                idx = self.instructions.index(first)
+                nxt = self.instructions[idx + 1] if idx + 1 < len(self.instructions) else None
+                if nxt is not None and nxt.opname == "STORE_NAME" and nxt.argval == "__doc__":
+                    doc = first.argval
+                    self._doc_load_offset = first.offset
+        if doc is not None:
+            self._emit_docstring(doc)
+            if self.indent_level == 0:
+                self.reconstructed.append("")
+        self._class_doc_store_offsets = self._find_class_docstring() if doc is None else {}
 
         self._emit_scope_declarations()
 
@@ -379,13 +443,9 @@ class DecompilerGeneric(DecompilerBase):
                 if not (line.startswith(" ") or line.startswith("\t")):
                     # Found a trailing return None at root level.
                     # We can safely remove it if there's other code.
-                    has_others = False
-                    for i in range(last_idx):
-                        strip_line = self.reconstructed[i].strip()
-                        if strip_line and not strip_line.startswith('"""') or strip_line.startswith("'''"
-                        ):
-                            has_others = True
-                            break
+                    # Anything besides the docstring (which may span several lines)?
+                    doc_lines = self._doc_line_count if self.has_doc else 0
+                    has_others = any(self.reconstructed[i].strip() for i in range(doc_lines, last_idx))
 
                     if has_others or getattr(self, "has_doc", False):
                         self.reconstructed.pop(last_idx)
@@ -498,7 +558,11 @@ class DecompilerGeneric(DecompilerBase):
         if "\n" in line:
             parts = line.split("\n")
             if indent_multiline:
-                for l in parts:
+                continuation = _string_continuation_rows(line)
+                for row, l in enumerate(parts):
+                    if row in continuation:
+                        self.reconstructed.append(l)  # part of a string's value: leave it alone
+                        continue
                     clean_l = l.strip()
                     if clean_l or l == "":
                         self.reconstructed.append("    " * self.indent_level + l)
@@ -3618,8 +3682,8 @@ class DecompilerGeneric(DecompilerBase):
         opname = instr.opname
         if _is_code(instr.argval):
             self.stack.append(("code", instr.argval))
-        elif opname == "LOAD_CONST" and instr.arg == 0 and isinstance(instr.argval, str) and self.has_doc:
-            pass  # already emitted as docstring
+        elif instr.offset == self._doc_load_offset:
+            pass  # already emitted as the docstring
         elif "LOAD_FAST_BORROW_LOAD_FAST_BORROW" in opname:
             # fused opcode — pushes two names
             names = instr.argval
@@ -3685,11 +3749,8 @@ class DecompilerGeneric(DecompilerBase):
                 self._append_reconstructed(str(val[1]), indent_multiline=True)
                 if self.indent_level == 0:
                     self.reconstructed.append("")
-            elif name == "__doc__":
-                doc_text = str(val).strip("'\"").strip()
-                if doc_text:
-                    self._append_reconstructed(f'"""\n{doc_text}\n"""', indent_multiline=True)
-                    self.reconstructed.append("")
+            elif name == "__doc__" and instr.offset in self._class_doc_store_offsets:
+                self._emit_docstring(self._class_doc_store_offsets[instr.offset])
             elif val == name:
                 pass  # suppress redundant x = x
             else:
