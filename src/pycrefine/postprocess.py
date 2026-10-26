@@ -3,7 +3,7 @@ import ast
 import io
 import re
 import tokenize
-from typing import List, Optional
+from typing import List, Optional, Set
 
 
 def _line_is_in_triple_quoted_string(lines: List[str], line_idx: int) -> bool:
@@ -271,6 +271,31 @@ def flatten_elif(source: str) -> str:
 
 
 _MULTILINE_STRING_MARK = "__pycrefine_multiline_string_{}__"
+
+
+def _string_continuation_rows(text: str) -> Set[int]:
+    """
+    0-based rows of *text* that continue a multi-line string begun on an earlier row.
+
+    Those rows are part of the string's value (a docstring's later lines, a triple-quoted
+    literal), so nothing may be added to their start. Returns an empty set when *text* does
+    not tokenize.
+    """
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return set()
+    rows: Set[int] = set()
+    fstring_starts: List[int] = []
+    for tok in tokens:
+        name = tokenize.tok_name.get(tok.type, "")
+        if name == "FSTRING_START":  # 3.12+ tokenizes an f-string in pieces
+            fstring_starts.append(tok.start[0])
+        elif name == "FSTRING_END" and fstring_starts:
+            rows.update(range(fstring_starts.pop(), tok.end[0]))
+        elif tok.type == tokenize.STRING and tok.end[0] > tok.start[0]:
+            rows.update(range(tok.start[0], tok.end[0]))
+    return rows
 
 
 def _mask_multiline_strings(source: str):

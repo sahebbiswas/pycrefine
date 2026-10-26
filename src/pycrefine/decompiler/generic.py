@@ -36,7 +36,7 @@ from .base import DecompilerBase
 from ..expr import StackNULL, _BoolExpr, _CollectionAccumSentinel, _UnpackAccessor, _unary_operand
 from ..instructions import (BytecodeInstruction, _const_repr, _copy_signature, _is_anonymous_func_body,
                             _match_finally_copy, _render_func_tuple)
-from ..postprocess import collapse_chained_comparisons, post_process_source
+from ..postprocess import _string_continuation_rows, collapse_chained_comparisons, post_process_source
 
 
 # ---------------------------------------------------------------------------
@@ -558,7 +558,11 @@ class DecompilerGeneric(DecompilerBase):
         if "\n" in line:
             parts = line.split("\n")
             if indent_multiline:
-                for l in parts:
+                continuation = _string_continuation_rows(line)
+                for row, l in enumerate(parts):
+                    if row in continuation:
+                        self.reconstructed.append(l)  # part of a string's value: leave it alone
+                        continue
                     clean_l = l.strip()
                     if clean_l or l == "":
                         self.reconstructed.append("    " * self.indent_level + l)

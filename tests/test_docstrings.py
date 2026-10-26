@@ -84,5 +84,26 @@ class TestDocstrings(unittest.TestCase):
         self.assertLess(out.index('"""Doc."""'), out.index("global Z"))
 
 
+    def test_multiline_docstrings_of_nested_definitions(self):
+        """Test continuation rows of a method's, nested function's or inner class's docstring are not indented again."""
+        src = ('class K:\n    def m(self):\n        """One.\n\n        Two.\n        """\n'
+               '    class Inner:\n        """Inner.\n\n        More.\n        """\n\n'
+               'def outer():\n    def inner():\n        """Nested.\n\n        Lines.\n        """\n    return inner\n')
+        self.assert_same_docs(src, ["K.m", "K.Inner", "outer()"])
+
+    def test_multiline_string_in_a_nested_body_keeps_its_value(self):
+        """Test a triple-quoted literal (not a docstring) in a nested function is not re-indented."""
+        src = ('def outer():\n    def inner():\n        return """one\n    two\n\n  three"""\n    return inner\n'
+               'print(repr(outer()()))\n')
+        out = decompile(src)
+        self.assertEqual(_run(compile(out, "<decompiled>", "exec")), _run(compile(src, "<original>", "exec")), out)
+
+    def test_multiline_docstring_with_a_backslash_in_a_method(self):
+        """Test a docstring written as a repr literal (backslash) still gets its later lines right on 3.13+."""
+        src = ('class K:\n    def m(self):\n        """Sum.\nzero\n          - item \\\\ x\n        """\n\n'
+               'def f():\n    """Sum.\n\n    - item \\\\ x\n    """\n')
+        self.assert_same_docs(src, ["K.m", "f"])
+
+
 if __name__ == "__main__":
     unittest.main()
