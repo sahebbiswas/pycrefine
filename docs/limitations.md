@@ -10,7 +10,8 @@ Everything here was checked against the current `main`.
 |---|---|
 | 3.9 | Supported and tested in CI. Decompiles under any Python 3.9 or later. |
 | 3.12, 3.13, 3.14 | Supported and tested in CI. Needs the same Python minor version to run pycrefine ([#94](https://github.com/sahebbiswas/pycrefine/issues/94)). |
-| 3.10, 3.11 | Partial. Loops, exception handling and `try`/`finally` often come out wrong ([#3](https://github.com/sahebbiswas/pycrefine/issues/3), [#4](https://github.com/sahebbiswas/pycrefine/issues/4), [#105](https://github.com/sahebbiswas/pycrefine/issues/105)). |
+| 3.11 | Partial, and tested in CI: the failures that are known are expected failures in `tests/known_failures.json`, each tracked in an issue: keyword-argument calls ([#191](https://github.com/sahebbiswas/pycrefine/issues/191)), comprehension filters ([#192](https://github.com/sahebbiswas/pycrefine/issues/192)), `try`/`finally` ([#193](https://github.com/sahebbiswas/pycrefine/issues/193)), `(a and b) or c` ([#194](https://github.com/sahebbiswas/pycrefine/issues/194)), f-strings ([#195](https://github.com/sahebbiswas/pycrefine/issues/195)) and `while cond` loops ([#105](https://github.com/sahebbiswas/pycrefine/issues/105)). |
+| 3.10 | Partial. Loops, exception handling and `try`/`finally` often come out wrong; not in CI yet ([#3](https://github.com/sahebbiswas/pycrefine/issues/3)). |
 | 3.8 and older | Not supported. |
 
 ## Constructs that come out wrong

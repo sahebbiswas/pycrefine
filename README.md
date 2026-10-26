@@ -1,6 +1,7 @@
 # pycrefine
 
 [![Python 3.9](https://github.com/sahebbiswas/pycrefine/actions/workflows/ci-py39.yml/badge.svg?branch=main&event=push)](https://github.com/sahebbiswas/pycrefine/actions/workflows/ci-py39.yml)
+[![Python 3.11](https://github.com/sahebbiswas/pycrefine/actions/workflows/ci-py311.yml/badge.svg?branch=main&event=push)](https://github.com/sahebbiswas/pycrefine/actions/workflows/ci-py311.yml)
 [![Python 3.12](https://github.com/sahebbiswas/pycrefine/actions/workflows/ci-py312.yml/badge.svg?branch=main&event=push)](https://github.com/sahebbiswas/pycrefine/actions/workflows/ci-py312.yml)
 [![Python 3.13](https://github.com/sahebbiswas/pycrefine/actions/workflows/ci-py313.yml/badge.svg?branch=main&event=push)](https://github.com/sahebbiswas/pycrefine/actions/workflows/ci-py313.yml)
 [![Python 3.14](https://github.com/sahebbiswas/pycrefine/actions/workflows/ci-py314.yml/badge.svg?branch=main&event=push)](https://github.com/sahebbiswas/pycrefine/actions/workflows/ci-py314.yml)
@@ -25,7 +26,8 @@ def summarize(rows, limit=10):
 |---|---|---|
 | Python 3.9 | supported, tested in CI | any Python 3.9 or later |
 | Python 3.12, 3.13, 3.14 | supported, tested in CI | the same minor version (3.12 for 3.12 bytecode) |
-| Python 3.10, 3.11 | partial: loops and exception handling often come out wrong | the same minor version |
+| Python 3.11 | partial, tested in CI: keyword-argument calls, `try`/`finally` and some loops come out wrong ([known failures](https://github.com/sahebbiswas/pycrefine/blob/main/tests/known_failures.json)) | Python 3.11 |
+| Python 3.10 | partial: loops and exception handling often come out wrong | Python 3.10 |
 | Python 3.8 and older | not supported | |
 
 Bytecode from 3.10 onwards can only be decompiled by the Python version that wrote it

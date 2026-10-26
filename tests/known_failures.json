@@ -1,0 +1,64 @@
+{
+  "3.11": [
+    {
+      "issue": 105,
+      "reason": "while cond loops are decompiled as if",
+      "tests": [
+        "tests/test_control_flow.py::TestControlFlow::test_nested_while_no_duplicate_headers",
+        "tests/test_control_flow.py::TestControlFlow::test_while_conditional"
+      ]
+    },
+    {
+      "issue": 191,
+      "reason": "calls with keyword arguments crash",
+      "tests": [
+        "tests/test_integration.py::TestFindingsRefinement::test_keyword_call_reconstruction",
+        "tests/test_subroutines.py::TestCallFunctionKw::test_call_function_kw_mixing_positional_and_kwargs",
+        "tests/test_exceptions.py::TestForLoopNestedTrySpuriousElse::test_for_try_no_spurious_else"
+      ]
+    },
+    {
+      "issue": 192,
+      "reason": "comprehension filters and conditional expressions are dropped",
+      "tests": [
+        "tests/test_basic.py::TestComprehensions::test_list_comprehension_yield"
+      ]
+    },
+    {
+      "issue": 192,
+      "reason": "comprehension filters and conditional expressions are dropped",
+      "mode": "skip",
+      "tests": [
+        "tests/test_basic.py::TestComprehensions::test_inlined_comprehension_shapes"
+      ]
+    },
+    {
+      "issue": 193,
+      "reason": "try/except/finally loses its finally block, and except E as e keeps the cleanup",
+      "tests": [
+        "tests/test_exceptions.py::TestExceptions::test_finally_body_after_except_not_before",
+        "tests/test_exceptions.py::TestExceptions::test_sequential_try_except_finally_blocks",
+        "tests/test_exceptions.py::TestExceptions::test_try_except_as",
+        "tests/test_exceptions.py::TestExceptions::test_try_except_as_no_cleanup_leak",
+        "tests/test_exceptions.py::TestExceptions::test_try_except_finally",
+        "tests/test_exceptions.py::TestExceptions::test_with_try_except_finally",
+        "tests/test_control_flow.py::TestNestedTryInLoop::test_multiple_break_paths_in_loop_try"
+      ]
+    },
+    {
+      "issue": 194,
+      "reason": "(a and b) or c as a value loses the and",
+      "mode": "skip",
+      "tests": [
+        "tests/test_basic.py::TestValueBoolOps::test_behavior_is_preserved"
+      ]
+    },
+    {
+      "issue": 195,
+      "reason": "f-string field calling a function on a generator expression is mangled",
+      "tests": [
+        "tests/test_instruction_regressions.py::TestRegressionsApril::test_complex_fstring"
+      ]
+    }
+  ]
+}
