@@ -71,6 +71,22 @@ class TestEmptyBodies(unittest.TestCase):
         self.assertLess(out.index("except (ValueError, TypeError):"), out.index("print('t', x)"))
 
     @unittest.skipIf(sys.version_info < (3, 11), "3.9 and 3.10 have no exception table to find the handler")
+    def test_empty_try_with_finally_runs_the_finally_body_once(self):
+        """Test `try: pass` with `finally`, alone or after `except` clauses, keeps one copy of the body."""
+        cases = (
+            "def f():\n    try:\n        pass\n    finally:\n        print('x')\n    return 1\nprint(f())\n",
+            "def f():\n    try:\n        pass\n    except ValueError:\n        print('e')\n"
+            "    finally:\n        print('x')\n    return 1\nprint(f())\n",
+            "def f():\n    try:\n        pass\n    except ValueError as e:\n        print(e)\n"
+            "    except:\n        print('b')\n    finally:\n        print('x')\n    return 1\nprint(f())\n",
+        )
+        for src in cases:
+            with self.subTest(src=src):
+                out = self.assert_same_behavior(src)
+                self.assertEqual(out.count("print('x')"), 1, out)
+                compile(out, "<decompiled>", "exec")
+
+    @unittest.skipIf(sys.version_info < (3, 11), "3.9 and 3.10 have no exception table to find the handler")
     def test_empty_try_without_line_numbers_keeps_the_names_it_binds(self):
         """Without a line table the `try: pass` cannot be placed, but its handler still makes `x` local."""
         src = ("x = 42\ndef f():\n    print(x)\n    try:\n        pass\n    except Exception:\n        x = 1\n"

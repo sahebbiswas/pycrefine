@@ -388,7 +388,21 @@ class DecompilerGeneric(DecompilerBase):
             return
         drop: Set[int] = set()
         for region in regions:
+            if not self._starts_except_handler(region[0]):
+                # The copy of a `finally` body for the exception path, not an `except`
+                # clause. The body also sits in the stream once for the normal path, and
+                # `try: pass` cannot raise, so the copy is simply not source code.
+                drop.update(region)
+                continue
             nops = self._empty_try_nops(region[0])
+            copy = self._empty_try_finally_copy(nops) if nops is not None else None
+            if nops is not None and copy is not None:
+                # `try: pass` with `finally` is the finally body run once, and its
+                # `except` clauses can never run; the body is already in the stream.
+                self._empty_try_skip.update(instrs[k].offset for k in nops)
+                drop.update(region)
+                drop.update(copy)
+                continue
             if nops is not None:
                 anchor = instrs[nops[0]].offset
                 self._empty_try_skip.update(instrs[k].offset for k in nops)
@@ -403,6 +417,50 @@ class DecompilerGeneric(DecompilerBase):
                 continue
             self._empty_try_handlers[anchor] = [instrs[k] for k in region]
         self.instructions = [x for k, x in enumerate(instrs) if k not in drop]
+
+    _EXCEPT_TYPE_OPS = ("LOAD_GLOBAL", "LOAD_NAME", "LOAD_FAST", "LOAD_DEREF", "LOAD_ATTR", "LOAD_CONST",
+                        "BUILD_TUPLE", "PUSH_NULL", "NOP", "CACHE", "COPY", "LOAD_FAST_CHECK",
+                        "LOAD_FAST_BORROW", "LOAD_FAST_AND_CLEAR", "LOAD_LOCALS", "LOAD_CLASSDEREF")
+
+    def _starts_except_handler(self, handler_idx: int) -> bool:
+        """
+        Whether the PUSH_EXC_INFO at *handler_idx* starts an `except` clause rather than
+        the copy of a `finally` body: a bare `except:` pops the exception at once, and a
+        typed one loads its types and matches them, before anything else runs.
+        """
+        instrs = self.instructions
+        k = handler_idx + 1
+        if k < len(instrs) and instrs[k].opname == "POP_TOP":
+            return True
+        while k < len(instrs) and instrs[k].opname in self._EXCEPT_TYPE_OPS:
+            k += 1
+        return k < len(instrs) and instrs[k].opname in ("CHECK_EXC_MATCH", "JUMP_IF_NOT_EXC_MATCH")
+
+    def _empty_try_finally_copy(self, nops: Tuple[int, ...]) -> Optional[range]:
+        """
+        Indexes of the exception-path copy of the `finally` body that the exception table
+        sends the empty try's NOPs to, with its cleanup; None if the try has no `finally`.
+        """
+        instrs = self.instructions
+        by_offset = {x.offset: k for k, x in enumerate(instrs)}
+        # 3.11 has no NOP for the `pass` body; the jump after the try's NOPs is the body.
+        offsets = [instrs[k].offset for k in nops] + [instrs[k].offset for k in (nops[-1] + 1,) if k < len(instrs)]
+        entries = self._exception_entries() or ()
+        for entry in entries:
+            if entry.depth != 0 or not any(entry.start <= off < entry.end for off in offsets):
+                continue
+            k = by_offset.get(entry.target)
+            if k is None or instrs[k].opname != "PUSH_EXC_INFO" or self._starts_except_handler(k):
+                continue
+            cleanup = next((by_offset.get(e.target) for e in entries if e.start == entry.target), None)
+            end = cleanup if cleanup is not None else k
+            while end < len(instrs) and instrs[end].opname != "RERAISE":
+                end += 1
+            if cleanup is not None:
+                while end < len(instrs) and not (instrs[end].opname == "RERAISE" and instrs[end].arg == 1):
+                    end += 1
+            return range(k, min(end + 1, len(instrs)))
+        return None
 
     def _empty_try_nops(self, handler_idx: int) -> Optional[Tuple[int, ...]]:
         """
