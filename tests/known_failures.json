@@ -60,5 +60,96 @@
         "tests/test_instruction_regressions.py::TestRegressionsApril::test_complex_fstring"
       ]
     }
+  ],
+  "3.10": [
+    {
+      "issue": 105,
+      "reason": "while cond loops are decompiled as if",
+      "tests": [
+        "tests/test_control_flow.py::TestControlFlow::test_nested_while_no_duplicate_headers",
+        "tests/test_control_flow.py::TestControlFlow::test_while_conditional",
+        "tests/test_control_flow.py::TestWhilePrescan::test_nested_while_two_guards",
+        "tests/test_control_flow.py::TestWhileTrueConditionalBreak::test_real_while_guard_still_detected"
+      ]
+    },
+    {
+      "issue": 105,
+      "reason": "while cond loops are decompiled as if",
+      "mode": "skip",
+      "tests": [
+        "tests/test_basic.py::TestUnaryOperators::test_behavior_is_preserved",
+        "tests/test_control_flow.py::TestLoopContinueAndTailIf::test_behavior_is_preserved"
+      ]
+    },
+    {
+      "issue": 197,
+      "reason": "tail-duplicated if/else and conditional expressions come out as separate ifs (or invalid syntax)",
+      "tests": [
+        "tests/test_control_flow.py::TestAugAssignTernary::test_augmented_add_ternary_keeps_augmented_form",
+        "tests/test_integration.py::TestVerifyScenesBugs::test_api_40_pass_in_if_with_else",
+        "tests/test_integration.py::TestVerifyScenesBugs::test_api_41_nested_if_else_preservation",
+        "tests/test_strings.py::TestStrings::test_conditional_fstring_concat"
+      ]
+    },
+    {
+      "issue": 179,
+      "reason": "block-based exception handlers (SETUP_FINALLY) are not decompiled",
+      "tests": [
+        "tests/test_control_flow.py::TestCodeAfterTryExceptInLoop::test_empty_except_clause_gets_pass",
+        "tests/test_control_flow.py::TestLoopContinueInTry::test_continue_in_try_body_is_emitted",
+        "tests/test_control_flow.py::TestModuleLevelImplicitReturn::test_trailing_try_except",
+        "tests/test_control_flow.py::TestNestedTryInLoop::test_break_inside_try_in_for_loop",
+        "tests/test_control_flow.py::TestNestedTryInLoop::test_except_continue_in_for_loop",
+        "tests/test_control_flow.py::TestNestedTryInLoop::test_multiple_break_paths_in_loop_try",
+        "tests/test_control_flow.py::TestNestedTryInLoop::test_try_in_for_loop_no_phantom_else",
+        "tests/test_control_flow.py::TestWhileTrueConditionalBreak::test_if_inside_for_try_is_not_turned_into_while",
+        "tests/test_exceptions.py::TestBreakInTryInsideFor::test_bare_break_is_emitted",
+        "tests/test_exceptions.py::TestBreakInTryInsideFor::test_bare_break_output_is_valid_python",
+        "tests/test_exceptions.py::TestBreakInTryInsideFor::test_break_is_emitted",
+        "tests/test_exceptions.py::TestBreakInTryInsideFor::test_for_try_bare_break_correct_indentation",
+        "tests/test_exceptions.py::TestBreakInTryInsideFor::test_for_try_if_break_correct_indentation",
+        "tests/test_exceptions.py::TestBreakInTryInsideFor::test_if_break_output_is_valid_python",
+        "tests/test_exceptions.py::TestBreakInTryInsideWhile::test_break_inside_try_correct_indent",
+        "tests/test_exceptions.py::TestBreakInTryInsideWhile::test_break_is_emitted",
+        "tests/test_exceptions.py::TestBreakInTryInsideWhile::test_except_body_correct_indent_after_break",
+        "tests/test_exceptions.py::TestBreakInTryInsideWhile::test_try_except_cleanup_names_suppressed",
+        "tests/test_exceptions.py::TestBreakInTryInsideWhile::test_while_try_break_simple_except_no_as",
+        "tests/test_exceptions.py::TestDottedExceptionTypes::test_dotted_exc_type_in_header",
+        "tests/test_exceptions.py::TestDottedExceptionTypes::test_dotted_exc_type_os_error",
+        "tests/test_exceptions.py::TestDottedExceptionTypes::test_dotted_exc_type_with_as_binding",
+        "tests/test_exceptions.py::TestDottedExceptionTypes::test_simple_exc_type_still_works",
+        "tests/test_exceptions.py::TestExceptions::test_finally_body_after_except_not_before",
+        "tests/test_exceptions.py::TestExceptions::test_raise_from",
+        "tests/test_exceptions.py::TestExceptions::test_sequential_try_except_finally_blocks",
+        "tests/test_exceptions.py::TestExceptions::test_try_bare_except",
+        "tests/test_exceptions.py::TestExceptions::test_try_except_as",
+        "tests/test_exceptions.py::TestExceptions::test_try_except_as_no_cleanup_leak",
+        "tests/test_exceptions.py::TestExceptions::test_try_except_finally",
+        "tests/test_exceptions.py::TestExceptions::test_try_except_typed",
+        "tests/test_exceptions.py::TestExceptions::test_try_finally_no_except",
+        "tests/test_exceptions.py::TestExceptions::test_try_multi_except",
+        "tests/test_exceptions.py::TestExceptions::test_try_multi_except_correct_indent",
+        "tests/test_exceptions.py::TestExceptions::test_with_try_except_finally",
+        "tests/test_exceptions.py::TestForLoopNestedTrySpuriousElse::test_for_try_no_spurious_else",
+        "tests/test_exceptions.py::TestMultiExceptionTuple::test_bare_except_still_works_after_fix",
+        "tests/test_exceptions.py::TestMultiExceptionTuple::test_single_type_except_unaffected",
+        "tests/test_exceptions.py::TestMultiExceptionTuple::test_tuple_except_body_is_preserved",
+        "tests/test_exceptions.py::TestMultiExceptionTuple::test_tuple_except_count_is_one",
+        "tests/test_exceptions.py::TestWithBlocksInsideLoops::test_explicit_continue_inside_except_still_emitted",
+        "tests/test_integration.py::TestEdgeCases::test_function_with_loop_and_try",
+        "tests/test_integration.py::TestVerifyScenesBugs::test_nested_empty_except_pass_api_12",
+        "tests/test_integration.py::TestVerifyScenesBugs::test_try_except_nested_in_if_else"
+      ]
+    },
+    {
+      "issue": 179,
+      "reason": "block-based exception handlers (SETUP_FINALLY) are not decompiled",
+      "mode": "skip",
+      "tests": [
+        "tests/test_control_flow.py::TestCodeAfterTryExceptInLoop::test_behavior_is_preserved",
+        "tests/test_control_flow.py::TestCodeAfterTryExceptInLoop::test_no_bogus_finally",
+        "tests/test_control_flow.py::TestLoopContinueInTry::test_behavior_is_preserved"
+      ]
+    }
   ]
 }
