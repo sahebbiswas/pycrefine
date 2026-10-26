@@ -9,6 +9,8 @@ on:
 
 jobs:
   call-workflow:
+    permissions:
+      contents: read
     uses: ./.github/workflows/reusable-test.yml
     with:
       python-version: '3.14'
