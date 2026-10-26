@@ -33,7 +33,7 @@ from .._constants import (
 )
 from ..codeobj import _is_code
 from .base import DecompilerBase
-from ..expr import StackNULL, _BoolExpr, _CollectionAccumSentinel, _unary_operand
+from ..expr import StackNULL, _BoolExpr, _CollectionAccumSentinel, _UnpackAccessor, _unary_operand
 from ..instructions import (BytecodeInstruction, _const_repr, _copy_signature, _is_anonymous_func_body,
                             _match_finally_copy, _render_func_tuple)
 from ..postprocess import collapse_chained_comparisons, post_process_source
@@ -3783,14 +3783,14 @@ class DecompilerGeneric(DecompilerBase):
                 head = [self._fresh_accum_name("_unpack") for _ in range(before)]
                 star = self._fresh_accum_name("_unpack")
                 tail = [self._fresh_accum_name("_unpack") for _ in range(after)]
-                lhs = ", ".join(head + [f"*{star}"] + tail)
+                lhs = ", ".join([*head, f"*{star}", *tail])
                 if not head and not tail:
                     lhs += ","  # a lone starred target needs its trailing comma
                 self._append_reconstructed(f"{lhs} = {val_str}")
-                accessors = head + [star] + tail
+                accessors = [*head, star, *tail]
             else:
                 accessors = [f"{val_str}[{i}]" for i in range(n)]
-            self.stack.extend(reversed(accessors))
+            self.stack.extend(reversed([_UnpackAccessor(a) for a in accessors]))
 
         # ── subscript / attr ───────────────────────────────────────────
 

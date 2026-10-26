@@ -131,6 +131,21 @@ class TestStarredAssignment(unittest.TestCase):
             "def f():\n    o = O()\n    *o.b, = iter((1, 2, 3))\n    return o.b\n"
             "print(f())\n")
 
+    def test_fallback_unpacking_with_fused_stores(self):
+        """Test plain names next to an attribute target, which 3.13+ stores with one fused STORE_FAST_STORE_FAST."""
+        cases = (
+            ("a, b, *o.x", "a, b, o.x", "[1, 2, 3, 4]"),
+            ("*o.x, a, b", "o.x, a, b", "[1, 2, 3, 4]"),
+            ("a, *o.x, b, c", "a, o.x, b, c", "[1, 2, 3, 4, 5]"),
+            ("a, b, o.x", "a, b, o.x", "[1, 2, 3]"),
+        )
+        for target, result, values in cases:
+            with self.subTest(target=target):
+                self.assert_same_behavior(
+                    "class O:\n    x = []\n"
+                    f"def f(v):\n    o = O()\n    {target} = v\n    return {result}\n"
+                    f"print(f({values}))\n")
+
     def test_for_loop_fallback_keeps_a_variable_named_item(self):
         """Test a for-loop whose target is stored through attributes does not overwrite the program's `_item`."""
         self.assert_same_behavior(

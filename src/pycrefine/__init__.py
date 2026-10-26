@@ -31,7 +31,7 @@ from ._constants import (  # noqa: F401
     _UNARY_SYMBOLS,
     _WHILE_TRIVIAL_OPS,
 )
-from .expr import StackNULL, _BoolExpr, _CollectionAccumSentinel, _unary_operand  # noqa: F401
+from .expr import StackNULL, _BoolExpr, _CollectionAccumSentinel, _UnpackAccessor, _unary_operand  # noqa: F401
 from .instructions import (  # noqa: F401
     BytecodeInstruction,
     _const_repr,

@@ -89,3 +89,14 @@ class _CollectionAccumSentinel:
 
     def __str__(self) -> str: return self._name
     def __repr__(self) -> str: return self._name
+
+
+class _UnpackAccessor(str):
+    """The value one target of a fallback unpacking will receive, as source text.
+
+    When an unpacking cannot be written as a single target, the decompiler leaves one such
+    value per target on the stack for the stores that follow. Being a ``str`` keeps it
+    usable wherever stack text is expected; the type lets a store that fuses two targets
+    (3.13+'s ``STORE_FAST_STORE_FAST``) tell these per-target values from a single tuple
+    expression that holds all of them.
+    """
