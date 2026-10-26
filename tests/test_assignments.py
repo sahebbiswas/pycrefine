@@ -131,6 +131,34 @@ class TestStarredAssignment(unittest.TestCase):
             "def f():\n    o = O()\n    *o.b, = iter((1, 2, 3))\n    return o.b\n"
             "print(f())\n")
 
+    def test_for_loop_fallback_keeps_a_variable_named_item(self):
+        """Test a for-loop whose target is stored through attributes does not overwrite the program's `_item`."""
+        self.assert_same_behavior(
+            "class O:\n    b = []\n"
+            "def f(rows):\n    _item = 'keep'\n    o = O()\n    for a, *o.b in rows:\n        pass\n"
+            "    return _item\n"
+            "print(f([(1, 2, 3)]))\n")
+        self.assert_same_behavior(
+            "class O:\n    b = []\n"
+            "def f(rows):\n    _item = 'keep'\n    o = O()\n    for a, o.b in rows:\n        pass\n"
+            "    return _item\n"
+            "print(f([(1, 2)]))\n")
+
+    def test_loop_placeholder_is_item_unless_the_code_uses_it(self):
+        """Test the loop placeholder stays `_item` when free, and avoids names a nested scope reads."""
+        from pycrefine.decompiler.generic import DecompilerGeneric
+
+        free = DecompilerGeneric(compile("x = 1\n", "<test>", "exec"))
+        self.assertEqual(free._loop_placeholder(), "_item")
+        self.assertTrue(free._is_loop_placeholder("_item"))
+
+        # `_item` is read by a function nested in the module, as a global of the module.
+        used = DecompilerGeneric(compile("def g():\n    return _item\n", "<test>", "exec"))
+        name = used._loop_placeholder()
+        self.assertNotEqual(name, "_item")
+        self.assertTrue(used._is_loop_placeholder(name))
+        self.assertFalse(used._is_loop_placeholder("_item"), "the program's own `_item` is not a placeholder")
+
     def test_fresh_accum_name_is_never_repeated(self):
         """Test _fresh_accum_name returns a new name each call and skips names the code uses."""
         from pycrefine.decompiler.generic import DecompilerGeneric

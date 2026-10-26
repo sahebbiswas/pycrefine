@@ -5738,7 +5738,9 @@ class DecompilerGeneric(DecompilerBase):
         opname = instr.opname
         if self.stack:
             iterator = self.stack.pop()
-            var_name = "_item"
+            # None until a target is read; if none can be, the loop gets a placeholder
+            # that the following stores unpack (see _loop_placeholder).
+            var_name: Optional[str] = None
             peek_pc = self.pc
             # Peek ahead for STORE_* or UNPACK_SEQUENCE to get var name(s).
             # Skip no-op / hint instructions that may appear between FOR_ITER
@@ -5763,6 +5765,8 @@ class DecompilerGeneric(DecompilerBase):
                         if parsed is not None and not pending:
                             var_name = parsed[0]
                             self.pc = parsed[2]  # skip the targets we parsed
+            if var_name is None:
+                var_name = self._loop_placeholder()
             self._append_reconstructed(f"for {var_name} in {iterator}:")
             self.indent_level += 1
             jump_target = self._get_jump_target(instr)
@@ -5901,14 +5905,15 @@ class DecompilerGeneric(DecompilerBase):
             if not is_comp:
                 if not already_accum:
                     # target is the *user*'s iterable variable, not our accumulator.
-                    # Check whether it was '_item' (the decompiler-generated loop placeholder):
+                    # Check whether it was the decompiler-generated loop placeholder:
                     # if so, initialise with an empty literal; otherwise seed from the iterable.
+                    is_placeholder = self._is_loop_placeholder(target)
                     if kind == "list":
-                        init_val = "[]" if target == "_item" else target
+                        init_val = "[]" if is_placeholder else target
                     elif kind == "set":
-                        init_val = "set()" if target == "_item" else target
+                        init_val = "set()" if is_placeholder else target
                     else:
-                        init_val = "{}" if target == "_item" else target
+                        init_val = "{}" if is_placeholder else target
                     fresh_name = self._fresh_accum_name()
                     sentinel = _CollectionAccumSentinel(fresh_name)
                     self._append_reconstructed(f"{sentinel} = {init_val}")
