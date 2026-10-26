@@ -143,6 +143,10 @@ class DecompilerGeneric(DecompilerBase):
         self._except_header_indents: List[int] = []    # stack of indent levels for except headers
         self._except_end_offsets: List[int] = []      # stack of end-offsets for exception zones
         self._enclosing_locals: set = set()           # names bound in enclosing function scopes
+        self._exc_bound_names: set = set()             # all names ever bound in except-as
+        self._handler_return_close: set = set()        # offsets of returns that end an except clause
+        self._explicit_returns: set = set()            # `return None` offsets known to be in the source
+        self._header_indent_by_cleanup: dict = {}      # handler clean-up target -> except header indent
         # The following sets are populated by _prescan_try_structure() which runs in decompile()
         self._try_nop_offsets: set = set()
         self._suppress_push_exc_offsets: set = set()
@@ -353,6 +357,10 @@ class DecompilerGeneric(DecompilerBase):
             if self._boolop_step(instr):
                 continue
             self._handle_instruction(instr)
+            if instr.offset in self._handler_return_close:
+                # The `return` that ends an except clause has been emitted inside it.
+                self._handler_return_close.discard(instr.offset)
+                self._close_except_clause()
 
         # Final block closure for anything spanning to the very end
         self._close_blocks(0x7fffffff)
@@ -3369,6 +3377,7 @@ class DecompilerGeneric(DecompilerBase):
         sub._compound_suppress = set()
         sub._except_header_indents = [0]
         sub._exc_cleanup_offsets = set()
+        sub._exc_bound_names = set()
         sub._enclosing_locals = self._enclosing_locals
         # Install only the handler instructions
         sub.instructions = handler_instrs
@@ -3392,6 +3401,9 @@ class DecompilerGeneric(DecompilerBase):
                 sub.indent_level -= 1
             sub.pc += 1
             sub._handle_instruction(instr)
+            if instr.offset in sub._handler_return_close:
+                sub._handler_return_close.discard(instr.offset)
+                sub._close_except_clause()
 
         return [line for line in sub.reconstructed if line or line == ""]
 
@@ -3866,6 +3878,9 @@ class DecompilerGeneric(DecompilerBase):
         # Record the indent at which except headers should be emitted
         indent = getattr(self, "_pei_indents", {}).get(instr.offset, self.indent_level)
         self._except_header_indents.append(indent)
+        cleanup = self._handler_cleanup_target(instr.offset)
+        if cleanup is not None:
+            self._header_indent_by_cleanup[cleanup] = indent
         # Peek: is there a LOAD + CHECK_EXC_MATCH coming?
         look = self.pc
         while look < len(self.instructions) and self.instructions[look].opname in (
@@ -3890,6 +3905,12 @@ class DecompilerGeneric(DecompilerBase):
         # Reset indent to the except-header level (handles multi-except chains
         # where the first handler incremented indent but the second check fires
         # without a new PUSH_EXC_INFO reset).
+        # A later clause of the same try (`except A: ... except B:`) shares the first
+        # clause's exception clean-up handler. When the previous clause already closed
+        # (it ended in `return`, say), reopen at that try's header indent.
+        header = self._header_indent_by_cleanup.get(self._handler_cleanup_target(instr.offset))
+        if header is not None and (not self._except_header_indents or self._except_header_indents[-1] != header):
+            self._except_header_indents.append(header)
         if self._except_header_indents:
             self.indent_level = self._except_header_indents[-1]
         # Peek ahead from the current position to find the optional
@@ -3940,6 +3961,7 @@ class DecompilerGeneric(DecompilerBase):
                 as_name = str(ins_l.argval)
                 self._exc_as_store_offset = ins_l.offset
                 self._record_exc_cleanup_offsets(look, as_name)
+                self._exc_bound_names.add(as_name)
                 break
             # Step 4: definitively in handler body — no binding
             if op in _IS_COMP_GEN_STOP or self._is_backward_jump(op):
@@ -3979,14 +4001,124 @@ class DecompilerGeneric(DecompilerBase):
                 if nxt.offset in getattr(self, "_exc_handler_jump_offsets", ()):
                     next_is_handler_jump = True
 
-            if not next_is_handler_jump:
-                last_idx = len(self.reconstructed) - 1
-                while last_idx >= 0 and not self.reconstructed[last_idx].strip():
-                    last_idx -= 1
-                if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
-                    self._append_reconstructed("pass")
-                self.indent_level = self._except_header_indents.pop()
+            if not next_is_handler_jump and not self._defer_close_to_handler_return():
+                self._close_except_clause()
         pass  # cleanup suppression (_exc_cleanup_name) stays active until DELETE_NAME fires
+
+    def _close_except_clause(self) -> None:
+        """End the innermost except clause: give an empty one a `pass`, and dedent."""
+        if not self._except_header_indents:
+            return
+        last_idx = len(self.reconstructed) - 1
+        while last_idx >= 0 and not self.reconstructed[last_idx].strip():
+            last_idx -= 1
+        if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
+            self._append_reconstructed("pass")
+        self.indent_level = self._except_header_indents.pop()
+
+    def _handler_cleanup_target(self, offset: int) -> Optional[int]:
+        """
+        The clean-up handler (``COPY 3; POP_EXCEPT; RERAISE 1``) that protects the
+        handler code at *offset* (3.11+); every clause of one try statement shares it.
+        """
+        entries = self._exception_entries() or []
+        hit = [e for e in entries if e.start <= offset < e.end and e.lasti]
+        return min(hit, key=lambda e: e.end - e.start).target if hit else None
+
+    def _is_as_name_cleanup(self, k: int, bound: set) -> bool:
+        """Whether ``LOAD_CONST None; STORE name; DELETE name`` for an ``as`` name starts at *k*."""
+        trio = self.instructions[k:k + 3]
+        if len(trio) < 3 or trio[0].opname != "LOAD_CONST" or trio[0].argval is not None:
+            return False
+        store, delete = trio[1], trio[2]
+        return (store.opname.startswith("STORE_") and delete.opname.startswith("DELETE_")
+                and str(store.argval) in bound and delete.argval == store.argval)
+
+    def _handler_exit_return(self, start: int) -> Optional[Tuple[int, int]]:
+        """
+        Find the `return` that ends an except clause, from the instruction after its
+        POP_EXCEPT (#165).
+
+        A `return` inside an except clause leaves the handler first: POP_EXCEPT, the
+        clean-up of an ``as`` name (``LOAD_CONST None; STORE name; DELETE name``), and
+        then the return. A value computed before the exit was moved below the exception
+        (``ROT_FOUR``/``SWAP 2``) and is returned directly; otherwise the returned
+        expression is computed here, as straight-line code. Code that any jump reaches,
+        such as the statements after the try statement, is not part of the clause.
+
+        Returns:
+            ``(resume_index, return_index)``: where decompiling continues (past the
+            clean-up) and the index of the RETURN instruction; or None.
+        """
+        instrs = self.instructions
+        bound = self._exc_bound_names
+        k = start
+        while k < len(instrs):
+            op = instrs[k].opname
+            if op in ("NOP", "CACHE", "POP_BLOCK"):
+                k += 1
+            elif self._is_as_name_cleanup(k, bound):
+                k += 3
+            else:
+                break
+        resume = k
+        targets = {self._get_jump_target(x) for x in instrs if "JUMP" in x.opname or x.opname == "FOR_ITER"}
+        placed = getattr(self, "_finally_body_suppress", set())
+        while k < len(instrs):
+            ins = instrs[k]
+            if ins.offset in placed:
+                k += 1  # the inline finally body on the way out, rendered by its finally:
+                continue
+            if ins.offset in targets or ins.is_jump_target:
+                return None
+            if ins.opname in ("RETURN_VALUE", "RETURN_CONST"):
+                return resume, k
+            if (ins.opname == "ROT_TWO" or (ins.opname == "SWAP" and ins.arg == 2)) \
+                    and k + 1 < len(instrs) and instrs[k + 1].opname == "POP_TOP":
+                k += 2  # returning from inside a loop drops its iterator
+                continue
+            if ("JUMP" in ins.opname or ins.opname.startswith(("STORE_", "DELETE_", "POP_", "RAISE", "RERAISE",
+                                                                "SETUP_", "FOR_ITER", "YIELD", "SEND"))
+                    or ins.opname in ("PUSH_EXC_INFO", "WITH_EXCEPT_START", "END_FOR")):
+                return None
+            k += 1
+        return None
+
+    def _defer_close_to_handler_return(self) -> bool:
+        """
+        At an except clause's POP_EXCEPT: when the clause ends in `return`, keep it open
+        until that return has been emitted, so the return stays inside the clause
+        instead of landing after the try statement (#165).
+
+        Returns True only when it defers, and then it has moved ``self.pc`` past the
+        handler's clean-up to the resume point; on False ``self.pc`` is unchanged.
+        """
+        found = self._handler_exit_return(self.pc)
+        if found is None:
+            return False
+        resume, ret = found
+        instrs = self.instructions
+        body = [x for x in instrs[resume:ret] if x.opname not in ("NOP", "CACHE")]
+        returns_none = (instrs[ret].opname == "RETURN_CONST" and instrs[ret].argval is None and not body) or (
+            instrs[ret].opname == "RETURN_VALUE" and len(body) == 1
+            and body[0].opname == "LOAD_CONST" and body[0].argval is None)
+        if returns_none:
+            # A bare `return` and the implicit return at the end of the function look
+            # the same here (3.12+ copies the latter into the handler). Only the
+            # explicit one starts a line of its own at the POP_EXCEPT.
+            first = max(self.pc - 1, 0)
+            while first > 0 and instrs[first - 1].opname in ("POP_BLOCK", "ROT_FOUR", "SWAP", "NOP"):
+                first -= 1  # the exit's own instructions before POP_EXCEPT (3.9: POP_BLOCK)
+            if not any(instrs[j].starts_line is not None for j in range(first, ret + 1)):
+                return False
+            self._explicit_returns.add(instrs[ret].offset)
+        self.pc = resume
+        if self._except_header_indents and self.indent_level > self._except_header_indents[-1] + 1:
+            # The return sits in a block inside the clause (`if c: return x`); the
+            # clause goes on after that block and closes at its own POP_EXCEPT.
+            return True
+        self._handler_return_close.add(instrs[ret].offset)
+        return True
 
     def _op_setup_finally(self, instr: BytecodeInstruction):
         opname = instr.opname
@@ -4769,6 +4901,12 @@ class DecompilerGeneric(DecompilerBase):
 
     def _op_stack_manip(self, instr: BytecodeInstruction):
         opname = instr.opname
+        nxt = next((x for x in self.instructions[self.pc:] if x.opname not in ("NOP", "CACHE", "POP_BLOCK")), None)
+        if nxt is not None and nxt.opname == "POP_EXCEPT" and (
+                opname == "ROT_FOUR" or (opname == "SWAP" and instr.arg == 2)):
+            # `return value` inside an except clause moves the value below the handled
+            # exception, which is not on the modelled stack: the value stays on top.
+            return
         is_swap_two = opname == "ROT_TWO" or (opname == "SWAP" and instr.arg == 2)
         if is_swap_two:
             return_at = self._loop_return_tail()
