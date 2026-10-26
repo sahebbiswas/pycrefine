@@ -92,7 +92,7 @@ therefore needs a baseline update in the same change.
 Improvements never break CI. Recording them
 ratchets the baseline upward, so the improvement can't silently regress
 later. When a change improves results, regenerate the baseline on **every** CI
-Python version (3.9, 3.12, 3.13 and 3.14) and commit the diff:
+Python version (3.9, 3.11, 3.12, 3.13 and 3.14) and commit the diff:
 
 ```bash
 python quality/check_correctness.py --update-baseline
@@ -163,6 +163,7 @@ Default corpus: 13 entries (7 sources, 6 `.pyc` fixtures) and 77 units.
 | Host Python | Entries compiling | Units compiling | Units AST-equal |
 |-------------|------------------:|----------------:|----------------:|
 | 3.9         | 9 / 13            | 77 / 77         | 58 / 77         |
+| 3.11        | 7 / 13            | 73 / 77         | 52 / 77         |
 | 3.12        | 8 / 13            | 73 / 77         | 49 / 77         |
 | 3.13        | 9 / 13            | 75 / 77         | 52 / 77         |
 | 3.14        | 9 / 13            | 73 / 77         | 48 / 77         |
