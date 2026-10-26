@@ -1,0 +1,2008 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "id": "features/class_basic",
+      "category": "feature",
+      "path": "features/class_basic.py",
+      "summary": "Classes, inheritance, super() and __repr__",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 202,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 method calls among call arguments"
+        }
+      ]
+    },
+    {
+      "id": "features/class_special_methods",
+      "category": "feature",
+      "path": "features/class_special_methods.py",
+      "summary": "Operator overloading, __iter__, __getitem__, __len__",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "supported",
+      "limitations": []
+    },
+    {
+      "id": "features/closure_counter",
+      "category": "feature",
+      "path": "features/closure_counter.py",
+      "summary": "nonlocal counters, lambda defaults, closures in loops",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 203,
+          "versions": [
+            "3.13",
+            "3.14"
+          ],
+          "summary": "3.13/3.14 lambda defaults in comprehensions are dropped"
+        }
+      ]
+    },
+    {
+      "id": "features/closure_decorator",
+      "category": "feature",
+      "path": "features/closure_decorator.py",
+      "summary": "A decorator with functools.wraps and *args/**kwargs",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 191,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 calls with keyword arguments crash"
+        },
+        {
+          "issue": 185,
+          "versions": [
+            "3.14"
+          ],
+          "summary": "f(*args, **kwargs) in a function (3.14)"
+        }
+      ]
+    },
+    {
+      "id": "features/comp_generators",
+      "category": "feature",
+      "path": "features/comp_generators.py",
+      "summary": "Generator functions and expressions, sum/any/all/max over them",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 105,
+          "versions": [
+            "3.10",
+            "3.11"
+          ],
+          "summary": "while cond loops are decompiled as if"
+        },
+        {
+          "issue": 161,
+          "versions": [
+            "3.12",
+            "3.13"
+          ],
+          "summary": "return None inside a while loop that ends a function"
+        }
+      ]
+    },
+    {
+      "id": "features/comp_list_dict_set",
+      "category": "feature",
+      "path": "features/comp_list_dict_set.py",
+      "summary": "List, dict and set comprehensions, nested and filtered",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 192,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 comprehension filters and conditionals are dropped"
+        }
+      ]
+    },
+    {
+      "id": "features/data_structures",
+      "category": "feature",
+      "path": "features/data_structures.py",
+      "summary": "Lists, dicts, sets, tuples, slicing and unpacking displays",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 191,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 calls with keyword arguments crash"
+        }
+      ]
+    },
+    {
+      "id": "features/decorators_properties",
+      "category": "feature",
+      "path": "features/decorators_properties.py",
+      "summary": "property, setter, classmethod and staticmethod",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 202,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 method calls among call arguments"
+        }
+      ]
+    },
+    {
+      "id": "features/exc_finally",
+      "category": "feature",
+      "path": "features/exc_finally.py",
+      "summary": "try/except/finally with returns and a log",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 179,
+          "versions": [
+            "3.10"
+          ],
+          "summary": "3.10 block-based exception handlers are not decompiled"
+        },
+        {
+          "issue": 193,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 try/except/finally loses its finally block"
+        }
+      ]
+    },
+    {
+      "id": "features/exc_raise_chain",
+      "category": "feature",
+      "path": "features/exc_raise_chain.py",
+      "summary": "Custom exceptions, raise ... from, assert",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 179,
+          "versions": [
+            "3.10"
+          ],
+          "summary": "3.10 block-based exception handlers are not decompiled"
+        },
+        {
+          "issue": 193,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 try/except/finally loses its finally block"
+        },
+        {
+          "issue": 157,
+          "versions": [
+            "3.13",
+            "3.14"
+          ],
+          "summary": "keyword-only defaults, f-string conversions and format specs dropped (3.13/3.14)"
+        }
+      ]
+    },
+    {
+      "id": "features/exc_try_except",
+      "category": "feature",
+      "path": "features/exc_try_except.py",
+      "summary": "Typed, tuple and 'as' except clauses",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 179,
+          "versions": [
+            "3.10"
+          ],
+          "summary": "3.10 block-based exception handlers are not decompiled"
+        },
+        {
+          "issue": 193,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 try/except/finally loses its finally block"
+        }
+      ]
+    },
+    {
+      "id": "features/exc_uncaught",
+      "category": "feature",
+      "path": "features/exc_uncaught.py",
+      "summary": "A program that ends in an uncaught exception",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "supported",
+      "limitations": []
+    },
+    {
+      "id": "features/expr_arithmetic",
+      "category": "feature",
+      "path": "features/expr_arithmetic.py",
+      "summary": "Arithmetic, bit operators and augmented assignment",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "supported",
+      "limitations": []
+    },
+    {
+      "id": "features/expr_boolops_ternary",
+      "category": "feature",
+      "path": "features/expr_boolops_ternary.py",
+      "summary": "and/or as values and conditional expressions",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 194,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 (a and b) or c as a value loses the and"
+        }
+      ]
+    },
+    {
+      "id": "features/expr_comparisons",
+      "category": "feature",
+      "path": "features/expr_comparisons.py",
+      "summary": "Chained comparisons, is, in and not in",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "supported",
+      "limitations": []
+    },
+    {
+      "id": "features/expr_strings",
+      "category": "feature",
+      "path": "features/expr_strings.py",
+      "summary": "String methods, %-formatting, str.format and f-strings",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "unsupported",
+      "limitations": [
+        {
+          "issue": 200,
+          "versions": "all",
+          "summary": "lone f-string field with a conversion"
+        },
+        {
+          "issue": 157,
+          "versions": [
+            "3.13",
+            "3.14"
+          ],
+          "summary": "keyword-only defaults, f-string conversions and format specs dropped (3.13/3.14)"
+        }
+      ]
+    },
+    {
+      "id": "features/flow_for_else",
+      "category": "feature",
+      "path": "features/flow_for_else.py",
+      "summary": "for/else, break and continue",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "supported",
+      "limitations": []
+    },
+    {
+      "id": "features/flow_if_elif",
+      "category": "feature",
+      "path": "features/flow_if_elif.py",
+      "summary": "if/elif/else chains and branch assignments",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "supported",
+      "limitations": []
+    },
+    {
+      "id": "features/flow_nested_loops",
+      "category": "feature",
+      "path": "features/flow_nested_loops.py",
+      "summary": "Nested loops with break and continue",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "supported",
+      "limitations": []
+    },
+    {
+      "id": "features/flow_try_in_loops",
+      "category": "feature",
+      "path": "features/flow_try_in_loops.py",
+      "summary": "try/except/finally inside for and while loops, with break and continue",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 179,
+          "versions": [
+            "3.10"
+          ],
+          "summary": "3.10 block-based exception handlers are not decompiled"
+        },
+        {
+          "issue": 193,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 try/except/finally loses its finally block"
+        },
+        {
+          "issue": 210,
+          "versions": [
+            "3.13",
+            "3.14"
+          ],
+          "summary": "3.13/3.14 kept, errors = [], 0 is reconstructed as errors, kept = 0"
+        }
+      ]
+    },
+    {
+      "id": "features/flow_while",
+      "category": "feature",
+      "path": "features/flow_while.py",
+      "summary": "while loops with break, continue, else and an augmented-assignment branch",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 105,
+          "versions": [
+            "3.10",
+            "3.11"
+          ],
+          "summary": "while cond loops are decompiled as if"
+        },
+        {
+          "issue": 201,
+          "versions": [
+            "3.11",
+            "3.12",
+            "3.13",
+            "3.14"
+          ],
+          "summary": "augmented assignment in one if/else branch becomes ?"
+        }
+      ]
+    },
+    {
+      "id": "features/func_defaults_kwargs",
+      "category": "feature",
+      "path": "features/func_defaults_kwargs.py",
+      "summary": "Defaults, *args, keyword-only parameters and **kwargs",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "unsupported",
+      "limitations": [
+        {
+          "issue": 147,
+          "versions": "all",
+          "summary": "conditional expression with a list/dict display or call arguments"
+        },
+        {
+          "issue": 191,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 calls with keyword arguments crash"
+        },
+        {
+          "issue": 157,
+          "versions": [
+            "3.13",
+            "3.14"
+          ],
+          "summary": "keyword-only defaults, f-string conversions and format specs dropped (3.13/3.14)"
+        }
+      ]
+    },
+    {
+      "id": "features/func_lambda_sorted",
+      "category": "feature",
+      "path": "features/func_lambda_sorted.py",
+      "summary": "lambda, sorted with key, map, filter and composition",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 191,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 calls with keyword arguments crash"
+        }
+      ]
+    },
+    {
+      "id": "features/func_recursion",
+      "category": "feature",
+      "path": "features/func_recursion.py",
+      "summary": "Recursion, memoization via a default argument, swap-style assignment",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 168,
+          "versions": [
+            "3.9",
+            "3.10",
+            "3.12",
+            "3.13",
+            "3.14"
+          ],
+          "summary": "swap by tuple assignment becomes sequential assignments"
+        }
+      ]
+    },
+    {
+      "id": "features/io_streams",
+      "category": "feature",
+      "path": "features/io_streams.py",
+      "summary": "print with sep/end/file, sys.stdout and sys.stderr writes",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 191,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 calls with keyword arguments crash"
+        }
+      ]
+    },
+    {
+      "id": "features/modern_async",
+      "category": "feature",
+      "path": "features/modern_async.py",
+      "summary": "async def, await, async generators and async comprehensions",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "unsupported",
+      "limitations": [
+        {
+          "issue": 85,
+          "versions": "all",
+          "summary": "modern constructs (async, match, except*, type parameters, PEP 701 f-strings)"
+        }
+      ]
+    },
+    {
+      "id": "features/modern_except_star",
+      "category": "feature",
+      "path": "features/modern_except_star.py",
+      "summary": "except* with an ExceptionGroup",
+      "source_python": {
+        "min": "3.11"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "unsupported",
+      "limitations": [
+        {
+          "issue": 85,
+          "versions": [
+            "3.11",
+            "3.12",
+            "3.13",
+            "3.14"
+          ],
+          "summary": "modern constructs (async, match, except*, type parameters, PEP 701 f-strings)"
+        }
+      ]
+    },
+    {
+      "id": "features/modern_fstring_nested",
+      "category": "feature",
+      "path": "features/modern_fstring_nested.py",
+      "summary": "PEP 701 f-strings: nested quotes and nested fields",
+      "source_python": {
+        "min": "3.12"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "unsupported",
+      "limitations": [
+        {
+          "issue": 85,
+          "versions": [
+            "3.12",
+            "3.13",
+            "3.14"
+          ],
+          "summary": "modern constructs (async, match, except*, type parameters, PEP 701 f-strings)"
+        }
+      ]
+    },
+    {
+      "id": "features/modern_generics",
+      "category": "feature",
+      "path": "features/modern_generics.py",
+      "summary": "PEP 695 generic functions, classes and type aliases",
+      "source_python": {
+        "min": "3.12"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "unsupported",
+      "limitations": [
+        {
+          "issue": 85,
+          "versions": [
+            "3.12",
+            "3.13",
+            "3.14"
+          ],
+          "summary": "modern constructs (async, match, except*, type parameters, PEP 701 f-strings)"
+        }
+      ]
+    },
+    {
+      "id": "features/modern_match",
+      "category": "feature",
+      "path": "features/modern_match.py",
+      "summary": "match/case with literal, sequence, mapping and class patterns",
+      "source_python": {
+        "min": "3.10"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "unsupported",
+      "limitations": [
+        {
+          "issue": 85,
+          "versions": [
+            "3.10",
+            "3.11",
+            "3.12",
+            "3.13",
+            "3.14"
+          ],
+          "summary": "modern constructs (async, match, except*, type parameters, PEP 701 f-strings)"
+        }
+      ]
+    },
+    {
+      "id": "features/modern_walrus",
+      "category": "feature",
+      "path": "features/modern_walrus.py",
+      "summary": "The walrus operator in if, while and comprehensions",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "unsupported",
+      "limitations": [
+        {
+          "issue": 205,
+          "versions": "all",
+          "summary": "assignment expressions in if/while conditions"
+        },
+        {
+          "issue": 189,
+          "versions": [
+            "3.9"
+          ],
+          "summary": "walrus inside a comprehension is dropped (3.9)"
+        },
+        {
+          "issue": 99,
+          "versions": [
+            "3.12",
+            "3.13",
+            "3.14"
+          ],
+          "summary": "walrus or captured loop variable in an inlined comprehension (3.12+)"
+        }
+      ]
+    },
+    {
+      "id": "features/module_globals",
+      "category": "feature",
+      "path": "features/module_globals.py",
+      "summary": "import forms, global, del and globals()",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "unsupported",
+      "limitations": [
+        {
+          "issue": 199,
+          "versions": "all",
+          "summary": "import a.b as c"
+        },
+        {
+          "issue": 191,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 calls with keyword arguments crash"
+        }
+      ]
+    },
+    {
+      "id": "features/opt_asserts_debug",
+      "category": "feature",
+      "path": "features/opt_asserts_debug.py",
+      "summary": "assert and __debug__ code compiled with optimize=2 (python -OO): the assertion and the debug branch are gone from the bytecode",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 2
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 179,
+          "versions": [
+            "3.10"
+          ],
+          "summary": "3.10: the try/except around the assertion comes out without its except clause"
+        }
+      ]
+    },
+    {
+      "id": "features/unpack_assign",
+      "category": "feature",
+      "path": "features/unpack_assign.py",
+      "summary": "Swaps, starred and nested unpacking, subscript targets",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "unsupported",
+      "limitations": [
+        {
+          "issue": 168,
+          "versions": "all",
+          "summary": "swap by tuple assignment becomes sequential assignments"
+        }
+      ]
+    },
+    {
+      "id": "features/with_context",
+      "category": "feature",
+      "path": "features/with_context.py",
+      "summary": "Context managers, suppression and multiple items",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 177,
+          "versions": [
+            "3.11",
+            "3.12",
+            "3.13",
+            "3.14"
+          ],
+          "summary": "code after a with block whose body never falls through is lost"
+        }
+      ]
+    },
+    {
+      "id": "generated/cf_for_finally_break",
+      "category": "generated",
+      "path": "generated/cf_for_finally_break.py",
+      "summary": "A for loop with a finally body that ends in break",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 179,
+          "versions": [
+            "3.10"
+          ],
+          "summary": "3.10 block-based exception handlers are not decompiled"
+        },
+        {
+          "issue": 193,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 try/except/finally loses its finally block"
+        }
+      ]
+    },
+    {
+      "id": "generated/cf_for_finally_continue",
+      "category": "generated",
+      "path": "generated/cf_for_finally_continue.py",
+      "summary": "A for loop with a finally body that ends in continue",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 179,
+          "versions": [
+            "3.10"
+          ],
+          "summary": "3.10 block-based exception handlers are not decompiled"
+        },
+        {
+          "issue": 193,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 try/except/finally loses its finally block"
+        }
+      ]
+    },
+    {
+      "id": "generated/cf_for_finally_return",
+      "category": "generated",
+      "path": "generated/cf_for_finally_return.py",
+      "summary": "A for loop with a finally body that ends in return",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 179,
+          "versions": [
+            "3.10"
+          ],
+          "summary": "3.10 block-based exception handlers are not decompiled"
+        },
+        {
+          "issue": 193,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 try/except/finally loses its finally block"
+        }
+      ]
+    },
+    {
+      "id": "generated/cf_for_if_break",
+      "category": "generated",
+      "path": "generated/cf_for_if_break.py",
+      "summary": "A for loop with a if body that ends in break",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "supported",
+      "limitations": []
+    },
+    {
+      "id": "generated/cf_for_if_continue",
+      "category": "generated",
+      "path": "generated/cf_for_if_continue.py",
+      "summary": "A for loop with a if body that ends in continue",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "supported",
+      "limitations": []
+    },
+    {
+      "id": "generated/cf_for_if_return",
+      "category": "generated",
+      "path": "generated/cf_for_if_return.py",
+      "summary": "A for loop with a if body that ends in return",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "supported",
+      "limitations": []
+    },
+    {
+      "id": "generated/cf_for_nested_break",
+      "category": "generated",
+      "path": "generated/cf_for_nested_break.py",
+      "summary": "A for loop with a nested body that ends in break",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "supported",
+      "limitations": []
+    },
+    {
+      "id": "generated/cf_for_nested_continue",
+      "category": "generated",
+      "path": "generated/cf_for_nested_continue.py",
+      "summary": "A for loop with a nested body that ends in continue",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "supported",
+      "limitations": []
+    },
+    {
+      "id": "generated/cf_for_nested_return",
+      "category": "generated",
+      "path": "generated/cf_for_nested_return.py",
+      "summary": "A for loop with a nested body that ends in return",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "supported",
+      "limitations": []
+    },
+    {
+      "id": "generated/cf_for_try_break",
+      "category": "generated",
+      "path": "generated/cf_for_try_break.py",
+      "summary": "A for loop with a try body that ends in break",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "unsupported",
+      "limitations": [
+        {
+          "issue": 179,
+          "versions": [
+            "3.10"
+          ],
+          "summary": "3.10 block-based exception handlers are not decompiled"
+        },
+        {
+          "issue": 193,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 try/except/finally loses its finally block"
+        },
+        {
+          "issue": 207,
+          "versions": [
+            "3.9",
+            "3.12",
+            "3.13",
+            "3.14"
+          ],
+          "summary": "break in an except clause or elif branch becomes a return"
+        }
+      ]
+    },
+    {
+      "id": "generated/cf_for_try_continue",
+      "category": "generated",
+      "path": "generated/cf_for_try_continue.py",
+      "summary": "A for loop with a try body that ends in continue",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 179,
+          "versions": [
+            "3.10"
+          ],
+          "summary": "3.10 block-based exception handlers are not decompiled"
+        },
+        {
+          "issue": 193,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 try/except/finally loses its finally block"
+        }
+      ]
+    },
+    {
+      "id": "generated/cf_for_try_return",
+      "category": "generated",
+      "path": "generated/cf_for_try_return.py",
+      "summary": "A for loop with a try body that ends in return",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 179,
+          "versions": [
+            "3.10"
+          ],
+          "summary": "3.10 block-based exception handlers are not decompiled"
+        },
+        {
+          "issue": 193,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 try/except/finally loses its finally block"
+        }
+      ]
+    },
+    {
+      "id": "generated/cf_for_with_break",
+      "category": "generated",
+      "path": "generated/cf_for_with_break.py",
+      "summary": "A for loop with a with body that ends in break",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 209,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 code after a with block containing break/continue is lost"
+        }
+      ]
+    },
+    {
+      "id": "generated/cf_for_with_continue",
+      "category": "generated",
+      "path": "generated/cf_for_with_continue.py",
+      "summary": "A for loop with a with body that ends in continue",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 209,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 code after a with block containing break/continue is lost"
+        }
+      ]
+    },
+    {
+      "id": "generated/cf_for_with_return",
+      "category": "generated",
+      "path": "generated/cf_for_with_return.py",
+      "summary": "A for loop with a with body that ends in return",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 209,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 code after a with block containing break/continue is lost"
+        }
+      ]
+    },
+    {
+      "id": "generated/cf_while_finally_break",
+      "category": "generated",
+      "path": "generated/cf_while_finally_break.py",
+      "summary": "A while loop with a finally body that ends in break",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 179,
+          "versions": [
+            "3.10"
+          ],
+          "summary": "3.10 block-based exception handlers are not decompiled"
+        },
+        {
+          "issue": 193,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 try/except/finally loses its finally block"
+        }
+      ]
+    },
+    {
+      "id": "generated/cf_while_finally_continue",
+      "category": "generated",
+      "path": "generated/cf_while_finally_continue.py",
+      "summary": "A while loop with a finally body that ends in continue",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 179,
+          "versions": [
+            "3.10"
+          ],
+          "summary": "3.10 block-based exception handlers are not decompiled"
+        },
+        {
+          "issue": 193,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 try/except/finally loses its finally block"
+        }
+      ]
+    },
+    {
+      "id": "generated/cf_while_finally_return",
+      "category": "generated",
+      "path": "generated/cf_while_finally_return.py",
+      "summary": "A while loop with a finally body that ends in return",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 179,
+          "versions": [
+            "3.10"
+          ],
+          "summary": "3.10 block-based exception handlers are not decompiled"
+        },
+        {
+          "issue": 193,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 try/except/finally loses its finally block"
+        }
+      ]
+    },
+    {
+      "id": "generated/cf_while_if_break",
+      "category": "generated",
+      "path": "generated/cf_while_if_break.py",
+      "summary": "A while loop with a if body that ends in break",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 105,
+          "versions": [
+            "3.10",
+            "3.11"
+          ],
+          "summary": "while cond loops are decompiled as if"
+        }
+      ]
+    },
+    {
+      "id": "generated/cf_while_if_continue",
+      "category": "generated",
+      "path": "generated/cf_while_if_continue.py",
+      "summary": "A while loop with a if body that ends in continue",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 105,
+          "versions": [
+            "3.10",
+            "3.11"
+          ],
+          "summary": "while cond loops are decompiled as if"
+        }
+      ]
+    },
+    {
+      "id": "generated/cf_while_if_return",
+      "category": "generated",
+      "path": "generated/cf_while_if_return.py",
+      "summary": "A while loop with a if body that ends in return",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 105,
+          "versions": [
+            "3.10",
+            "3.11"
+          ],
+          "summary": "while cond loops are decompiled as if"
+        }
+      ]
+    },
+    {
+      "id": "generated/cf_while_nested_break",
+      "category": "generated",
+      "path": "generated/cf_while_nested_break.py",
+      "summary": "A while loop with a nested body that ends in break",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "unsupported",
+      "limitations": [
+        {
+          "issue": 206,
+          "versions": "all",
+          "summary": "statement after a for loop with break in a while loop moves into else"
+        }
+      ]
+    },
+    {
+      "id": "generated/cf_while_nested_continue",
+      "category": "generated",
+      "path": "generated/cf_while_nested_continue.py",
+      "summary": "A while loop with a nested body that ends in continue",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 105,
+          "versions": [
+            "3.10",
+            "3.11"
+          ],
+          "summary": "while cond loops are decompiled as if"
+        }
+      ]
+    },
+    {
+      "id": "generated/cf_while_nested_return",
+      "category": "generated",
+      "path": "generated/cf_while_nested_return.py",
+      "summary": "A while loop with a nested body that ends in return",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 105,
+          "versions": [
+            "3.10",
+            "3.11"
+          ],
+          "summary": "while cond loops are decompiled as if"
+        }
+      ]
+    },
+    {
+      "id": "generated/cf_while_try_break",
+      "category": "generated",
+      "path": "generated/cf_while_try_break.py",
+      "summary": "A while loop with a try body that ends in break",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "unsupported",
+      "limitations": [
+        {
+          "issue": 179,
+          "versions": [
+            "3.10"
+          ],
+          "summary": "3.10 block-based exception handlers are not decompiled"
+        },
+        {
+          "issue": 193,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 try/except/finally loses its finally block"
+        },
+        {
+          "issue": 207,
+          "versions": [
+            "3.9",
+            "3.12",
+            "3.13",
+            "3.14"
+          ],
+          "summary": "break in an except clause or elif branch becomes a return"
+        },
+        {
+          "issue": 170,
+          "versions": [
+            "3.12",
+            "3.13",
+            "3.14"
+          ],
+          "summary": "while loop whose try body returns and whose handler continues"
+        }
+      ]
+    },
+    {
+      "id": "generated/cf_while_try_continue",
+      "category": "generated",
+      "path": "generated/cf_while_try_continue.py",
+      "summary": "A while loop with a try body that ends in continue",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "unsupported",
+      "limitations": [
+        {
+          "issue": 179,
+          "versions": [
+            "3.10"
+          ],
+          "summary": "3.10 block-based exception handlers are not decompiled"
+        },
+        {
+          "issue": 193,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 try/except/finally loses its finally block"
+        },
+        {
+          "issue": 170,
+          "versions": [
+            "3.9",
+            "3.12",
+            "3.13",
+            "3.14"
+          ],
+          "summary": "while loop whose try body returns and whose handler continues"
+        }
+      ]
+    },
+    {
+      "id": "generated/cf_while_try_return",
+      "category": "generated",
+      "path": "generated/cf_while_try_return.py",
+      "summary": "A while loop with a try body that ends in return",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 179,
+          "versions": [
+            "3.10"
+          ],
+          "summary": "3.10 block-based exception handlers are not decompiled"
+        },
+        {
+          "issue": 193,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 try/except/finally loses its finally block"
+        },
+        {
+          "issue": 170,
+          "versions": [
+            "3.12",
+            "3.13",
+            "3.14"
+          ],
+          "summary": "while loop whose try body returns and whose handler continues"
+        }
+      ]
+    },
+    {
+      "id": "generated/cf_while_with_break",
+      "category": "generated",
+      "path": "generated/cf_while_with_break.py",
+      "summary": "A while loop with a with body that ends in break",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 105,
+          "versions": [
+            "3.10",
+            "3.11"
+          ],
+          "summary": "while cond loops are decompiled as if"
+        },
+        {
+          "issue": 209,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 code after a with block containing break/continue is lost"
+        }
+      ]
+    },
+    {
+      "id": "generated/cf_while_with_continue",
+      "category": "generated",
+      "path": "generated/cf_while_with_continue.py",
+      "summary": "A while loop with a with body that ends in continue",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 105,
+          "versions": [
+            "3.10",
+            "3.11"
+          ],
+          "summary": "while cond loops are decompiled as if"
+        },
+        {
+          "issue": 209,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 code after a with block containing break/continue is lost"
+        }
+      ]
+    },
+    {
+      "id": "generated/cf_while_with_return",
+      "category": "generated",
+      "path": "generated/cf_while_with_return.py",
+      "summary": "A while loop with a with body that ends in return",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 105,
+          "versions": [
+            "3.10",
+            "3.11"
+          ],
+          "summary": "while cond loops are decompiled as if"
+        },
+        {
+          "issue": 209,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 code after a with block containing break/continue is lost"
+        }
+      ]
+    },
+    {
+      "id": "realworld/inventory_report",
+      "category": "realworld",
+      "path": "realworld/inventory_report.py",
+      "summary": "Group and total a small inventory, then print a report",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 191,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 calls with keyword arguments crash"
+        }
+      ]
+    },
+    {
+      "id": "realworld/lru_cache",
+      "category": "realworld",
+      "path": "realworld/lru_cache.py",
+      "summary": "A small least-recently-used cache with hit statistics",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 179,
+          "versions": [
+            "3.10"
+          ],
+          "summary": "3.10 block-based exception handlers are not decompiled"
+        },
+        {
+          "issue": 191,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 calls with keyword arguments crash"
+        }
+      ]
+    },
+    {
+      "id": "realworld/state_machine",
+      "category": "realworld",
+      "path": "realworld/state_machine.py",
+      "summary": "A traffic-light style state machine with guards and an event log",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 207,
+          "versions": [
+            "3.12",
+            "3.13",
+            "3.14"
+          ],
+          "summary": "break in an except clause or elif branch becomes a return"
+        }
+      ]
+    },
+    {
+      "id": "realworld/text_stats",
+      "category": "realworld",
+      "path": "realworld/text_stats.py",
+      "summary": "Word statistics for a block of text",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 191,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 calls with keyword arguments crash"
+        }
+      ]
+    },
+    {
+      "id": "realworld/tokenizer",
+      "category": "realworld",
+      "path": "realworld/tokenizer.py",
+      "summary": "A tiny expression tokenizer and evaluator",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "unsupported",
+      "limitations": [
+        {
+          "issue": 208,
+          "versions": "all",
+          "summary": "try with several except clauses gets a stray continue"
+        }
+      ]
+    },
+    {
+      "id": "stdlib/bisect",
+      "category": "stdlib",
+      "module": "bisect",
+      "summary": "The standard library's bisect module, as shipped with the running Python",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "compile_only",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 191,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 calls with keyword arguments crash"
+        },
+        {
+          "issue": 157,
+          "versions": [
+            "3.13",
+            "3.14"
+          ],
+          "summary": "keyword-only defaults, f-string conversions and format specs dropped (3.13/3.14)"
+        }
+      ]
+    },
+    {
+      "id": "stdlib/colorsys",
+      "category": "stdlib",
+      "module": "colorsys",
+      "summary": "The standard library's colorsys module, as shipped with the running Python",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "compile_only",
+      "support": "supported",
+      "limitations": []
+    },
+    {
+      "id": "stdlib/copy",
+      "category": "stdlib",
+      "module": "copy",
+      "summary": "The standard library's copy module, as shipped with the running Python",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "compile_only",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 179,
+          "versions": [
+            "3.10"
+          ],
+          "summary": "3.10 block-based exception handlers are not decompiled"
+        },
+        {
+          "issue": 157,
+          "versions": [
+            "3.13",
+            "3.14"
+          ],
+          "summary": "keyword-only defaults, f-string conversions and format specs dropped (3.13/3.14)"
+        }
+      ]
+    },
+    {
+      "id": "stdlib/fnmatch",
+      "category": "stdlib",
+      "module": "fnmatch",
+      "summary": "The standard library's fnmatch module, as shipped with the running Python",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "compile_only",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 179,
+          "versions": [
+            "3.10"
+          ],
+          "summary": "3.10 block-based exception handlers are not decompiled"
+        },
+        {
+          "issue": 191,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 calls with keyword arguments crash"
+        }
+      ]
+    },
+    {
+      "id": "stdlib/getopt",
+      "category": "stdlib",
+      "module": "getopt",
+      "summary": "The standard library's getopt module, as shipped with the running Python",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "compile_only",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 179,
+          "versions": [
+            "3.10"
+          ],
+          "summary": "3.10 block-based exception handlers are not decompiled"
+        }
+      ]
+    },
+    {
+      "id": "stdlib/queue",
+      "category": "stdlib",
+      "module": "queue",
+      "summary": "The standard library's queue module, as shipped with the running Python",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "compile_only",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 179,
+          "versions": [
+            "3.10"
+          ],
+          "summary": "3.10 block-based exception handlers are not decompiled"
+        },
+        {
+          "issue": 191,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 calls with keyword arguments crash"
+        }
+      ]
+    },
+    {
+      "id": "stdlib/shlex",
+      "category": "stdlib",
+      "module": "shlex",
+      "summary": "The standard library's shlex module, as shipped with the running Python",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "compile_only",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 191,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 calls with keyword arguments crash"
+        }
+      ]
+    },
+    {
+      "id": "stdlib/textwrap",
+      "category": "stdlib",
+      "module": "textwrap",
+      "summary": "The standard library's textwrap module, as shipped with the running Python",
+      "source_python": {
+        "min": "3.9"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "compile_only",
+      "support": "partial",
+      "limitations": [
+        {
+          "issue": 157,
+          "versions": [
+            "3.13",
+            "3.14"
+          ],
+          "summary": "keyword-only defaults, f-string conversions and format specs dropped (3.13/3.14)"
+        }
+      ]
+    }
+  ]
+}

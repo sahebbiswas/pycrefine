@@ -46,7 +46,7 @@ class TestCompare(unittest.TestCase):
 
 class TestBaselineDiff(unittest.TestCase):
 
-    BASE = {"fixtures": {"a": "equivalent", "b": "mismatch", "c": "syntax_error"}}
+    BASE = {"entries": {"a": "equivalent", "b": "mismatch", "c": "syntax_error"}}
 
     def kinds(self, results):
         return {c["name"]: c["kind"] for c in cd.diff_baseline(results, self.BASE)}
@@ -77,12 +77,17 @@ class TestBaselineDiff(unittest.TestCase):
     def test_improvements_do_not_fail(self):
         self.assertNotIn("improved", cd.FAILING_CHANGES)
 
-    def test_baseline_keeps_issues_only_for_fixtures_that_still_fail(self):
-        previous = {"issues": {"b": [7], "a": [9]}}
-        results = [result("a", "equivalent"), result("b", "mismatch"), result("z", "mismatch")]
-        baseline = cd.to_baseline(results, previous)
-        self.assertEqual(baseline["issues"], {"b": [7]})
-        self.assertEqual(list(baseline["fixtures"]), ["a", "b", "z"])
+    def test_baseline_lists_every_entry_sorted(self):
+        results = [result("z", "mismatch"), result("a", "equivalent")]
+        baseline = cd.to_baseline(results)
+        self.assertEqual(list(baseline["entries"]), ["a", "z"])
+        self.assertEqual(baseline["python_version"], cd.python_tag())
+
+    def test_compile_only_entries_use_the_compiles_rung(self):
+        self.assertLess(cd.level_of("syntax_error"), cd.level_of("compiles"))
+        self.assertLess(cd.level_of("compiles"), cd.level_of("mismatch"))
+        self.assertEqual(self.kinds([result("a", "equivalent"), result("b", "mismatch"),
+                                     result("c", "compiles")]), {"c": "improved"})
 
 
 @unittest.skipUnless(os.name == "posix" or sys.platform == "win32", "needs a subprocess")
@@ -90,14 +95,14 @@ class TestSourceErrorsAreNotScored(unittest.TestCase):
 
     def test_baseline_leaves_out_fixtures_that_did_not_run(self):
         baseline = cd.to_baseline([result("a", "equivalent"), result("b", cd.SOURCE_ERROR)])
-        self.assertEqual(baseline["fixtures"], {"a": "equivalent"})
+        self.assertEqual(baseline["entries"], {"a": "equivalent"})
 
     def test_a_fixture_that_never_ran_is_not_new(self):
-        base = {"fixtures": {"a": "equivalent"}}
+        base = {"entries": {"a": "equivalent"}}
         self.assertEqual(cd.diff_baseline([result("a", "equivalent"), result("b", cd.SOURCE_ERROR)], base), [])
 
     def test_a_scored_fixture_that_stops_running_is_still_lost(self):
-        base = {"fixtures": {"a": "equivalent"}}
+        base = {"entries": {"a": "equivalent"}}
         (change,) = cd.diff_baseline([result("a", cd.SOURCE_ERROR)], base)
         self.assertEqual(change["kind"], "lost")
 
@@ -115,7 +120,7 @@ class TestCommandLine(unittest.TestCase):
     def test_unknown_fixture_is_a_configuration_error(self):
         code, _, err = self.run_main("no_such_fixture", "--no-baseline")
         self.assertEqual(code, 2)
-        self.assertIn("no such fixture", err)
+        self.assertIn("no entry", err)
 
     def test_relative_fixture_directory_works(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -123,7 +128,7 @@ class TestCommandLine(unittest.TestCase):
             old = os.getcwd()
             os.chdir(tmp)
             try:
-                code, out, _ = self.run_main("--fixtures", ".", "--no-baseline")
+                code, out, _ = self.run_main("--corpus", ".", "--no-baseline")
             finally:
                 os.chdir(old)
         self.assertEqual(code, 0, out)
@@ -160,11 +165,12 @@ class TestWorkerEnvironment(unittest.TestCase):
 class TestEndToEnd(unittest.TestCase):
     """Runs the real harness on throwaway fixtures, with the interpreter running the tests."""
 
-    def check(self, source, name="case"):
+    def check(self, source, name="case", **options):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / f"{name}.py"
             path.write_text(textwrap.dedent(source), encoding="utf-8")
-            return cd.run_fixtures(sys.executable, [path])[0]
+            entry = cd.Entry(id=name, category="feature", path=path, **options)
+            return cd.run_entries(sys.executable, [entry])[0]
 
     def test_simple_program_is_equivalent(self):
         r = self.check("""
@@ -215,43 +221,28 @@ class TestEndToEnd(unittest.TestCase):
             self.assertTrue(observed.result.startswith("([],"), observed.result)
 
 
-class TestFixturesAndBaselines(unittest.TestCase):
+@unittest.skipUnless(os.name == "posix" or sys.platform == "win32", "needs a subprocess")
+class TestOptions(unittest.TestCase):
 
-    def fixtures(self):
-        return {p.stem for p in cd.DEFAULT_FIXTURES.glob("*.py")}
+    def check(self, source, **options):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "case.py"
+            path.write_text(textwrap.dedent(source), encoding="utf-8")
+            entry = cd.Entry(id="case", category="feature", path=path, **options)
+            return cd.run_entries(sys.executable, [entry])[0]
 
-    def test_there_are_enough_fixtures(self):
-        self.assertGreaterEqual(len(self.fixtures()), 20)
+    def test_a_compile_only_entry_is_never_run(self):
+        r = self.check("raise SystemExit('would stop a run')\n", equivalence="compile_only")
+        self.assertEqual(r.status, "compiles")
 
-    def test_every_baseline_covers_exactly_the_fixtures(self):
-        baselines = sorted(cd.BASELINE_DIR.glob("py*.json"))
-        self.assertTrue(baselines)
-        for path in baselines:
-            with self.subTest(baseline=path.name):
-                data = json.loads(path.read_text(encoding="utf-8"))
-                self.assertEqual(data["schema_version"], cd.SCHEMA_VERSION)
-                self.assertEqual(f"py{data['python_version']}.json", path.name)
-                self.assertEqual(set(data["fixtures"]), self.fixtures())
-                for status in data["fixtures"].values():
-                    self.assertIn(status, cd.LEVELS)
-
-    def test_every_failing_fixture_names_an_issue(self):
-        """A gap the harness finds is tracked in an issue, and the baseline says which."""
-        for path in sorted(cd.BASELINE_DIR.glob("py*.json")):
-            data = json.loads(path.read_text(encoding="utf-8"))
-            issues = data.get("issues", {})
-            failing = {n for n, s in data["fixtures"].items() if s != "equivalent"}
-            with self.subTest(baseline=path.name):
-                self.assertEqual(set(issues), failing)
-                for numbers in issues.values():
-                    self.assertTrue(numbers)
-                    self.assertTrue(all(isinstance(n, int) and n > 0 for n in numbers))
-
-    def test_the_baseline_for_this_python_matches_a_real_run_of_a_fixture(self):
-        baseline = json.loads(cd.default_baseline_path().read_text(encoding="utf-8"))
-        name = "expr_arithmetic"
-        (r,) = cd.run_fixtures(sys.executable, [cd.DEFAULT_FIXTURES / f"{name}.py"])
-        self.assertEqual(r.status, baseline["fixtures"][name], r.as_dict())
+    def test_optimized_compilation_drops_asserts_from_the_original_run_too(self):
+        r = self.check("""
+            def f(n):
+                assert n > 0, "positive"
+                return n
+            print(f(-1))
+        """, optimize=2)
+        self.assertEqual(r.status, "equivalent", r.as_dict())
 
 
 if __name__ == "__main__":

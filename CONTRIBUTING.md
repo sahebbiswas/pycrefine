@@ -81,15 +81,17 @@ python quality/check_correctness.py --update-baseline
 
 [docs/correctness.md](docs/correctness.md) explains the model and the report.
 
-**Differential behavior check.** `quality/check_differential.py` runs the programs in
-`quality/differential/fixtures/` and their decompiled versions and compares what they do
-(exception, stdout, stderr and `RESULT`). It fails when a fixture behaves worse than its
-baseline in `quality/differential/baselines/`. When a change makes fixtures behave
-correctly, record it on each CI Python version with
-`python quality/check_differential.py --update-baseline`, and remove the fixture's entry
-from `issues` if the issue is fixed. A new fixture that exposes a gap needs an issue
-(see [Reporting gaps](#reporting-gaps)) before it goes into the baseline. See
-[docs/correctness.md](docs/correctness.md#differential-behavior-check).
+**Differential behavior check.** `quality/check_differential.py` runs the versioned corpus
+in `quality/corpus/` (feature programs, generated control flow, real-world modules and
+standard-library modules) and their decompiled versions and compares what they do
+(exception, stdout, stderr and `RESULT`). It fails when an entry behaves worse than its
+baseline in `quality/corpus/baselines/`. When a change makes entries behave correctly,
+record it on each CI Python version with
+`python quality/check_differential.py --update-baseline`, and remove the entry's
+`limitations` item in `manifest.json` if the issue is fixed. A new entry that exposes a
+gap needs an issue (see [Reporting gaps](#reporting-gaps)) and a `limitation` before it
+goes into the baseline. `python quality/corpus/generate_control_flow.py` rewrites the
+generated cases. See [docs/correctness.md](docs/correctness.md#differential-behavior-check).
 
 **Lint and types.** The lint ratchet allows the findings recorded in
 `quality/lint_baseline.json` and fails on any new one; when you remove findings, lower
