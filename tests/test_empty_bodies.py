@@ -86,6 +86,16 @@ class TestEmptyBodies(unittest.TestCase):
                 self.assertEqual(out.count("print('x')"), 1, out)
                 compile(out, "<decompiled>", "exec")
 
+    def test_try_finally_whose_body_returns_keeps_one_finally_body(self):
+        """Test `try: return` with `finally:` is not mistaken for an empty try (#186)."""
+        for value in ("'body'", "g()"):
+            with self.subTest(value=value):
+                out = self.assert_same_behavior(
+                    f"def g():\n    print('body')\n    return 1\n"
+                    f"def cleanup():\n    try:\n        return {value}\n    finally:\n        print('finally runs')\n"
+                    "print(cleanup())\n")
+                self.assertEqual(out.count("print('finally runs')"), 1, out)
+
     @unittest.skipIf(sys.version_info < (3, 11), "3.9 and 3.10 have no exception table to find the handler")
     def test_empty_try_without_line_numbers_keeps_the_names_it_binds(self):
         """Without a line table the `try: pass` cannot be placed, but its handler still makes `x` local."""
