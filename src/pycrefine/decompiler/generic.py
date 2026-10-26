@@ -4,7 +4,7 @@ import dis
 import re
 import sys
 import types
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from .._constants import (
     _AUG_ASSIGN_MAP,
     _FILLER_OPS,
@@ -48,6 +48,9 @@ from ..postprocess import _string_continuation_rows, collapse_chained_comparison
 # 3.14 .pyc can be read on another interpreter. Only used when ``dis`` cannot resolve the
 # constant itself; tests/test_basic.py (TestInlinedBuiltinCalls) checks it against the
 # running 3.14's table, so a reordering in CPython fails the suite instead of passing silently.
+# Opcodes that bind or unbind a name: a handler containing one changes which names are local.
+_NAME_BINDING_OPS = ("STORE_FAST", "STORE_NAME", "STORE_GLOBAL", "STORE_DEREF",
+                     "DELETE_FAST", "DELETE_NAME", "DELETE_GLOBAL", "DELETE_DEREF")
 _COMMON_CONSTANT_NAMES = ("AssertionError", "NotImplementedError", "tuple", "all", "any")
 
 def _owned_handlers(handler: int, entries: list) -> set:
@@ -150,11 +153,14 @@ class DecompilerGeneric(DecompilerBase):
         self._handler_return_close: set = set()        # offsets of returns that end an except clause
         self._explicit_returns: set = set()            # `return None` offsets known to be in the source
         self._header_indent_by_cleanup: dict = {}      # handler clean-up target -> except header indent
+        self._empty_try_handlers: dict = {}            # try NOP offset -> handler of a `try: pass`
+        self._empty_try_skip: set = set()              # NOPs of such a try statement
         # The following sets are populated by _prescan_try_structure() which runs in decompile()
         self._try_nop_offsets: set = set()
         self._suppress_push_exc_offsets: set = set()
         self._finally_merge_offsets: set = set()
         self._exc_handler_jump_offsets: set = set()
+        self._exc_handler_continue_offsets: set = set()
         self._with_exit_suppress_offsets: set = set()
         self._with_body_end: dict = {}  # first protected offset of a with body -> where it ends
         self._open_with_sentinels: list = []  # 3.14: (body end, body start) of open with bodies
@@ -325,6 +331,175 @@ class DecompilerGeneric(DecompilerBase):
         for line in self._scope_declarations():
             self._append_reconstructed(line)
 
+    def _reachable_instructions(self, entries: list) -> List[bool]:
+        """Which instructions control can reach, by fall-through, jumps and handlers."""
+        instrs = self.instructions
+        index_of = {x.offset: n for n, x in enumerate(instrs)}
+        terminal = ("RETURN_VALUE", "RETURN_CONST", "RAISE_VARARGS", "RERAISE", "JUMP_FORWARD",
+                    "JUMP_BACKWARD", "JUMP_BACKWARD_NO_INTERRUPT", "JUMP", "JUMP_NO_INTERRUPT")
+        reached = [False] * len(instrs)
+        todo = [0]
+        handled: set = set()
+        while todo:
+            n = todo.pop()
+            while n is not None and n < len(instrs) and not reached[n]:
+                reached[n] = True
+                ins = instrs[n]
+                if "JUMP" in ins.opname or ins.opname in ("FOR_ITER", "SEND"):
+                    todo.append(index_of.get(self._get_jump_target(ins), len(instrs)))
+                for e in entries:
+                    if e.start <= ins.offset < e.end and e.target not in handled:
+                        handled.add(e.target)
+                        todo.append(index_of.get(e.target, len(instrs)))
+                n = None if ins.opname in terminal else n + 1
+        return reached
+
+    def _drop_unreachable_handlers(self) -> None:
+        """
+        Take out exception handlers that nothing can reach (3.11+, #167).
+
+        ``try: pass`` protects no instruction, so no exception-table entry leads to its
+        handlers, but the compiler still emits them; rendered in place they were an
+        orphan ``except`` after the function's code. Such a handler, from its
+        PUSH_EXC_INFO through the unreachable code after it, is removed from the
+        instruction stream and rendered as ``try: pass`` with its clauses where the
+        try statement's NOP is (``_empty_try_handlers``). When there are no line numbers
+        to find that NOP, a handler that assigns or deletes names is rendered where it
+        sat, after the code that can run: it never executes, but those names stay local
+        to the function, as they were in the original. One that binds nothing is left
+        out, which is equivalent: the try body cannot raise.
+        """
+        entries = self._exception_entries()
+        instrs = self.instructions
+        if not entries or not any(x.opname == "PUSH_EXC_INFO" for x in instrs):
+            return
+        reached = self._reachable_instructions(entries)
+        regions: List[List[int]] = []
+        n = 0
+        while n < len(instrs):
+            if not reached[n] and instrs[n].opname == "PUSH_EXC_INFO":
+                regions.append([])
+                while n < len(instrs) and not reached[n]:
+                    regions[-1].append(n)
+                    n += 1
+            else:
+                n += 1
+        if not regions:
+            return
+        drop: Set[int] = set()
+        for region in regions:
+            if not self._starts_except_handler(region[0]):
+                # The copy of a `finally` body for the exception path, not an `except`
+                # clause. The body also sits in the stream once for the normal path, and
+                # `try: pass` cannot raise, so the copy is simply not source code.
+                drop.update(region)
+                continue
+            nops = self._empty_try_nops(region[0])
+            copy = self._empty_try_finally_copy(nops) if nops is not None else None
+            if nops is not None and copy is not None:
+                # `try: pass` with `finally` is the finally body run once, and its
+                # `except` clauses can never run; the body is already in the stream.
+                self._empty_try_skip.update(instrs[k].offset for k in nops)
+                drop.update(region)
+                drop.update(copy)
+                continue
+            if nops is not None:
+                anchor = instrs[nops[0]].offset
+                self._empty_try_skip.update(instrs[k].offset for k in nops)
+                drop.update(region)
+            elif any(instrs[k].opname.startswith(_NAME_BINDING_OPS) for k in region):
+                # The region's first instruction stays in the stream as the anchor.
+                anchor = instrs[region[0]].offset
+                self._empty_try_skip.add(anchor)
+                drop.update(region[1:])
+            else:
+                drop.update(region)
+                continue
+            self._empty_try_handlers[anchor] = [instrs[k] for k in region]
+        self.instructions = [x for k, x in enumerate(instrs) if k not in drop]
+
+    _EXCEPT_TYPE_OPS = ("LOAD_GLOBAL", "LOAD_NAME", "LOAD_FAST", "LOAD_DEREF", "LOAD_ATTR", "LOAD_CONST",
+                        "BUILD_TUPLE", "PUSH_NULL", "NOP", "CACHE", "COPY", "LOAD_FAST_CHECK",
+                        "LOAD_FAST_BORROW", "LOAD_FAST_AND_CLEAR", "LOAD_LOCALS", "LOAD_CLASSDEREF")
+
+    def _starts_except_handler(self, handler_idx: int) -> bool:
+        """
+        Whether the PUSH_EXC_INFO at *handler_idx* starts an `except` clause rather than
+        the copy of a `finally` body: a bare `except:` pops the exception at once, and a
+        typed one loads its types and matches them, before anything else runs.
+        """
+        instrs = self.instructions
+        k = handler_idx + 1
+        if k < len(instrs) and instrs[k].opname == "POP_TOP":
+            return True
+        while k < len(instrs) and instrs[k].opname in self._EXCEPT_TYPE_OPS:
+            k += 1
+        return k < len(instrs) and instrs[k].opname in ("CHECK_EXC_MATCH", "JUMP_IF_NOT_EXC_MATCH")
+
+    def _empty_try_finally_copy(self, nops: Tuple[int, ...]) -> Optional[range]:
+        """
+        Indexes of the exception-path copy of the `finally` body that the exception table
+        sends the empty try's NOPs to, with its cleanup; None if the try has no `finally`.
+        """
+        instrs = self.instructions
+        by_offset = {x.offset: k for k, x in enumerate(instrs)}
+        # 3.11 has no NOP for the `pass` body; the jump after the try's NOPs is the body.
+        offsets = [instrs[k].offset for k in nops] + [instrs[k].offset for k in (nops[-1] + 1,) if k < len(instrs)]
+        entries = self._exception_entries() or ()
+        for entry in entries:
+            if entry.depth != 0 or not any(entry.start <= off < entry.end for off in offsets):
+                continue
+            k = by_offset.get(entry.target)
+            if k is None or instrs[k].opname != "PUSH_EXC_INFO" or self._starts_except_handler(k):
+                continue
+            cleanup = next((by_offset.get(e.target) for e in entries if e.start == entry.target), None)
+            end = cleanup if cleanup is not None else k
+            while end < len(instrs) and instrs[end].opname != "RERAISE":
+                end += 1
+            if cleanup is not None:
+                while end < len(instrs) and not (instrs[end].opname == "RERAISE" and instrs[end].arg == 1):
+                    end += 1
+            return range(k, min(end + 1, len(instrs)))
+        return None
+
+    def _empty_try_nops(self, handler_idx: int) -> Optional[Tuple[int, ...]]:
+        """
+        Indexes of the NOPs of the `try` whose unreachable handler starts at
+        *handler_idx*: the try's own line and, right after it, its `pass` body, the last
+        NOP above the line of the first `except` clause.
+        """
+        instrs = self.instructions
+        except_line = next((self._line_at(k) for k in range(handler_idx + 1, len(instrs))
+                            if instrs[k].starts_line is not None), None)
+        if except_line is None:
+            return None
+        nops = [k for k in range(handler_idx) if instrs[k].opname == "NOP"
+                and instrs[k].starts_line is not None and instrs[k].starts_line < except_line]
+        if not nops:
+            return None
+        body = nops[-1]
+        return (body - 1, body) if body > 0 and instrs[body - 1].opname == "NOP" else (body,)
+
+    def _emit_empty_try(self, offset: int) -> None:
+        """Emit ``try: pass`` and the clauses of its unreachable handler."""
+        region = self._empty_try_handlers.pop(offset)
+        # The region left the instruction stream before the prescans ran: mark the
+        # handlers' jumps back to a loop head (`except E: continue`) here.
+        loop_heads = {x.offset for x in self.instructions if x.opname == "FOR_ITER"}
+        loop_heads |= {self._get_jump_target(x) for x in self.instructions if self._is_backward_instruction(x)}
+        for k, ins in enumerate(region):
+            if (k and region[k - 1].opname == "POP_EXCEPT" and ins.opname.startswith("JUMP")
+                    and self._get_jump_target(ins) in loop_heads):
+                self._exc_handler_jump_offsets.add(ins.offset)
+                self._exc_handler_continue_offsets.add(ins.offset)
+        self._append_reconstructed("try:")
+        self.indent_level += 1
+        self._append_reconstructed("pass")
+        self.indent_level -= 1
+        for line in self._render_handler_section(region, 0):
+            if line.strip():
+                self._append_reconstructed(line)
+
     def _fold_inlined_builtin_calls(self) -> None:
         """
         Undo CPython 3.14's inlining of ``all``/``any``/``tuple`` over a generator.
@@ -377,6 +552,7 @@ class DecompilerGeneric(DecompilerBase):
         self.instructions = self._split_superinstructions(self.instructions)
         self._collapse_inlined_comprehensions()
         self._fold_inlined_builtin_calls()
+        self._drop_unreachable_handlers()
         self.pc = 0
         self.blocks = []
         self._while_header_targets = {}
@@ -412,19 +588,7 @@ class DecompilerGeneric(DecompilerBase):
         while self.pc < len(self.instructions):
             instr = self.instructions[self.pc]
             self.pc += 1
-
-            # Close any blocks whose end offset we have passed
-            self._close_blocks(instr.offset)
-            snapshot = self._else_stack_snapshots.pop(instr.offset, None)
-            if snapshot is not None:
-                self.stack = list(snapshot)
-            if self._boolop_step(instr):
-                continue
-            self._handle_instruction(instr)
-            if instr.offset in self._handler_return_close:
-                # The `return` that ends an except clause has been emitted inside it.
-                self._handler_return_close.discard(instr.offset)
-                self._close_except_clause()
+            self._decompile_step(instr)
 
         # Final block closure for anything spanning to the very end
         self._close_blocks(0x7fffffff)
@@ -453,8 +617,32 @@ class DecompilerGeneric(DecompilerBase):
                         indent = len(line) - len(line.lstrip())
                         self.reconstructed[last_idx] = line[:indent] + "pass"
 
+        if self.indent_level > 0 and not any(str(line).strip() for line in self.reconstructed):
+            # A body that compiles to nothing but the implicit return: `pass` or `...`
+            # (#167). A lambda always returns a value, so it gets an explicit one.
+            self._append_reconstructed("return None" if self.code_obj.co_name == "<lambda>" else "pass")
+
         raw_source = "\n".join(str(s) for s in self.reconstructed).rstrip()
         return post_process_source(raw_source, beautification_level=self.beautification_level)
+
+    def _decompile_step(self, instr: BytecodeInstruction) -> None:
+        """Decompile one instruction of the main pass (``self.pc`` is already past it)."""
+        # Close any blocks whose end offset we have passed
+        self._close_blocks(instr.offset)
+        snapshot = self._else_stack_snapshots.pop(instr.offset, None)
+        if snapshot is not None:
+            self.stack = list(snapshot)
+        if self._boolop_step(instr):
+            return
+        if instr.offset in self._empty_try_skip:
+            if instr.offset in self._empty_try_handlers:
+                self._emit_empty_try(instr.offset)
+            return
+        self._handle_instruction(instr)
+        if instr.offset in self._handler_return_close:
+            # The `return` that ends an except clause has been emitted inside it.
+            self._handler_return_close.discard(instr.offset)
+            self._close_except_clause()
 
     def _close_blocks(self, offset: int):
         """
@@ -4885,11 +5073,12 @@ class DecompilerGeneric(DecompilerBase):
             bases = [self._normalize_val(b) for b in raw_args[2:]]
             bases_str = f"({', '.join(bases)})" if bases else ""
             lines = body_text.split("\n")
-            if len(lines) > 1:
-                real_body = "\n".join(lines[1:])
+            real_body = "\n".join(lines[1:])
+            if real_body.strip():
                 self.stack.append(("class", f"class {cls_name}{bases_str}:\n{real_body}"))
             else:
-                self.stack.append(("class", f"class {cls_name}{bases_str}: pass"))
+                # Only the preamble (__module__, __qualname__, ...): an empty body (#167).
+                self.stack.append(("class", f"class {cls_name}{bases_str}:\n    pass"))
             return
 
         if func == "super" and not final_args:
