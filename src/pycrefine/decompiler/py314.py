@@ -1,6 +1,7 @@
 """Decompiler backend for CPython 3.13/3.14 bytecode."""
 import dis
 from .._constants import _VALUE_OPS
+from ..expr import _UnpackAccessor
 from .py311 import Decompiler311Plus
 from ..instructions import BytecodeInstruction
 
@@ -205,6 +206,14 @@ class Decompiler314(Decompiler311Plus):
 
         elif opname == "STORE_FAST_STORE_FAST":
             # Python 3.14 combined store for tuple unpacking (after UNPACK_SEQUENCE)
+            if (isinstance(instr.argval, (tuple, list)) and len(instr.argval) >= 2
+                    and len(self.stack) >= len(instr.argval)
+                    and all(isinstance(v, _UnpackAccessor) for v in self.stack[-len(instr.argval):])):
+                # A fallback unpacking left one value per target. The fused store takes
+                # the first name from the top of the stack and the next from below it.
+                for name in instr.argval:
+                    self._append_reconstructed(f"{name} = {self.stack.pop()}")
+                return
             if isinstance(instr.argval, (tuple, list)) and len(instr.argval) >= 2:
                 names = ", ".join(str(x) for x in instr.argval)
                 expr = str(self.stack.pop()) if self.stack else "?"

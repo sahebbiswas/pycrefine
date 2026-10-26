@@ -3,8 +3,11 @@ import ast
 import dis
 import sys
 import types
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Set, Tuple
 from ..instructions import BytecodeInstruction
+
+# Stem of the name used for a for-loop item that a later unpacking stores.
+_LOOP_PLACEHOLDER = "_item"
 
 
 class DecompilerBase:
@@ -23,6 +26,11 @@ class DecompilerBase:
         self.beautification_level = beautification_level
         self.target_version = target_version or sys.version_info[:2]
         self._accum_counter = 0
+        # Names _fresh_accum_name has already handed out for this code object.
+        self._issued_temp_names: Set[str] = set()
+        # Loop-item placeholders _loop_placeholder chose because "_item" was already in use.
+        self._loop_placeholder_names: Set[str] = set()
+        self._code_names_cache: Optional[Set[str]] = None
 
     def _disassemble(self):
         """Convert code object bytecode into a list of BytecodeInstruction."""
@@ -51,31 +59,68 @@ class DecompilerBase:
         """
         raise NotImplementedError("Subclasses must implement decompile()")
 
-    def _fresh_accum_name(self) -> str:
+    def _code_object_names(self) -> Set[str]:
         """
-        Generate a fresh accumulator variable name that doesn't collide with existing names.
+        Every identifier this code object, or any function, class or comprehension
+        nested in it, can bind or read: locals, globals and attributes, cell and free
+        variables. A generated temporary must avoid all of them, because a nested
+        scope may read the name as a global of ours.
+        """
+        if self._code_names_cache is None:
+            names: Set[str] = set()
+            pending = [self.code_obj]
+            while pending:
+                code = pending.pop()
+                for attr in ('co_varnames', 'co_names', 'co_cellvars', 'co_freevars'):
+                    names.update(getattr(code, attr, ()))
+                pending.extend(c for c in getattr(code, 'co_consts', ())
+                               if isinstance(c, types.CodeType))
+            self._code_names_cache = names
+        return self._code_names_cache
+
+    def _fresh_accum_name(self, base_name: str = "_res") -> str:
+        """
+        Generate a temporary variable name that is unique within this code object.
+
+        A name is never returned twice, so two temporaries that are live at the same time
+        (for example the outer and inner sequence of a nested unpacking) cannot overwrite
+        each other. Names the code object already uses (see _code_object_names) are
+        skipped too.
+
+        Args:
+            base_name: Stem of the name; later calls add a numeric suffix to it.
 
         Returns:
-            str: A unique accumulator name like "_res", "_res1", "_res2", etc.
+            str: A name like "_res", "_res0", "_res1", etc. (or the same with another stem).
         """
-        base_name = "_res"
-        # Collect all existing names from the code object
-        existing_names = set()
-        if hasattr(self.code_obj, 'co_varnames'):
-            existing_names.update(self.code_obj.co_varnames)
-        if hasattr(self.code_obj, 'co_names'):
-            existing_names.update(self.code_obj.co_names)
-
-        # Try base name first
-        if base_name not in existing_names:
-            return base_name
-
-        # Otherwise use counter to generate unique name
-        while True:
+        taken = self._code_object_names() | self._issued_temp_names
+        candidate = base_name
+        while candidate in taken:
             candidate = f"{base_name}{self._accum_counter}"
             self._accum_counter += 1
-            if candidate not in existing_names:
-                return candidate
+        self._issued_temp_names.add(candidate)
+        return candidate
+
+    def _loop_placeholder(self) -> str:
+        """
+        Name standing for a for-loop's item when the loop target is stored by the
+        instructions that follow (an unpacking into attributes or subscripts).
+
+        This is "_item" unless the code uses that name itself, in which case the loop
+        would overwrite the program's own variable, so a unique name is chosen instead.
+        """
+        if _LOOP_PLACEHOLDER not in self._code_object_names():
+            return _LOOP_PLACEHOLDER
+        name = self._fresh_accum_name(_LOOP_PLACEHOLDER)
+        self._loop_placeholder_names.add(name)
+        return name
+
+    def _is_loop_placeholder(self, name: Any) -> bool:
+        """True if ``name`` is a loop-item placeholder chosen by _loop_placeholder."""
+        text = str(name)
+        if text == _LOOP_PLACEHOLDER:
+            return _LOOP_PLACEHOLDER not in self._code_object_names()
+        return text in self._loop_placeholder_names
 
     def _get_jump_target(self, instr: BytecodeInstruction) -> int:
         """

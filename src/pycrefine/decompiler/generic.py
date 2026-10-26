@@ -33,7 +33,7 @@ from .._constants import (
 )
 from ..codeobj import _is_code
 from .base import DecompilerBase
-from ..expr import StackNULL, _BoolExpr, _CollectionAccumSentinel, _unary_operand
+from ..expr import StackNULL, _BoolExpr, _CollectionAccumSentinel, _UnpackAccessor, _unary_operand
 from ..instructions import (BytecodeInstruction, _const_repr, _copy_signature, _is_anonymous_func_body,
                             _match_finally_copy, _render_func_tuple)
 from ..postprocess import collapse_chained_comparisons, post_process_source
@@ -64,6 +64,22 @@ def _owned_handlers(handler: int, entries: list) -> set:
         owned |= inner
         grew = bool(inner)
     return owned
+
+
+def _unpack_shape(ins: Optional[BytecodeInstruction]) -> Optional[Tuple[int, Optional[int]]]:
+    """
+    ``(number of targets, index of the starred one or None)`` for an unpacking
+    instruction: ``UNPACK_SEQUENCE n``, or ``UNPACK_EX`` with the count before the star
+    in the low byte of its operand and the count after it in the high byte (#156).
+    """
+    if ins is None or not isinstance(ins.arg, int):
+        return None
+    if ins.opname == "UNPACK_SEQUENCE":
+        return ins.arg, None
+    if ins.opname == "UNPACK_EX":
+        before, after = ins.arg & 0xFF, ins.arg >> 8
+        return before + 1 + after, before
+    return None
 
 
 # Instructions that make up a value-context `and`/`or` inside an expression.
@@ -1424,32 +1440,56 @@ class DecompilerGeneric(DecompilerBase):
 
     def _parse_comp_target(self, body: list, pos: int):
         """Parse a for-target (name or tuple unpacking). Returns (text, pos) or None."""
-        if pos >= len(body):
-            return None
-        ins = body[pos]
-        names = self._store_names(ins)
-        if names is not None and len(names) == 1:
-            return names[0], pos + 1
-        if ins.opname == "UNPACK_SEQUENCE" and isinstance(ins.arg, int):
-            parts: List[str] = []
+        pending: List[str] = []
+        parsed = self._parse_store_target(body, pos, pending)
+        return None if parsed is None or pending else (parsed[0], parsed[2])
+
+    def _parse_store_target(self, body: list, pos: int, pending: Optional[List[str]] = None):
+        """
+        Parse the assignment target that starts at ``body[pos]``.
+
+        ``pos`` must point at the unpacking instruction (``UNPACK_SEQUENCE``/``UNPACK_EX``)
+        or at the first STORE_* of a simple name target. The returned ``next_pos`` is the
+        index of the first instruction *after* the entire target.
+
+        A target is a name (``STORE_FAST``/``STORE_NAME``/``STORE_GLOBAL``/
+        ``STORE_DEREF``), or an unpacking: ``UNPACK_SEQUENCE n`` followed by *n* targets,
+        or ``UNPACK_EX`` for a starred one (#156), whose operand holds the number of
+        targets before the star in its low byte and after it in the high byte, with the
+        starred target in between. 3.13+'s ``STORE_FAST_STORE_FAST`` stores two names,
+        which may belong to two consecutive targets; *pending* carries the second.
+
+        Returns:
+            ``(text, is_tuple, next_pos)``, or None when the code there is not a plain
+            target (an attribute or subscript store, for example).
+        """
+        if pending is None:
+            pending = []
+        if pending:
+            return pending.pop(0), False, pos
+        while pos < len(body) and body[pos].opname in _GENERIC_SKIP_OPS:
             pos += 1
-            while len(parts) < ins.arg:
-                if pos >= len(body):
-                    return None
-                multi = self._store_names(body[pos])
-                if multi is not None and len(multi) > 1:
-                    parts.extend(multi)
-                    pos += 1
-                    continue
-                sub = self._parse_comp_target(body, pos)
-                if sub is None:
-                    return None
-                text, pos = sub
-                parts.append(f"({text})" if "," in text else text)
-            if len(parts) != ins.arg:
+        ins = body[pos] if pos < len(body) else None
+        names = self._store_names(ins) if ins is not None else None
+        if names:
+            pending.extend(names[1:])
+            return names[0], False, pos + 1
+        shape = _unpack_shape(ins)
+        if shape is None:
+            return None
+        count, star = shape
+        parts: List[str] = []
+        pos += 1
+        for i in range(count):
+            sub = self._parse_store_target(body, pos, pending)
+            if sub is None:
                 return None
-            return ", ".join(parts), pos
-        return None
+            text, nested, pos = sub
+            if nested:
+                text = f"({text})"
+            parts.append("*" + text if i == star else text)
+        text = ", ".join(parts) + ("," if count == 1 else "")
+        return text, True, pos
 
     def _eval_comp_slice(self, instrs: list, count: int = 1, consumer=None) -> Optional[List[str]]:
         """
@@ -3453,6 +3493,7 @@ class DecompilerGeneric(DecompilerBase):
             "BUILD_SLICE": self._op_build_slice,
             "BUILD_CONST_KEY_MAP": self._op_build_const_key_map,
             "GET_ITER": self._op_no_op, "UNPACK_SEQUENCE": self._op_unpack_sequence,
+            "UNPACK_EX": self._op_unpack_sequence,
             "LIST_APPEND": self._op_list_append,
             "LIST_EXTEND": self._op_list_extend, "DICT_MERGE": self._op_dict_merge,
             "DICT_UPDATE": self._op_dict_merge,
@@ -3696,45 +3737,30 @@ class DecompilerGeneric(DecompilerBase):
             self.stack.append(instr.argval)
 
     def _op_unpack_sequence(self, instr: BytecodeInstruction):
-        # UNPACK_SEQUENCE N followed by N targets (STORE_* or UNPACK_SEQUENCE)
-        # instructions emits a tuple-unpacking assignment: (a, b), c = expr.
-        n = int(instr.arg) if instr.arg is not None else 0
+        # UNPACK_SEQUENCE N / UNPACK_EX followed by its targets (STORE_* or nested
+        # unpackings) is a tuple-unpacking assignment: (a, b), *c = expr.
+        shape = _unpack_shape(instr)
+        n = shape[0] if shape is not None else 0
         if n < 1:
             return
-
-        def _peek_targets(start_pc, count):
-            targets = []
-            cur = start_pc
-            while cur < len(self.instructions) and len(targets) < count:
-                op = self.instructions[cur].opname
-                if op in ("STORE_FAST", "STORE_NAME", "STORE_GLOBAL", "STORE_DEREF"):
-                    targets.append(str(self.instructions[cur].argval))
-                    cur += 1
-                elif op == "UNPACK_SEQUENCE":
-                    nested_n = int(self.instructions[cur].arg)
-                    nested_targets, new_cur = _peek_targets(cur + 1, nested_n)
-                    if nested_targets is not None:
-                        # Wrap nested LHS in parens
-                        targets.append(f"({', '.join(nested_targets)})")
-                        cur = new_cur
-                    else:
-                        return None, cur
-                elif op in ("RESUME", "NOP", "CACHE", "NOT_TAKEN"):
-                    cur += 1
-                else:
-                    return None, cur
-            if len(targets) == count:
-                return targets, cur
-            return None, cur
-
-        targets, next_pc = _peek_targets(self.pc, n)
+        unpack_idx = self.pc - 1
+        if (unpack_idx < 0 or unpack_idx >= len(self.instructions)
+                or self.instructions[unpack_idx] is not instr):
+            unpack_idx = next(
+                (i for i, ins in enumerate(self.instructions) if ins is instr), -1
+            )
+        if unpack_idx < 0:
+            return
+        pending: List[str] = []
+        parsed = self._parse_store_target(self.instructions, unpack_idx, pending)
+        targets = None
+        next_pc = self.pc
+        if parsed is not None and not pending:
+            targets, next_pc = [parsed[0]], parsed[2]
 
         if targets is not None and self.stack:
             expr = str(self.stack.pop())
-            lhs = ", ".join(targets)
-            if n == 1:
-                lhs += ","
-            self._append_reconstructed(f"{lhs} = {expr}")
+            self._append_reconstructed(f"{targets[0]} = {expr}")
             self.pc = next_pc
         elif self.stack:
             # Fallback for complex un-matched structures:
@@ -3745,8 +3771,26 @@ class DecompilerGeneric(DecompilerBase):
             # to consume.  Since STOREs are processed sequentially, we push
             # item[n-1], then item[n-2], ..., item[0] so that the stack
             # serves them up in 0..n-1 order.
-            for i in reversed(range(n)):
-                self.stack.append(f"{val_str}[{i}]")
+            if instr.opname == "UNPACK_EX" and isinstance(instr.arg, int):
+                # Unpack once, natively, into fresh temporaries and let the stores
+                # that follow read those.  Python itself then consumes an iterator
+                # a single time, builds the starred list, and raises the same
+                # ValueError on too few values, without the generated code looking
+                # up list, getattr or ValueError in a scope that may rebind them.
+                # Every temporary is unique, so a nested unpacking cannot overwrite
+                # the sequence its enclosing unpacking still has to read.
+                before, after = instr.arg & 0xFF, instr.arg >> 8
+                head = [self._fresh_accum_name("_unpack") for _ in range(before)]
+                star = self._fresh_accum_name("_unpack")
+                tail = [self._fresh_accum_name("_unpack") for _ in range(after)]
+                lhs = ", ".join([*head, f"*{star}", *tail])
+                if not head and not tail:
+                    lhs += ","  # a lone starred target needs its trailing comma
+                self._append_reconstructed(f"{lhs} = {val_str}")
+                accessors = [*head, star, *tail]
+            else:
+                accessors = [f"{val_str}[{i}]" for i in range(n)]
+            self.stack.extend(reversed([_UnpackAccessor(a) for a in accessors]))
 
         # ── subscript / attr ───────────────────────────────────────────
 
@@ -5694,49 +5738,44 @@ class DecompilerGeneric(DecompilerBase):
         opname = instr.opname
         if self.stack:
             iterator = self.stack.pop()
-            var_name = "_item"
+            # None until a target is read; if none can be, the loop gets a placeholder
+            # that the following stores unpack (see _loop_placeholder).
+            var_name: Optional[str] = None
+            peek_pc = self.pc
             # Peek ahead for STORE_* or UNPACK_SEQUENCE to get var name(s).
             # Skip no-op / hint instructions that may appear between FOR_ITER
             # and the STORE in some Python versions (e.g. NOT_TAKEN on 3.14).
 
             if self.pc < len(self.instructions):
-                peek_pc = self.pc
                 while (peek_pc < len(self.instructions)
                        and self.instructions[peek_pc].opname in _GENERIC_SKIP_OPS):
                     peek_pc += 1
                 if peek_pc < len(self.instructions):
                     next_instr = self.instructions[peek_pc]
-                    if next_instr.opname in ("STORE_NAME", "STORE_FAST", 
+                    if next_instr.opname in ("STORE_NAME", "STORE_FAST",
                                              "STORE_FAST_STORE_FAST", "STORE_FAST_LOAD_FAST"):
-                        if "STORE_FAST_STORE_FAST" in next_instr.opname:
+                        if next_instr.opname == "STORE_FAST_STORE_FAST":
                             var_name = ", ".join([str(v) for v in next_instr.argval])
                             self.pc = peek_pc + 1
                         else:
                             var_name = str(next_instr.argval)
-                    elif next_instr.opname == "UNPACK_SEQUENCE":
-                        count = int(next_instr.arg) if next_instr.arg else 2
-                        names = []
-                        look = peek_pc + 1
-                        while look < len(self.instructions) and len(names) < count:
-                            li = self.instructions[look]
-                            if li.opname in ("STORE_NAME", "STORE_FAST", 
-                                             "STORE_FAST_STORE_FAST", "STORE_FAST_LOAD_FAST"):
-                                if "STORE_FAST_STORE_FAST" in li.opname:
-                                    names.extend([str(v) for v in li.argval])
-                                    look += 1
-                                else:
-                                    names.append(str(li.argval))
-                                    look += 1
-                            else:
-                                break
-                        if len(names) >= count:
-                            var_name = ", ".join(names[:count])
-                            self.pc = look  # skip the stores we peeked
+                    elif next_instr.opname in ("UNPACK_SEQUENCE", "UNPACK_EX"):
+                        pending: List[str] = []
+                        parsed = self._parse_store_target(self.instructions, peek_pc, pending)
+                        if parsed is not None and not pending:
+                            var_name = parsed[0]
+                            self.pc = parsed[2]  # skip the targets we parsed
+            if var_name is None:
+                var_name = self._loop_placeholder()
             self._append_reconstructed(f"for {var_name} in {iterator}:")
             self.indent_level += 1
             jump_target = self._get_jump_target(instr)
             self.blocks.append((jump_target, "for"))
-            self.stack.append(var_name)
+            if self.pc <= peek_pc:
+                # The target's STORE is still ahead and consumes the item. When the
+                # targets were already read (tuple unpacking), nothing does, and a left-
+                # over item would surface as a stray statement at 3.13+'s END_FOR; POP_TOP.
+                self.stack.append(var_name)
 
         # ── collection builders ────────────────────────────────────────
 
@@ -5866,14 +5905,15 @@ class DecompilerGeneric(DecompilerBase):
             if not is_comp:
                 if not already_accum:
                     # target is the *user*'s iterable variable, not our accumulator.
-                    # Check whether it was '_item' (the decompiler-generated loop placeholder):
+                    # Check whether it was the decompiler-generated loop placeholder:
                     # if so, initialise with an empty literal; otherwise seed from the iterable.
+                    is_placeholder = self._is_loop_placeholder(target)
                     if kind == "list":
-                        init_val = "[]" if target == "_item" else target
+                        init_val = "[]" if is_placeholder else target
                     elif kind == "set":
-                        init_val = "set()" if target == "_item" else target
+                        init_val = "set()" if is_placeholder else target
                     else:
-                        init_val = "{}" if target == "_item" else target
+                        init_val = "{}" if is_placeholder else target
                     fresh_name = self._fresh_accum_name()
                     sentinel = _CollectionAccumSentinel(fresh_name)
                     self._append_reconstructed(f"{sentinel} = {init_val}")
