@@ -2,6 +2,7 @@
   "schema_version": 1,
   "python_version": "3.9",
   "python_patch": "3.9.25",
+  "diagnostics_recorded": true,
   "entries": {
     "corpus/comprehensive.py": {
       "kind": "source",
@@ -25,6 +26,14 @@
         "def member_decorator": "compiles",
         "def run_test": "compiles",
         "def some_decorator": "compiles"
+      },
+      "unit_diagnostics": {
+        "def member_decorator": {
+          "unsupported_opcode": 1
+        }
+      },
+      "diagnostics": {
+        "unsupported_opcode": 1
       }
     },
     "corpus/indent2.py": {
@@ -132,7 +141,10 @@
     },
     "tests/fixtures/foreign_pyc/comprehensive.cpython-39.pyc": {
       "kind": "pyc",
-      "status": "compiles"
+      "status": "compiles",
+      "diagnostics": {
+        "unsupported_opcode": 1
+      }
     },
     "tests/fixtures/foreign_pyc/simple.cpython-313.pyc": {
       "kind": "pyc",

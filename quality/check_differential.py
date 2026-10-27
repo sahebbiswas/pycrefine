@@ -112,6 +112,9 @@ MAX_CAPTURE = 20000
 
 FIELDS = ('exception', 'stdout', 'stderr', 'result')
 
+# Prefix of the stderr line on which the decompile worker reports its diagnostics.
+DIAGNOSTICS_MARK = 'PYCREFINE-DIAGNOSTICS '
+
 
 def level_of(status: str) -> Optional[int]:
     return LEVELS.index(status) if status in LEVELS else None
@@ -257,7 +260,10 @@ def _worker_decompile(pyc_path: str) -> int:
     sys.path.insert(0, str(_ROOT))
     from pycrefine import get_decompiler
     try:
-        source = get_decompiler(pyc_path).decompile()
+        decompiler = get_decompiler(pyc_path)
+        source = decompiler.decompile()
+        # Out of band, so stdout stays the source: one line, parsed by parse_diagnostics().
+        sys.stderr.write(DIAGNOSTICS_MARK + json.dumps([d.as_dict() for d in decompiler.diagnostics]) + '\n')
     except BaseException as exc:  # noqa: BLE001 - every failure is a result
         sys.stderr.write(f'{type(exc).__name__}: {exc}\n')
         traceback.print_exc(file=sys.stderr)
@@ -356,6 +362,24 @@ class Observation:
         return {name: _clip(getattr(self, name)) for name in FIELDS}
 
 
+def parse_diagnostics(stderr: str) -> List[dict]:
+    """The diagnostics a decompile worker reported on stderr (empty if it reported none)."""
+    for line in stderr.splitlines():
+        if line.startswith(DIAGNOSTICS_MARK):
+            try:
+                return json.loads(line[len(DIAGNOSTICS_MARK):])
+            except ValueError:
+                return []
+    return []
+
+
+def count_kinds(diagnostics: Sequence[dict]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for d in diagnostics:
+        counts[d['kind']] = counts.get(d['kind'], 0) + 1
+    return dict(sorted(counts.items()))
+
+
 def _clip(value: Optional[str]) -> Optional[str]:
     if value is not None and len(value) > MAX_CAPTURE:
         return value[:MAX_CAPTURE] + f'... [{len(value) - MAX_CAPTURE} more characters]'
@@ -371,9 +395,20 @@ class FixtureResult:
     mismatches: List[dict] = field(default_factory=list)
     original_source: str = ''
     decompiled_source: str = ''
+    diagnostics: List[dict] = field(default_factory=list)
+
+    def diagnostic_counts(self) -> Dict[str, int]:
+        return count_kinds(self.diagnostics)
+
+    def is_silent_failure(self) -> bool:
+        """Wrong output that the decompiler did not flag."""
+        return self.status in ('mismatch', 'syntax_error') and not self.diagnostics
 
     def as_dict(self) -> dict:
         data = {'name': self.name, 'status': self.status}
+        if self.diagnostics:
+            data['diagnostics'] = self.diagnostic_counts()
+            data['diagnostic_details'] = self.diagnostics[:50]
         if self.category:
             data['category'] = self.category
         if self.detail:
@@ -444,6 +479,7 @@ def check_entry(python: str, entry: Entry, workdir: str) -> FixtureResult:
         result.detail = lines[0] if lines else f'exit status {process.returncode}, no output'
         return result
     result.decompiled_source = process.stdout
+    result.diagnostics = parse_diagnostics(process.stderr)
 
     rebuilt_path = os.path.join(workdir, entry.name + '.decompiled.py')
     with open(rebuilt_path, 'w', encoding='utf-8') as handle:
@@ -477,12 +513,16 @@ def run_entries(python: str, entries: Sequence[Entry]) -> List[FixtureResult]:
 # ---------------------------------------------------------------------------
 
 def to_baseline(results: Sequence[FixtureResult]) -> dict:
-    return {
+    scored = [r for r in sorted(results, key=lambda r: r.name) if r.status != SOURCE_ERROR]
+    baseline = {
         'schema_version': SCHEMA_VERSION,
         'python_version': python_tag(),
         'python_patch': python_patch(),
-        'entries': {r.name: r.status for r in sorted(results, key=lambda r: r.name) if r.status != SOURCE_ERROR},
+        'entries': {r.name: r.status for r in scored},
+        # What the decompiler reported per entry (only entries that reported anything).
+        'diagnostics': {r.name: r.diagnostic_counts() for r in scored if r.diagnostics},
     }
+    return baseline
 
 
 def diff_baseline(results: Sequence[FixtureResult], baseline: dict) -> List[dict]:
@@ -515,10 +555,35 @@ def diff_baseline(results: Sequence[FixtureResult], baseline: dict) -> List[dict
         changes.append({'name': r.name, 'kind': kind, 'baseline': before, 'current': r.status})
     for name in sorted(set(expected) - seen):
         changes.append({'name': name, 'kind': 'missing', 'baseline': expected[name], 'current': None})
+    changes.extend(_noisier(results, baseline, expected))
     return changes
 
 
-FAILING_CHANGES = ('regressed', 'new', 'missing', 'lost')
+def _noisier(results: Sequence[FixtureResult], baseline: dict, expected: Dict[str, str]) -> List[dict]:
+    """
+    Entries that report more diagnostics than their baseline, per kind. A baseline made before
+    diagnostics were recorded has no ``diagnostics`` key and is not held to this.
+    """
+    if 'diagnostics' not in baseline:
+        return []
+    recorded = baseline['diagnostics']
+    changes = []
+    for r in results:
+        if r.name not in expected:
+            continue
+        before, now = recorded.get(r.name, {}), r.diagnostic_counts()
+        worse = {k: n for k, n in now.items() if n > before.get(k, 0)}
+        if worse:
+            changes.append({'name': r.name, 'kind': 'noisier', 'baseline': _fmt_kinds(before),
+                            'current': _fmt_kinds(now)})
+    return changes
+
+
+def _fmt_kinds(counts: Dict[str, int]) -> str:
+    return ', '.join(f'{k} x{n}' for k, n in counts.items()) or 'no diagnostics'
+
+
+FAILING_CHANGES = ('regressed', 'new', 'missing', 'lost', 'noisier')
 
 
 # ---------------------------------------------------------------------------
@@ -537,7 +602,9 @@ def build_report(python: str, results: Sequence[FixtureResult], changes: Sequenc
         'baseline_python_patch': baseline_patch,
         'interpreter': python,
         'baseline': _rel(baseline_path) if baseline_path else None,
-        'summary': {'entries': len(results), **dict(sorted(counts.items()))},
+        'summary': {'entries': len(results), **dict(sorted(counts.items())),
+                    'silent_failures': sum(1 for r in results if r.is_silent_failure()),
+                    'diagnostics': count_kinds([d for r in results for d in r.diagnostics])},
         'entries': [r.as_dict() for r in results],
         'changes': list(changes),
     }
@@ -572,6 +639,11 @@ def print_report(results: Sequence[FixtureResult], changes: Sequence[dict],
             print('      ' + r.decompiled_source.rstrip().replace('\n', '\n      '))
     passing = sum(1 for r in results if r.status in PASSING)
     print(f'\n  {passing} of {len(results)} entries decompile as expected')
+    silent = [r.name for r in results if r.is_silent_failure()]
+    flagged = sum(len(r.diagnostics) for r in results)
+    print(f'  {flagged} diagnostics reported; {len(silent)} silent failures (wrong output, no diagnostic)')
+    if verbose and silent:
+        print('    silent: ' + ', '.join(silent))
     if baseline_path is None:
         print('  baseline: not compared')
         return

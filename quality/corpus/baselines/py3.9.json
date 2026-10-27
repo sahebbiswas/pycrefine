@@ -77,5 +77,19 @@
     "stdlib/queue": "compiles",
     "stdlib/shlex": "compiles",
     "stdlib/textwrap": "compiles"
+  },
+  "diagnostics": {
+    "features/modern_async": {
+      "unsupported_version_construct": 11
+    },
+    "stdlib/bisect": {
+      "unsupported_opcode": 1
+    },
+    "stdlib/copy": {
+      "unsupported_opcode": 2
+    },
+    "stdlib/textwrap": {
+      "unsupported_opcode": 3
+    }
   }
 }

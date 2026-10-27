@@ -2,6 +2,7 @@
   "schema_version": 1,
   "python_version": "3.12",
   "python_patch": "3.12.3",
+  "diagnostics_recorded": true,
   "entries": {
     "corpus/comprehensive.py": {
       "kind": "source",
@@ -132,7 +133,10 @@
     },
     "tests/fixtures/foreign_pyc/comprehensive.cpython-39.pyc": {
       "kind": "pyc",
-      "status": "compiles"
+      "status": "compiles",
+      "diagnostics": {
+        "unsupported_opcode": 1
+      }
     },
     "tests/fixtures/foreign_pyc/simple.cpython-313.pyc": {
       "kind": "pyc",

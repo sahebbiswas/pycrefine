@@ -165,6 +165,7 @@ class DecompilerGeneric(DecompilerBase):
         # duplicated condition check emitted at the bottom of 3.11+ while loops.
         self._while_body_offsets: set = set()
         self._inner_back_jumps: dict = {}  # inner back-jump offset -> offset of the closing back-edge
+        self._while_header_targets: dict = {}  # body_start -> guard_pjif_offset (set by _prescan_while_loops)
         # Value-context `and`/`or` (see _prescan_value_boolops).
         self._boolop_or_pop: dict = {}      # 3.9-3.10: offset -> (op, target) for *_OR_POP jumps
         self._boolop_copy: dict = {}        # 3.12+: COPY offset -> (op, target, resume offset)

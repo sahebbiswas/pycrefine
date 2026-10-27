@@ -81,5 +81,28 @@
     "stdlib/queue": "compiles",
     "stdlib/shlex": "compiles",
     "stdlib/textwrap": "compiles"
+  },
+  "diagnostics": {
+    "features/flow_while": {
+      "ambiguous_expression": 1
+    },
+    "features/modern_async": {
+      "unsupported_version_construct": 18
+    },
+    "features/modern_generics": {
+      "unsupported_version_construct": 4
+    },
+    "features/modern_match": {
+      "unsupported_version_construct": 6
+    },
+    "features/modern_walrus": {
+      "stack_underflow": 1
+    },
+    "stdlib/fnmatch": {
+      "unsupported_opcode": 1
+    },
+    "stdlib/textwrap": {
+      "unsupported_opcode": 3
+    }
   }
 }

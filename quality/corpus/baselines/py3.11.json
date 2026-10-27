@@ -79,5 +79,38 @@
     "stdlib/queue": "decompile_error",
     "stdlib/shlex": "decompile_error",
     "stdlib/textwrap": "compiles"
+  },
+  "diagnostics": {
+    "features/class_basic": {
+      "stack_underflow": 1
+    },
+    "features/decorators_properties": {
+      "stack_underflow": 1
+    },
+    "features/expr_strings": {
+      "stack_underflow": 3
+    },
+    "features/flow_while": {
+      "ambiguous_expression": 1
+    },
+    "features/modern_async": {
+      "unsupported_version_construct": 16
+    },
+    "features/modern_match": {
+      "unsupported_version_construct": 6
+    },
+    "features/unpack_assign": {
+      "stack_underflow": 1
+    },
+    "realworld/tokenizer": {
+      "stack_underflow": 2
+    },
+    "stdlib/copy": {
+      "unsupported_opcode": 2
+    },
+    "stdlib/textwrap": {
+      "stack_underflow": 5,
+      "unsupported_opcode": 3
+    }
   }
 }

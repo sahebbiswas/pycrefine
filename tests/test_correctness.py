@@ -364,6 +364,77 @@ class TestEndToEnd(unittest.TestCase):
         code, _ = self._run_main(src, "--no-baseline")
         self.assertEqual(code, 0)
 
+    def _result(self, path="a.py", status="compiles", units=None, diagnostics=None):
+        return cc.EntryResult(path, "source", status, units=units or {}, diagnostics=diagnostics or {})
+
+    def test_baseline_records_diagnostics_and_marks_itself(self):
+        r = self._result(units={"def f": {"status": "compiles", "diagnostics": {"stack_underflow": 1}}},
+                         diagnostics={"stack_underflow": 1})
+        base = cc.to_baseline([r])
+        self.assertTrue(base["diagnostics_recorded"])
+        self.assertEqual(base["entries"]["a.py"]["unit_diagnostics"], {"def f": {"stack_underflow": 1}})
+        self.assertEqual(base["entries"]["a.py"]["diagnostics"], {"stack_underflow": 1})
+
+    def test_a_unit_that_gains_a_diagnostic_is_noisier(self):
+        clean = self._result(units={"def f": {"status": "compiles"}})
+        base = cc.to_baseline([clean])
+        noisy = self._result(units={"def f": {"status": "compiles", "diagnostics": {"unsupported_opcode": 1}}})
+        changes = cc.compare([noisy], base)
+        self.assertEqual([(c["unit"], c["change"]) for c in changes], [("def f", "noisier")])
+        self.assertIn("noisier", cc.FAILING_CHANGES)
+        self.assertEqual(cc.compare([clean], base), [])
+
+    def test_a_baseline_without_diagnostics_is_not_held_to_them(self):
+        base = cc.to_baseline([self._result(units={"def f": {"status": "compiles"}})])
+        del base["diagnostics_recorded"]
+        noisy = self._result(units={"def f": {"status": "compiles", "diagnostics": {"unsupported_opcode": 1}}})
+        self.assertEqual(cc.compare([noisy], base), [])
+
+    def test_an_entry_with_only_unit_diagnostics_is_compared_per_unit(self):
+        # The whole-file run can fail (no entry-level counts) while its units still report.
+        r = self._result(status="decompile_error",
+                         units={"def f": {"status": "compiles", "diagnostics": {"stack_underflow": 1}}})
+        base = cc.to_baseline([r])
+        self.assertNotIn("diagnostics", base["entries"]["a.py"])
+        self.assertEqual(cc.compare([r], base), [])
+        worse = self._result(status="decompile_error",
+                             units={"def f": {"status": "compiles", "diagnostics": {"stack_underflow": 2}}})
+        self.assertEqual([c["change"] for c in cc.compare([worse], base)], ["noisier"])
+
+    def test_a_pyc_entry_records_and_compares_its_own_diagnostics(self):
+        pyc = cc.EntryResult("x.pyc", "pyc", "compiles", diagnostics={"unsupported_opcode": 1})
+        base = cc.to_baseline([pyc])
+        self.assertEqual(base["entries"]["x.pyc"]["diagnostics"], {"unsupported_opcode": 1})
+        self.assertEqual(cc.compare([pyc], base), [])
+        worse = cc.EntryResult("x.pyc", "pyc", "compiles", diagnostics={"unsupported_opcode": 2})
+        self.assertEqual([c["change"] for c in cc.compare([worse], base)], ["noisier"])
+
+    def test_a_whole_file_failure_is_a_silent_failure_of_its_own(self):
+        r = self._result(status="syntax_error", units={"a": {"status": "compiles"}})
+        self.assertEqual(r.silent_failures(), 1)
+        flagged = self._result(status="syntax_error", units={"a": {"status": "syntax_error"}},
+                               diagnostics={"stack_underflow": 1})
+        self.assertEqual(flagged.silent_failures(), 1)  # only the unit is unflagged
+
+    def test_entry_diagnostics_reach_the_report_and_are_totalled_apart_from_units(self):
+        r = self._result(units={"def f": {"status": "compiles", "diagnostics": {"stack_underflow": 1}}},
+                         diagnostics={"unsupported_opcode": 2})
+        pyc = cc.EntryResult("x.pyc", "pyc", "compiles", diagnostics={"unsupported_opcode": 1})
+        self.assertEqual(r.to_dict()["diagnostics"], {"unsupported_opcode": 2})
+        self.assertNotIn("diagnostics", self._result().to_dict())
+        summary = cc.summarize([r, pyc], None)
+        self.assertEqual(summary["diagnostics"], {"stack_underflow": 1})
+        self.assertEqual(summary["entry_diagnostics"], {"unsupported_opcode": 3})
+
+    def test_silent_failures_need_a_failed_compile_and_no_diagnostic(self):
+        silent = self._result(units={"a": {"status": "syntax_error"},
+                                     "b": {"status": "syntax_error", "diagnostics": {"x": 1}},
+                                     "c": {"status": "compiles"}})
+        self.assertEqual(silent.silent_failures(), 1)
+        pyc = cc.EntryResult("p.pyc", "pyc", "syntax_error")
+        self.assertEqual(pyc.silent_failures(), 1)
+        self.assertEqual(cc.summarize([silent], None)["silent_failures"], 1)
+
     def test_baselines_and_report_carry_the_patch_version(self):
         for path in sorted(cc.BASELINE_DIR.glob("py*.json")):
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -390,6 +461,25 @@ class TestEndToEnd(unittest.TestCase):
         failures = [c for c in report["changes"] if c["change"] in cc.FAILING_CHANGES]
         self.assertEqual(failures, [])
         self.assertEqual(code, 0)
+
+
+class TestCommittedBaselines(unittest.TestCase):
+    """The baselines in the repository are what CI reads, so they must be well formed."""
+
+    def test_diagnostics_are_recorded_with_known_kinds_and_unit_ids(self):
+        from pycrefine import diagnostics as dg
+        files = sorted(Path(_QUALITY, "baselines").glob("py3.*.json"))
+        self.assertTrue(files)
+        for path in files:
+            base = json.loads(path.read_text())
+            with self.subTest(baseline=path.name):
+                self.assertEqual(base["schema_version"], cc.SCHEMA_VERSION)
+                self.assertTrue(base.get("diagnostics_recorded"))
+                for name, entry in base["entries"].items():
+                    for uid, counts in entry.get("unit_diagnostics", {}).items():
+                        self.assertIn(uid, entry["units"], (name, uid))
+                        self.assertLessEqual(set(counts), set(dg.KINDS), (name, uid))
+                    self.assertLessEqual(set(entry.get("diagnostics", {})), set(dg.KINDS), name)
 
 
 if __name__ == "__main__":
