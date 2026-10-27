@@ -461,16 +461,8 @@ def post_process_source(source: str, beautification_level: str = 'core') -> str:
         # so embedded quotes never produce invalid syntax.
         def repl_str(m):
             raw_content = m.group(1)          # exactly what was between the triple quotes
-            try:
-                # repr() of a str always produces a syntactically valid Python literal.
-                # We then strip the surrounding quotes repr adds so we can re-wrap below.
-                safe_repr = repr(raw_content)  # e.g. "'hello\\nworld'" or '"it\'s"'
-                return safe_repr
-            except Exception:
-                # Fallback: escape newlines and wrap in double-quotes, escaping any
-                # embedded double-quotes to avoid broken output.
-                escaped = raw_content.replace('\\', '\\\\').replace('\n', '\\n').replace('"', '\\"')
-                return f'"{escaped}"'
+            # repr() of a str always produces a syntactically valid Python literal.
+            return repr(raw_content)  # e.g. "'hello\\nworld'" or '"it\'s"'
 
         inner = re.sub(r"'''([\s\S]*?)'''", repl_str, inner)
         inner = re.sub(r'"""([\s\S]*?)"""', repl_str, inner)
@@ -499,7 +491,7 @@ def post_process_source(source: str, beautification_level: str = 'core') -> str:
                     # would turn one tuple argument into multiple arguments.
                     if not isinstance(node.body, ast.Tuple):
                         inner = inside
-                except Exception:
+                except (SyntaxError, ValueError):
                     # Fallback to the manual comma scan if AST parsing fails.
                     # (e.g., for specialized syntax like '*args' which mode='eval' might reject)
                     # Use a scan that skips content inside delimiters.
