@@ -151,7 +151,7 @@ risks:
 | `feature` | `features/` | one language feature per small program, including modern syntax (`match`, `async`, walrus, generics) gated by Python version |
 | `generated` | `generated/` | control-flow combinations written by `generate_control_flow.py` (`--check` fails when the files are stale) |
 | `realworld` | `realworld/` | small programs shaped like real code: a tokenizer, a state machine, an LRU cache |
-| `stdlib` | `module` entries | standard-library modules as shipped with the running Python, checked to `compile_only` because their behavior depends on the platform |
+| `stdlib` | `module` entries | standard-library modules as shipped with the running Python, checked to `compile_only` because their behavior depends on the platform. The baselines are per minor version, and these entries read the running interpreter's own library, so a patch release can change a result; the report says so when a stdlib entry fails |
 
 Each entry records its `summary`, the Python range its source needs (`source_python`
 `min`/`max`), how it is compiled (`compile.optimize`, so `python -O`/`-OO` bytecode is

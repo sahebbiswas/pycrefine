@@ -565,6 +565,12 @@ def print_report(results: Sequence[FixtureResult], changes: Sequence[dict],
         print('A regression is an entry that does worse than its baseline; a new or missing '
               'entry needs the baseline updated. Once the changes are intended, run with '
               '--update-baseline on every CI Python version.')
+        categories = {r.name: r.category for r in results}
+        if any(categories.get(c['name']) == 'stdlib' for c in failing):
+            print('A stdlib entry reads the standard library of the Python that runs the check, so a '
+                  'patch release of that Python can change its result even though pycrefine did not '
+                  'change. Compare the interpreter\'s patch version with the one the baseline was '
+                  'recorded on before treating it as a decompiler regression.')
     elif changes:
         print('Improvements are not recorded yet; run with --update-baseline to ratchet them.')
 
@@ -664,15 +670,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f'Error: nothing to run in {_rel(args.corpus)} on Python {python_tag()}', file=sys.stderr)
         return 2
     partial = bool(args.entries_named or args.category)
+    if args.update_baseline and partial:
+        print('Error: --update-baseline records every entry; do not name entries or a category',
+              file=sys.stderr)
+        return 2
 
     baseline_path = None if args.no_baseline else (args.baseline or baseline_path_for(args.corpus))
     results = run_entries(sys.executable, entries)
 
     if args.update_baseline:
-        if partial:
-            print('Error: --update-baseline records every entry; do not name entries or a category',
-                  file=sys.stderr)
-            return 2
         baseline_path.parent.mkdir(parents=True, exist_ok=True)
         baseline_path.write_text(json.dumps(to_baseline(results), indent=2) + '\n', encoding='utf-8')
         print(f'Baseline written to {_rel(baseline_path)}', file=sys.stderr)

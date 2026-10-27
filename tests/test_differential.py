@@ -6,6 +6,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+import unittest.mock
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -133,6 +134,12 @@ class TestCommandLine(unittest.TestCase):
                 os.chdir(old)
         self.assertEqual(code, 0, out)
         self.assertIn("equivalent", out)
+
+    def test_partial_baseline_update_is_rejected_before_running_anything(self):
+        with unittest.mock.patch.object(cd, "run_entries", side_effect=AssertionError("ran")):
+            code, _, err = self.run_main("--update-baseline", "--category", "stdlib")
+        self.assertEqual(code, 2)
+        self.assertIn("records every entry", err)
 
     def test_one_report_cannot_serve_several_interpreters(self):
         code, _, err = self.run_main("--python", "a", "--python", "b", "--report", "r.json")
