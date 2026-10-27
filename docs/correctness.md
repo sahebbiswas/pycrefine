@@ -106,6 +106,14 @@ The CI workflow runs the gate after pytest and uploads the JSON report as the
 asserts no regressions against the committed baseline, so a plain `pytest`
 run catches them locally.
 
+**Hangs and crashes.** The gate decompiles in a child process (one process serves many
+entries and is replaced when it dies). `--timeout SEC` (default 60, `0` for none) stops a
+decompilation that runs too long, on every platform and from any thread, even when it is
+stuck in C code; the entry is recorded as a `decompile_error` ("exceeded 60s") and the
+run continues. The timeout starts once the child has finished starting up, so interpreter
+start-up and imports are never charged to an entry. A child that crashes is reported the
+same way.
+
 The default corpus is `corpus/` (`.py` sources) plus the committed `.pyc`
 fixtures in `tests/fixtures/foreign_pyc/`. Any other file or directory can be measured without gating:
 

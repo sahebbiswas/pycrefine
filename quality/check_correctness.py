@@ -57,11 +57,12 @@ import argparse
 import ast
 import contextlib
 import io
+import atexit
 import json
+import multiprocessing
 import os
 import py_compile
 import re
-import signal
 import sys
 import tempfile
 import tokenize
@@ -88,6 +89,7 @@ LEVELS = ['decompile_error', 'syntax_error', 'compile_error', 'compiles']
 SOURCE_ERROR = 'source_error'
 
 DEFAULT_TIMEOUT = 60
+START_TIMEOUT = 120     # for the decompiling child to start; separate from the per-entry timeout
 
 # Besides ``regressed``, every change that stops a baseline record from being
 # compared fails the gate, so it must be acknowledged with --update-baseline
@@ -118,23 +120,117 @@ class _Timeout(Exception):
     pass
 
 
-@contextlib.contextmanager
-def _time_limit(seconds: int):
-    """Abort the body after *seconds* (POSIX only; a no-op elsewhere)."""
-    if not seconds or not hasattr(signal, 'SIGALRM'):
-        yield
-        return
+class _WorkerDied(Exception):
+    pass
 
-    def _raise(signum, frame):
-        raise _Timeout(f'decompilation exceeded {seconds}s')
 
-    previous = signal.signal(signal.SIGALRM, _raise)
-    signal.alarm(seconds)
-    try:
-        yield
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, previous)
+def _decompile_worker(conn) -> None:
+    """
+    The decompiling child process: decompile each .pyc path it receives and send back
+    ``('ok', text)`` or ``('error', type name, message)``, until it gets ``None``.
+    """
+    while True:
+        try:
+            path = conn.recv()
+        except EOFError:
+            return
+        if path is None:
+            return
+        sink = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+                text = get_decompiler(path).decompile()
+            if isinstance(text, str):
+                reply = ('ok', text)
+            else:
+                reply = ('error', 'TypeError', f'decompile() returned {type(text).__name__}')
+        except Exception as exc:          # includes RecursionError
+            reply = ('error', type(exc).__name__, str(exc).strip())
+        conn.send(reply)
+
+
+def _child_main(conn, target) -> None:
+    """
+    The child's entry point: announce that start-up (the interpreter and the imports) is
+    done, then serve requests with *target*.
+    """
+    conn.send(('ready',))
+    target(conn)
+
+
+class _DecompileRunner:
+    """
+    Decompiles in a child process, so a hang or a crash costs one entry and not the run.
+
+    Unlike a SIGALRM timer this works on every platform and from any thread, and it can
+    stop a decompiler stuck in C code. The child is reused between entries and replaced
+    after a timeout or a crash. The per-entry timeout starts once the child has said it
+    is ready, so start-up time is never charged to an entry.
+    """
+
+    def __init__(self, target=_decompile_worker, start_timeout: float = START_TIMEOUT):
+        self._target = target
+        self._start_timeout = start_timeout
+        self._process = None
+        self._conn = None
+
+    def _start(self) -> None:
+        context = multiprocessing.get_context('spawn')
+        self._conn, child = context.Pipe()
+        self._process = context.Process(target=_child_main, args=(child, self._target),
+                                        daemon=True)
+        self._process.start()
+        child.close()
+        try:
+            if not self._conn.poll(self._start_timeout):
+                self.stop()
+                raise _WorkerDied(
+                    f'the decompiling process did not start within {self._start_timeout}s')
+            self._conn.recv()
+        except (EOFError, OSError) as exc:
+            raise self._worker_died() from exc
+
+    def _worker_died(self) -> _WorkerDied:
+        """Reap the child and describe how it ended."""
+        code = None
+        if self._process is not None:
+            self._process.join(2)
+            code = self._process.exitcode
+        self.stop()
+        return _WorkerDied(f'the decompiling process died (exit code {code})')
+
+    def stop(self) -> None:
+        if self._process is None:
+            return
+        try:
+            self._conn.close()
+        except OSError:
+            pass
+        if self._process.is_alive():
+            self._process.terminate()
+            self._process.join(2)
+            if self._process.is_alive():
+                self._process.kill()
+        self._process.join(2)
+        self._process = self._conn = None
+
+    def decompile(self, path: str, timeout: int) -> Tuple[str, ...]:
+        """Return the child's reply for *path*; raise _Timeout or _WorkerDied."""
+        if self._process is None or not self._process.is_alive():
+            self.stop()
+            self._start()
+        try:
+            self._conn.send(path)
+            if not self._conn.poll(timeout or None):
+                self.stop()
+                raise _Timeout(f'decompilation exceeded {timeout}s')
+            return self._conn.recv()
+        except (EOFError, OSError) as exc:    # BrokenPipeError is an OSError
+            raise self._worker_died() from exc
+
+
+_runner = _DecompileRunner()
+atexit.register(_runner.stop)
 
 
 def _error(stage: str, exc: BaseException) -> dict:
@@ -163,19 +259,21 @@ def classify(text: str, filename: str = '<decompiled>') -> Check:
 
 
 def check_pyc(pyc_path: str, timeout: int = DEFAULT_TIMEOUT) -> Check:
-    """Decompile *pyc_path* and classify the output."""
-    sink = io.StringIO()
+    """Decompile *pyc_path* in a child process and classify the output."""
     try:
-        with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink), \
-                _time_limit(timeout):
-            text = get_decompiler(pyc_path).decompile()
-    except Exception as exc:          # includes RecursionError and _Timeout
+        reply = _runner.decompile(pyc_path, timeout)
+    except (_Timeout, _WorkerDied) as exc:
         return Check('decompile_error', _error('decompile', exc))
-    if not isinstance(text, str):
-        return Check('decompile_error', {
-            'stage': 'decompile', 'type': 'TypeError',
-            'message': f'decompile() returned {type(text).__name__}'})
-    return classify(text)
+    except Exception as exc:
+        # Anything else (say, a reply that cannot be unpickled) must cost one entry, not
+        # the run. The pipe may now be out of step with the child, so start a fresh one.
+        _runner.stop()
+        return Check('decompile_error', _error('decompile', exc))
+    if reply[0] != 'ok':
+        _, type_name, message = reply
+        return Check('decompile_error', {'stage': 'decompile', 'type': type_name,
+                                         'message': message[:300] + ('...' if len(message) > 300 else '')})
+    return classify(reply[1])
 
 
 def check_source_text(source: str, workdir: str, name: str,
