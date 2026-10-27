@@ -164,29 +164,30 @@ class TestComprehensions(unittest.TestCase):
         self._assert_roundtrip("def g(items):\n    return {x for x in items}\n")
 
     def test_inlined_comprehension_shapes(self):
-        cases = [
-            "def f(xs):\n    y = [x for x in xs]\n    return y\n",
-            "def f(xs):\n    [print(x) for x in xs]\n",
-            "def f(m):\n    return [[c for c in row] for row in m]\n",
-            "def f(a, b):\n    return [(x, y) for x in a for y in b if x != y]\n",
-            ("def f(xs):\n    return [x for x in xs if x if x > 2]\n",
-             # chained filters are an `and`; the 3.9 code-object path prints that
-             "def f(xs):\n    return [x for x in xs if x and x > 2]\n"),
-            "def f(xs):\n    return [x for x in xs if x is not None]\n",
-            "def f(xs, n):\n    return {k: [v] * n for k, v in xs.items() if not k.startswith('_')}\n",
-            "def f(xs):\n    return [a + b for (a, b), c in xs]\n",
-            "def f(xs):\n    return sum([x for x in xs]) + len({y for y in xs})\n",
-            "def f(xs):\n    return [x if x else 0 for x in xs]\n",
-            "def f(xs):\n    return {k: (v if v > 0 else -v) for k, v in xs}\n",
-            "def f(xs, d):\n    return [d.get(x, 'a' if x else 'b') for x in xs]\n",
-            "total = [i * i for i in range(10)]\n",
+        cases = {
+            "simple_list": "def f(xs):\n    y = [x for x in xs]\n    return y\n",
+            "print_in_list": "def f(xs):\n    [print(x) for x in xs]\n",
+            "nested_list": "def f(m):\n    return [[c for c in row] for row in m]\n",
+            "two_loops_with_filter": "def f(a, b):\n    return [(x, y) for x in a for y in b if x != y]\n",
+            "chained_filters": (
+                "def f(xs):\n    return [x for x in xs if x if x > 2]\n",
+                # chained filters are an `and`; the 3.9 code-object path prints that
+                "def f(xs):\n    return [x for x in xs if x and x > 2]\n"),
+            "is_not_none_filter": "def f(xs):\n    return [x for x in xs if x is not None]\n",
+            "dict_with_filter": "def f(xs, n):\n    return {k: [v] * n for k, v in xs.items() if not k.startswith('_')}\n",
+            "tuple_target": "def f(xs):\n    return [a + b for (a, b), c in xs]\n",
+            "sum_and_len": "def f(xs):\n    return sum([x for x in xs]) + len({y for y in xs})\n",
+            "conditional_element": "def f(xs):\n    return [x if x else 0 for x in xs]\n",
+            "dict_conditional_value": "def f(xs):\n    return {k: (v if v > 0 else -v) for k, v in xs}\n",
+            "get_with_conditional": "def f(xs, d):\n    return [d.get(x, 'a' if x else 'b') for x in xs]\n",
+            "module_level": "total = [i * i for i in range(10)]\n",
             # genexprs are still separate code objects; 3.13+ starts their
             # loop body with a STORE_FAST_LOAD_FAST superinstruction
-            "def f(xs):\n    return sum(d.w for d in xs)\n",
-        ]
-        for case in cases:
+            "genexpr_attribute": "def f(xs):\n    return sum(d.w for d in xs)\n",
+        }
+        for name, case in cases.items():
             src, *equivalents = case if isinstance(case, tuple) else (case,)
-            with self.subTest(src=src):
+            with self.subTest(case=name):
                 self._assert_roundtrip(src, *equivalents)
 
     def test_negative_comprehension_no_yield_in_normal_loop(self):

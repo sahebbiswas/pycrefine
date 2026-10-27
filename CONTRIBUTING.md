@@ -63,8 +63,10 @@ for v in 3.9 3.10 3.11 3.12 3.13 3.14; do uv run --no-project --python "$v" --wi
 [`tests/known_failures.json`](tests/known_failures.json), grouped by the issue that tracks
 each one, and run as strict expected failures: CI stays green while the gap exists and goes
 red when a listed test starts to pass. **When you fix a gap, delete its entries** (and
-close the issue). A test that checks several cases with `subTest` is listed with
-`"mode": "skip"` instead, because pytest reports each subtest separately. A change must not
+close the issue). A test that checks several cases with `subTest(case=name)` is listed
+under `"cases"` instead, with the names of the cases that fail: pytest reports each
+subtest separately, so only those cases are expected to fail (strictly, like a test) and
+the rest keep running. A change must not
 add new failures on 3.10 or 3.11; if you find one you won't fix, file an issue and list the test.
 
 **Correctness gate.** `quality/check_correctness.py` decompiles the corpus (`corpus/` and
