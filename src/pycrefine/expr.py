@@ -1,6 +1,6 @@
 """Expression helpers and stack sentinels used while rebuilding source text."""
 import ast
-from typing import Any, List
+from typing import Any, List, Optional
 
 
 def _unary_operand(operand: Any) -> str:
@@ -100,3 +100,35 @@ class _UnpackAccessor(str):
     (3.13+'s ``STORE_FAST_STORE_FAST``) tell these per-target values from a single tuple
     expression that holds all of them.
     """
+
+
+class UnknownExpression(str):
+    """
+    An expression the decompiler could not determine, standing in for it on the stack.
+
+    It is a ``str`` so the code that builds source text keeps working, and it renders as
+    ``?`` (or the given *text*), but it is its own type: code that needs to know whether a
+    value is real asks :func:`is_unknown` instead of comparing with a magic string. It
+    carries *reason* and the instruction (*opcode*, *offset*) it came from.
+    """
+
+    reason: str
+    opcode: Optional[str]
+    offset: Optional[int]
+
+    def __new__(cls, reason: str, opcode: Optional[str] = None, offset: Optional[int] = None,
+                text: str = "?") -> "UnknownExpression":
+        self = super().__new__(cls, text)
+        self.reason = reason
+        self.opcode = opcode
+        self.offset = offset
+        return self
+
+    def __repr__(self) -> str:
+        where = f" at {self.opcode}" + (f" (offset {self.offset})" if self.offset is not None else "") if self.opcode else ""
+        return f"UnknownExpression({self.reason!r}{where})"
+
+
+def is_unknown(value: Any) -> bool:
+    """True if *value* is a placeholder for an expression that could not be determined."""
+    return isinstance(value, UnknownExpression)
