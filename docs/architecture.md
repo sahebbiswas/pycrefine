@@ -11,7 +11,7 @@ source. For the development workflow, see [CONTRIBUTING.md](../CONTRIBUTING.md).
 | `pycrefine.py` | launcher so `python pycrefine.py file.pyc` works from a checkout; not part of the wheel. Imported as `pycrefine` from the repository root, it hands back the real package from `src/`. |
 | `tests/` | the test suite (pytest, unittest-style classes). `tests/fixtures/foreign_pyc/` holds the few committed `.pyc` files written by other CPython versions, with `manifest.json` and `regenerate_foreign_pyc.py`; every other test compiles its input on the fly. |
 | `corpus/` | sources the correctness gate decompiles |
-| `quality/` | the correctness gate and its per-version baselines, the coherency checker, the lint ratchet and its baseline |
+| `quality/` | the correctness gate and its per-version baselines, the differential behavior check (`check_differential.py`, with `differential/`), the coherency checker, the lint ratchet and its baseline |
 | `docs/` | user and design documentation ([index](README.md)) |
 | `.github/workflows/` | CI: one test workflow per Python version (`ci-py39.yml`, `ci-py312.yml`, `ci-py314.yml`, sharing `reusable-test.yml`), `lint.yml`, `version.yml`, `release.yml` |
 | `.github/scripts/` | helpers the workflows run (`check_version_bump.py`) |
