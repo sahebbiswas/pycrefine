@@ -11,6 +11,11 @@ _QUALITY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "quali
 if _QUALITY not in sys.path:
     sys.path.insert(0, _QUALITY)
 cc = importlib.import_module("check_correctness")
+_TESTS = os.path.dirname(os.path.abspath(__file__))
+if _TESTS not in sys.path:
+    sys.path.insert(0, _TESTS)  # the runner's child process imports gate_worker_stubs
+import gate_worker_slow_start as slow_start  # noqa: E402
+import gate_worker_stubs as stubs  # noqa: E402
 
 
 class TestClassify(unittest.TestCase):
@@ -34,6 +39,105 @@ class TestClassify(unittest.TestCase):
         self.assertLess(cc.level_of("syntax_error"), cc.level_of("compile_error"))
         self.assertLess(cc.level_of("compile_error"), cc.level_of("compiles"))
         self.assertIsNone(cc.level_of(cc.SOURCE_ERROR))
+
+
+class TestDecompileRunner(unittest.TestCase):
+    """Decompilation runs in a child process, so a hang or a crash costs one entry (#92)."""
+
+    def runner(self, target):
+        runner = cc._DecompileRunner(target)
+        self.addCleanup(runner.stop)
+        return runner
+
+    def test_a_hang_is_stopped_after_the_timeout(self):
+        runner = self.runner(stubs.hang)
+        with self.assertRaises(cc._Timeout):
+            runner.decompile("a.pyc", 1)
+        self.assertIsNone(runner._process)
+
+    def test_a_crash_is_reported(self):
+        runner = self.runner(stubs.die)
+        with self.assertRaises(cc._WorkerDied) as caught:
+            runner.decompile("a.pyc", 30)
+        self.assertIn("exit code 7", str(caught.exception))
+
+    def test_the_child_is_replaced_after_a_timeout(self):
+        runner = self.runner(stubs.echo)
+        self.assertEqual(runner.decompile("a", 30), ("ok", "x = 'a'\n"))
+        first = runner._process.pid
+        self.assertEqual(runner.decompile("b", 30), ("ok", "x = 'b'\n"))
+        self.assertEqual(runner._process.pid, first, "one child serves many entries")
+        runner._process.kill()
+        runner._process.join()
+        self.assertEqual(runner.decompile("c", 30), ("ok", "x = 'c'\n"))
+        self.assertNotEqual(runner._process.pid, first)
+
+    def test_start_up_time_is_not_charged_to_the_entry_timeout(self):
+        # The child takes about 2 s to start; the entry's own budget is 1 s.
+        runner = self.runner(slow_start.echo)
+        self.assertEqual(runner.decompile("a", 1), ("ok", "x = 'a'\n"))
+
+    def test_a_child_that_never_starts_is_reported(self):
+        runner = cc._DecompileRunner(slow_start.echo, start_timeout=0.2)
+        self.addCleanup(runner.stop)
+        with self.assertRaises(cc._WorkerDied) as caught:
+            runner.decompile("a", 30)
+        self.assertIn("did not start", str(caught.exception))
+        self.assertIsNone(runner._process)
+
+    def test_check_pyc_reports_a_hang_and_a_crash_as_decompile_errors(self):
+        original = cc._runner
+        try:
+            # Start-up is not part of the entry timeout, so the hang can use a short one;
+            # the crash case has nothing to wait for and gets a generous one.
+            for target, timeout, text in ((stubs.hang, 1, "exceeded"), (stubs.die, 30, "died")):
+                with self.subTest(target=target.__name__):
+                    cc._runner = self.runner(target)
+                    check = cc.check_pyc("a.pyc", timeout)
+                    self.assertEqual(check.status, "decompile_error")
+                    self.assertIn(text, check.error["message"])
+                    self.assertEqual(check.error["stage"], "decompile")
+        finally:
+            cc._runner = original
+
+    def test_check_pyc_turns_an_unexpected_error_into_a_decompile_error(self):
+        class Broken:
+            stopped = False
+
+            def decompile(self, path, timeout):
+                raise ValueError("reply could not be read")
+
+            def stop(self):
+                self.stopped = True
+
+        original = cc._runner
+        cc._runner = broken = Broken()
+        try:
+            check = cc.check_pyc("a.pyc", 1)
+        finally:
+            cc._runner = original
+        self.assertEqual(check.status, "decompile_error")
+        self.assertEqual(check.error["type"], "ValueError")
+        self.assertTrue(broken.stopped, "the child is replaced, as the pipe may be out of step")
+
+    def test_it_works_from_a_thread_other_than_the_main_one(self):
+        import threading
+
+        results = []
+        thread = threading.Thread(target=lambda: results.append(cc.check_source_text(
+            "x = 1\n", tempfile.gettempdir(), "gate_thread_check", 60)))
+        thread.start()
+        thread.join()
+        self.assertEqual(results[0].status, "compiles")
+
+    def test_a_decompiler_error_comes_back_as_its_type_and_message(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = os.path.join(tmp, "bad.pyc")
+            with open(bad, "wb") as handle:
+                handle.write(b"not a pyc file")
+            check = cc.check_pyc(bad, 60)
+        self.assertEqual(check.status, "decompile_error")
+        self.assertTrue(check.error["type"])
 
 
 class TestExtractUnits(unittest.TestCase):
