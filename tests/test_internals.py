@@ -337,9 +337,9 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
         # Run prescan then main decode loop
         dec.pc = 0
         dec.blocks = []
-        dec._while_header_targets = {}
-        dec._while_body_offsets = set()
-        dec._while_true_ends = set()
+        dec.prescan.while_header_targets = {}
+        dec.prescan.while_body_offsets = set()
+        dec.prescan.while_true_ends = set()
         dec._prescan_while_loops()
 
         dec.pc = 0
@@ -433,11 +433,11 @@ class TestDecompiler39Python39Fixes(unittest.TestCase):
             Instr(0, "JUMP_ABSOLUTE", 0, 0, 12, None, False),
             Instr(0, "RETURN_VALUE", None, None, 14, None, True),
         ]
-        dec._while_body_offsets = set()
-        dec._while_header_targets = {}
-        dec._while_true_ends = set()
+        dec.prescan.while_body_offsets = set()
+        dec.prescan.while_header_targets = {}
+        dec.prescan.while_true_ends = set()
         dec._prescan_while_loops()
-        self.assertGreaterEqual(len(dec._while_header_targets), 1)
+        self.assertGreaterEqual(len(dec.prescan.while_header_targets), 1)
 
     def test_forward_jump_absolute_treated_as_jump_forward(self):
         Instr = BytecodeInstruction
@@ -630,7 +630,7 @@ class TestDecompiler39ExcCleanupIndent(unittest.TestCase):
             Instr(0, "RERAISE",               None, None,   20, None, True),
         ]
         dec.stack = ["_exc_match"]
-        dec._except_header_indents = [0]
+        dec.emit.except_header_indents = [0]
         dec.pc = 1
         dup = dec.instructions[0]
         dec._handle_instruction(dup)

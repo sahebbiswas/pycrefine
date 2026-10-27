@@ -99,38 +99,95 @@ way to stay quiet.
 
 ### Decompiler state
 
-All of it lives on the decompiler instance and is declared in
-`DecompilerGeneric.__init__`. Sub-decompilers (handler sections, comprehension slices,
-conditional-expression branches) are fresh instances that have a few of these set by hand,
-so a new attribute must also be handled where `_pick_decompiler_class` is used
-([#37](https://github.com/sahebbiswas/pycrefine/issues/37),
-[#83](https://github.com/sahebbiswas/pycrefine/issues/83)). The "written by" column
-lists the methods that assign to or mutate the attribute.
+The state that the prescan, the emission and the docstring handling build up lives in three
+small dataclasses declared in `src/pycrefine/decompiler/state.py` and created in
+`DecompilerGeneric.__init__` (issues #37 and #83). They do not hold everything: the cursor
+and stack (`instructions`, `reconstructed`, `stack`, `blocks`, `pc`) stay on `DecompilerBase`,
+and `DecompilerGeneric` keeps a few flags of its own (`has_doc`, `_enclosing_locals`). Nothing
+is added to the decompiler as an ad-hoc attribute, and nothing is probed with `hasattr`.
+`FIELD_OWNER` maps every field of the three groups to its group so a test can guard against
+drift.
 
-| Group | Attribute | Meaning | Written by |
-|---|---|---|---|
-| Docstrings | `_doc_load_offset`, `_class_doc_store_offsets`, `_doc_line_count`, `has_doc` | the `LOAD_CONST` / `STORE_NAME __doc__` of a docstring and how many lines it took | `decompile`, `_emit_docstring` |
-| Loops | `_while_body_offsets` | where a `while` body starts, to drop the repeated condition at the bottom | `_prescan_while_loops` |
-| | `_inner_back_jumps` | an inner backward jump → the back-edge that closes the loop | `_prescan_while_loops` |
-| | `_dup_guard_exits` | exit targets of suppressed bottom-of-loop condition copies | `_prescan_while_loops` |
-| `and` / `or` as values | `_boolop_or_pop`, `_boolop_copy`, `_boolop_groups` | the jumps and `COPY`s that make up the operator, by Python version | `_prescan_value_boolops` |
-| | `_boolop_pending` | operators opened but not yet joined | `_prescan_value_boolops`, replay |
-| Try, except | `_try_nop_offsets`, `_nop_to_push_exc`, `_nop_to_finally_merge` | the `NOP` that marks the start of a `try`, and what it leads to | `_prescan_try_structure` |
-| | `_suppress_push_exc_offsets` | `PUSH_EXC_INFO` that opens a handler already rendered elsewhere | `_prescan_try_structure` |
-| | `_exc_handler_jump_offsets`, `_exc_handler_continue_offsets` | jumps that leave a handler (and those that are a `continue`) | `_prescan_try_structure`, `_emit_empty_try` |
-| | `_exc_as_store_offset`, `_exc_cleanup_offsets`, `_exc_bound_names` | `except E as e`: the store to skip, the compiler's `e = None; del e`, and every name bound that way | `_op_check_exc_match`, `_record_exc_cleanup_offsets` |
-| | `_except_header_indents`, `_except_end_offsets`, `_header_indent_by_cleanup` | indentation and end offsets of the except clauses being emitted | `_op_push_exc_info`, `_handle_instruction` |
-| | `_handler_return_close`, `_explicit_returns` | returns that end an except clause; `return None` that is in the source | `_defer_close_to_handler_return` |
-| | `_empty_try_handlers`, `_empty_try_skip` | the handlers of a `try: pass` and the `NOP`s of that statement | `_drop_unreachable_handlers` |
-| Finally | `_finally_merge_offsets`, `_pending_finally_merge` | merge labels where deferred `finally` or `except` text is emitted | `_prescan_try_structure`, `_close_blocks` |
-| | `_finally_body_suppress` | the inlined copy of a `finally` body, skipped in the main pass | `_prescan_try_structure`, `_op_jump` |
-| | `_deferred_finally_lines`, `_deferred_except_lines` | pre-rendered text keyed by merge offset | `_prescan_try_structure` |
-| | `_push_exc_to_finally_merge`, `_finally_from_handler` | which `PUSH_EXC_INFO` goes to which merge label; 3.9's `finally` rendered from its handler copy | `_prescan_try_structure` |
-| | `_handler_section_suppress`, `_wrapper_body_suppress` | handler instructions already replayed by a sub-decompiler; re-raise and with-exit wrappers | `_prescan_try_structure`, `_render_handler_section` |
-| | `_else_starts`, `_else_stack_snapshots` | where an `else:` starts and ends; the stack to restore there | `_prescan_try_structure`, `_op_conditional_jump` |
-| With | `_with_exit_suppress_offsets`, `_with_body_end`, `_with_exit_owner`, `_open_with_sentinels` | the inlined `__exit__` call to skip, where a `with` body ends, and which `with` an exit belongs to | `_prescan_with_exits`, `_close_blocks` |
-| Scopes | `_enclosing_locals` | names bound in enclosing functions, for `global`/`nonlocal` decisions | `_op_make_function` |
-| Calls | `_kw_names` | keyword names for the next call (3.11–3.13 `KW_NAMES`) | `_op_kw_names`, `_op_call` |
+Handler sections are decompiled by a sub-decompiler. It receives
+`prescan.for_handler_section()` (which shares only `exc_handler_jump_offsets`,
+`exc_handler_continue_offsets` and `while_header_targets` with its parent) and
+`emit.for_handler_section()` (a fresh state whose `except_header_indents` is
+`[0]`).
+
+#### `PrescanState` (`self.prescan`)
+
+What the analysis passes found before emission starts.
+
+| Field | Meaning | Written by |
+|---|---|---|
+| `while_body_offsets` | where a while body starts, to drop the repeated condition | `_prescan_while_loops` |
+| `while_header_targets` | body start -> guard POP_JUMP offset | `_prescan_while_loops`, `decompile` |
+| `while_true_ends` | end offsets of while-True loops | `_handle_instruction`, `_op_jump`, `_op_nop`, `_prescan_while_loops` |
+| `inner_back_jumps` | inner back-jump -> the back-edge that closes the loop | `_prescan_while_loops` |
+| `dup_guard_exits` | exit targets of suppressed bottom-of-loop condition copies | `_prescan_while_loops` |
+| `for_iter_targets` | jump targets of FOR_ITER (3.9 break detection) | `_prescan_try_structure` |
+| `boolop_or_pop` | 3.9-3.10: offset -> (op, target) for *_OR_POP jumps | `_prescan_value_boolops` |
+| `boolop_copy` | 3.12+: COPY offset -> (op, target, resume offset) | `_prescan_value_boolops` |
+| `boolop_groups` | 3.9-3.10: plain POP_JUMP offset -> (op, target) | `_prescan_value_boolops` |
+| `ternary_jumps` | jump offset -> how to render the conditional expression | `_prescan_ternaries` |
+| `ternary_suppress` | instruction offsets a ternary already covers | `_prescan_ternaries` |
+| `compound_cond_map` | controlling offset -> combined condition text | `_prescan_compound_conds` |
+| `compound_suppress` | instruction offsets a compound condition already covers | `_prescan_compound_conds` |
+| `try_nop_offsets` | NOPs that mark where a try starts | `_prescan_try_structure` |
+| `nop_to_push_exc` | try NOP -> its PUSH_EXC_INFO | `_prescan_try_structure` |
+| `nop_to_finally_merge` | try NOP -> finally start, for try/finally without except | `_prescan_try_structure` |
+| `suppress_push_exc_offsets` | PUSH_EXC_INFO that opens a handler rendered elsewhere | `_prescan_try_structure` |
+| `push_exc_to_finally_merge` | merge offset -> the handler entry points (sorted) that rejoin there, for a `try` inside a loop whose handlers merge after the loop | `_prescan_try_structure` |
+| `finally_merge_offsets` | merge labels where deferred finally/except text is emitted | `_close_blocks`, `_handle_instruction`, `_prescan_try_structure` |
+| `except_only_merge_offsets` | merge offsets that have handlers but no `finally`, so only the handler text is placed there | `_handle_instruction`, `_prescan_try_structure` |
+| `finally_body_suppress` | instructions of an inlined copy of a `finally` body, left out of the normal flow because the text is emitted once at the merge label | `_elide_early_finally_copies`, `_handle_instruction`, `_op_jump`, `_op_setup_with`, `_prescan_try_structure`, `_suppress_copies` |
+| `finally_targets` | 3.9: targets of the `SETUP_FINALLY`s that belong to a user `finally:` rather than to a handler | `_prescan_try_structure` |
+| `finally_from_handler` | 3.9: handler offset -> its RERAISE | `_elide_early_finally_copies`, `_open_finally_from_handler`, `_prescan_try_structure` |
+| `handler_section_suppress` | instructions of an except handler that is decompiled ahead of time as a section, so the main pass skips them | `_prescan_try_structure` |
+| `wrapper_body_suppress` | bodies of the compiler's `RERAISE` and with-exit wrappers | `_prescan_try_structure` |
+| `exc_handler_jump_offsets` | jumps that leave a handler | `_emit_empty_try`, `_prescan_try_structure` |
+| `exc_handler_continue_offsets` | ... and those that are a `continue` | `_emit_empty_try`, `_prescan_try_structure` |
+| `exc_cleanup_offsets` | compiler-generated `e = None; del e` | `_record_exc_cleanup_offsets` |
+| `header_indent_by_cleanup` | exception clean-up handler -> indent of its try's `except` headers, so a later clause of the same try reopens at the right level | `_op_push_exc_info` |
+| `handler_return_close` | returns that end an except clause | `_decompile_step`, `_defer_close_to_handler_return`, `_render_handler_section` |
+| `explicit_returns` | `return None` that is in the source | `_defer_close_to_handler_return` |
+| `empty_try_handlers` | try NOP -> handler of a `try: pass` | `_drop_unreachable_handlers`, `_emit_empty_try` |
+| `empty_try_skip` | NOPs of such a statement | `_drop_unreachable_handlers` |
+| `else_starts` | else start offset -> else end offset | `_prescan_try_structure` |
+| `with_exit_suppress_offsets` | with-exit epilogue instructions | `_prescan_try_structure`, `_prescan_with_exits` |
+| `with_exit_suppress` | 3.14: the inlined `__exit__` clean-up instructions of a with statement, up to and including its `POP_TOP` | `_handle_instruction` |
+| `with_body_end` | first protected offset of a with body -> where it ends | `_prescan_with_exits` |
+| `with_exit_owner` | POP_TOP of an inlined __exit__ call -> its with's body start | `_prescan_with_exits` |
+
+#### `EmissionState` (`self.emit`)
+
+Bookkeeping that changes while instructions are replayed.
+
+| Field | Meaning | Written by |
+|---|---|---|
+| `except_header_indents` | indent levels of the except headers being emitted | `_close_except_clause`, `_handle_instruction`, `_op_before_with`, `_op_check_exc_match`, `_op_push_exc_info` |
+| `except_end_offsets` | end offsets of exception regions | `_handle_instruction` |
+| `exc_as_store_offset` | the `as e` STORE to skip | `_handle_instruction`, `_op_check_exc_match`, `_op_store` |
+| `exc_bound_names` | every name bound by `except ... as` | `_handle_instruction`, `_op_check_exc_match` |
+| `deferred_finally_lines` | merge offset -> rendered finally body | `_prescan_try_structure` |
+| `deferred_except_lines` | merge offset -> rendered handler | `_prescan_try_structure` |
+| `pending_finally_merge` | merge offset awaiting emission | `_handle_instruction`, `_prescan_try_structure` |
+| `boolop_pending` | operators opened but not yet joined | `_prescan_value_boolops` |
+| `else_stack_snapshots` | second arm's offset -> stack to restore | `_decompile_step`, `_op_conditional_jump` |
+| `open_with_sentinels` | 3.14: (body end, body start) of open with bodies | `_close_blocks`, `_handle_instruction` |
+| `pei_indents` | `PUSH_EXC_INFO` offset -> indent of the `try:` that precedes it, which its `except` headers use | `_op_nop` |
+| `finally_wrapper_indent` | 3.9: wrapper jump target -> indent at which `finally:` is written when its `POP_BLOCK` is reached | `_handle_instruction` |
+| `kw_names` | keyword names of the call being built | `_op_call`, `_op_kw_names` |
+
+#### `DocState` (`self.doc`)
+
+Where a docstring was found and how many lines it took.
+
+| Field | Meaning | Written by |
+|---|---|---|
+| `doc_load_offset` | LOAD_CONST of a module/class docstring | `decompile` |
+| `class_doc_store_offsets` | STORE_NAME __doc__ of a class docstring | `decompile` |
+| `doc_line_count` | output lines the docstring takes | `_emit_docstring` |
 
 ### The block stack
 
@@ -149,7 +206,8 @@ Things CPython does that the passes undo, each with the test or issue that taugh
 
 | Version | What the compiler does | Where it is handled | Test or issue |
 |---|---|---|---|
-| 3.9–3.10 | exceptions use a block stack (`SETUP_FINALLY`, `POP_BLOCK`), not an exception table | `Decompiler39`; 3.10 handlers are not decompiled yet | [#179](https://github.com/sahebbiswas/pycrefine/issues/179) |
+| 3.9 | exceptions use a block stack (`SETUP_FINALLY`, `POP_BLOCK`), not an exception table | `Decompiler39` | [#179](https://github.com/sahebbiswas/pycrefine/issues/179) |
+| 3.10 | the same block stack, but 3.10 is rebuilt by `Decompiler311Plus`, which has no block-stack handling; its handlers are not decompiled yet and are reported once per code object | `_report_version_gaps` in `Decompiler311Plus` | [#179](https://github.com/sahebbiswas/pycrefine/issues/179) |
 | 3.9–3.10 | `and`/`or` values use `JUMP_IF_*_OR_POP` | `_prescan_value_boolops` | `tests/test_basic.py::TestValueBoolOps` |
 | 3.11+ | exceptions use an exception table; handlers are laid out after the code they guard | `_exception_entries`, `_prescan_try_structure` | `tests/test_exceptions.py` |
 | 3.11+ | a `try` is introduced by `NOP`s; its `pass` body is another `NOP` | `_empty_try_nops` | [#167](https://github.com/sahebbiswas/pycrefine/issues/167), `tests/test_empty_bodies.py` |
@@ -157,7 +215,7 @@ Things CPython does that the passes undo, each with the test or issue that taugh
 | 3.11+ | a `finally` body is emitted once per path (normal exit, each `return`, `break`, `continue`, and the exception path) | `_prescan_try_structure`, `_empty_try_finally_copy` | [#109](https://github.com/sahebbiswas/pycrefine/issues/109), [#186](https://github.com/sahebbiswas/pycrefine/issues/186) |
 | 3.11 | `while cond:` is rotated: the condition is repeated at the bottom | `_prescan_while_loops` | [#105](https://github.com/sahebbiswas/pycrefine/issues/105) |
 | 3.12 | PEP 709 inlines comprehensions into the enclosing function | `_collapse_inlined_comprehensions` | `tests/test_basic.py::TestComprehensions` |
-| 3.12 | a duplicated `return None` follows some returns | `postprocess`, `_explicit_returns` | `tests/test_except_return.py` |
+| 3.12 | a duplicated `return None` follows some returns | `postprocess`, `prescan.explicit_returns` | `tests/test_except_return.py` |
 | 3.13 | `LOAD_FAST_LOAD_FAST` and `STORE_FAST_STORE_FAST` fuse two instructions | `_split_superinstructions`, `_COMPOUND_EXPR_OPS` | [#6](https://github.com/sahebbiswas/pycrefine/issues/6), `tests/test_control_flow.py::TestChainedExpressions` |
 | 3.14 | `with` uses `LOAD_SPECIAL`; `any`/`all`/`tuple` over a generator are inlined behind a guard | `Decompiler314`, `_fold_inlined_builtin_calls` | `tests/test_control_flow.py` |
 | any | `a, *b = x` compiles to `UNPACK_EX`; attribute and subscript targets need a fallback | `_op_unpack_sequence` | [#156](https://github.com/sahebbiswas/pycrefine/issues/156), `tests/test_assignments.py` |

@@ -92,7 +92,7 @@ class TestSliceSubDecompilerState(unittest.TestCase):
         pyc = _compile("x = 1\n")
         try:
             dec = get_decompiler(pyc)
-            self.assertEqual(dec._while_header_targets, {})
+            self.assertEqual(dec.prescan.while_header_targets, {})
         finally:
             os.unlink(pyc)
 

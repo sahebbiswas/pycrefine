@@ -4,7 +4,7 @@ import dis
 import re
 import sys
 import types
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, List, Optional, Set, Tuple
 from .._constants import (
     _AUG_ASSIGN_MAP,
     _FILLER_OPS,
@@ -37,6 +37,7 @@ from ..expr import (StackNULL, UnknownExpression, _BoolExpr, _CollectionAccumSen
                     is_unknown)
 from ..diagnostics import (AMBIGUOUS_EXPRESSION, INTERNAL_ERROR, STACK_UNDERFLOW, UNKNOWN_CONTROL_FLOW,
                            UNSUPPORTED_OPCODE, UNSUPPORTED_VERSION_CONSTRUCT, DecompilationError)
+from .state import DocState, EmissionState, PrescanState
 from ..instructions import (BytecodeInstruction, _const_repr, _copy_signature, _is_anonymous_func_body,
                             _match_finally_copy, _render_func_tuple)
 from ..postprocess import _string_continuation_rows, collapse_chained_comparisons, post_process_source
@@ -126,87 +127,17 @@ class DecompilerGeneric(DecompilerBase):
         """
         Initialize the decompiler state for generic Python bytecode reconstruction.
 
-        Sets up expression stack, docstring tracking, loop and exception bookkeeping, and containers
-        that _prescan_try_structure populates during decompilation.
-
-        Attributes:
-            stack: LIFO of partial expression strings or tuples used by the stack-driven renderer.
-            has_doc (bool): True after emitting a module/function docstring.
-            _while_body_offsets (set): Offsets that mark the start of while-loop bodies to suppress duplicated
-                trailing condition checks emitted by some bytecode patterns (notably 3.11+).
-            _exc_as_store_offset (int): Bytecode offset of a STORE_* that implements `except ... as name`
-                and should be skipped during normal emission (-1 when none).
-            _exc_cleanup_offsets (set): Bytecode offsets of compiler-generated `name = None; del name`
-                cleanup instructions for `except ... as name` bindings.
-            _except_header_indents (List[int]): Stack of indentation levels for except headers.
-            _except_end_offsets (List[int]): Stack of end-offsets for exception regions used to suppress intervening jumps.
-            _enclosing_locals (set): Names bound in enclosing function scopes.
-            _try_nop_offsets (set): Offsets of NOP markers that indicate try-entry points (filled by prescan).
-            _suppress_push_exc_offsets (set): Offsets of PUSH_EXC_INFO instructions to suppress (filled by prescan).
-            _finally_merge_offsets (set): Merge-label offsets where deferred finally/except content must be emitted.
-            _exc_handler_jump_offsets (set): Jump offsets identified as exits from exception handlers.
-            _with_exit_suppress_offsets (set): Offsets of with-context exit epilogue instructions to suppress.
-            _finally_body_suppress (set): Instruction offsets inside finally bodies that should be skipped in main pass.
-            _push_exc_to_finally_merge (dict): Maps PUSH_EXC_INFO offsets to corresponding finally-merge labels.
-            _deferred_finally_lines (dict): Pre-rendered finally-body source lines keyed by merge offset.
-            _deferred_except_lines (dict): Pre-rendered except-handler source lines keyed by merge offset.
-            _handler_section_suppress (set): Offsets of inlined handler instructions to suppress in the primary dispatch.
-            _wrapper_body_suppress (set): Offsets of wrapper/cleanup instruction ranges to suppress (e.g., re-raise wrappers).
-            _pending_finally_merge (Optional[int]): Merge offset currently pending emission, if any.
-            _nop_to_push_exc (dict): Mapping from try-entry NOP offsets to the following PUSH_EXC_INFO offset (populated by prescan).
+        ``stack`` is the LIFO of partial expressions (strings, or tuples for code and
+        function objects) the renderer builds source from. Everything the analysis passes
+        find and everything the replay keeps track of lives in the three state objects
+        declared in ``state.py``: ``prescan``, ``emit`` and ``doc``.
         """
         super().__init__(code_obj, indent_level, beautification_level, target_version, strict)
         self.has_doc = False
-        self._doc_load_offset: Optional[int] = None    # LOAD_CONST of a module/class docstring
-        self._class_doc_store_offsets: dict = {}       # STORE_NAME __doc__ of a class docstring
-        self._doc_line_count = 0                       # output lines the docstring takes
-        self._pei_indents: Dict[int, int] = {}
-        # Tracks offsets of while-loop body starts so we can suppress the
-        # duplicated condition check emitted at the bottom of 3.11+ while loops.
-        self._while_body_offsets: set = set()
-        self._inner_back_jumps: dict = {}  # inner back-jump offset -> offset of the closing back-edge
-        self._while_header_targets: dict = {}  # body_start -> guard_pjif_offset (set by _prescan_while_loops)
-        # Value-context `and`/`or` (see _prescan_value_boolops).
-        self._boolop_or_pop: dict = {}      # 3.9-3.10: offset -> (op, target) for *_OR_POP jumps
-        self._boolop_copy: dict = {}        # 3.12+: COPY offset -> (op, target, resume offset)
-        self._boolop_groups: dict = {}      # 3.9-3.10: plain POP_JUMP offset -> (op, target)
-        self._boolop_pending: list = []     # open operators: [kind, left operand, join offset]
-        self._dup_guard_exits: set = set()  # exit targets of suppressed bottom-of-loop condition copies
-        # Exception-handler bookkeeping
-        self._exc_as_store_offset: int = -1      # offset of 'as e' STORE to skip
-        self._exc_cleanup_offsets: set = set()   # offsets of compiler-generated except-as cleanup ops
-        self._except_header_indents: List[int] = []    # stack of indent levels for except headers
-        self._except_end_offsets: List[int] = []      # stack of end-offsets for exception zones
+        self.prescan = PrescanState()
+        self.emit = EmissionState()
+        self.doc = DocState()
         self._enclosing_locals: set = set()           # names bound in enclosing function scopes
-        self._exc_bound_names: set = set()             # all names ever bound in except-as
-        self._handler_return_close: set = set()        # offsets of returns that end an except clause
-        self._explicit_returns: set = set()            # `return None` offsets known to be in the source
-        self._header_indent_by_cleanup: dict = {}      # handler clean-up target -> except header indent
-        self._empty_try_handlers: dict = {}            # try NOP offset -> handler of a `try: pass`
-        self._empty_try_skip: set = set()              # NOPs of such a try statement
-        # The following sets are populated by _prescan_try_structure() which runs in decompile()
-        self._try_nop_offsets: set = set()
-        self._suppress_push_exc_offsets: set = set()
-        self._finally_merge_offsets: set = set()
-        self._exc_handler_jump_offsets: set = set()
-        self._exc_handler_continue_offsets: set = set()
-        self._with_exit_suppress_offsets: set = set()
-        self._with_body_end: dict = {}  # first protected offset of a with body -> where it ends
-        self._open_with_sentinels: list = []  # 3.14: (body end, body start) of open with bodies
-        self._with_exit_owner: dict = {}  # POP_TOP ending an inlined __exit__ call -> its with's body start
-        self._finally_body_suppress: set = set()
-        self._push_exc_to_finally_merge: dict = {}
-        self._deferred_finally_lines: dict = {}
-        self._deferred_except_lines: dict = {}
-        self._handler_section_suppress: set = set()
-        self._wrapper_body_suppress: set = set()
-        self._pending_finally_merge: Optional[int] = None
-        self._nop_to_push_exc: dict = {}
-        self._nop_to_finally_merge: dict = {}
-        self._else_stack_snapshots: dict = {}  # second arm's offset -> stack to restore there
-        self._finally_from_handler: dict = {}  # 3.9: finally rendered from its handler copy
-        self._kw_names: Tuple[str, ...] = ()
-        self._else_starts: dict = {}  # map of else_start_offset -> else_end_offset
         self._build_dispatch()
 
     # ------------------------------------------------------------------
@@ -282,7 +213,7 @@ class DecompilerGeneric(DecompilerBase):
         """Emit *doc* as the body's first statement; later lines are written as they are."""
         before = len(self.reconstructed)
         self._append_reconstructed(self._docstring_literal(doc))
-        self._doc_line_count = len(self.reconstructed) - before
+        self.doc.doc_line_count = len(self.reconstructed) - before
         self.has_doc = True
 
     def _scope_declarations(self) -> List[str]:
@@ -353,7 +284,7 @@ class DecompilerGeneric(DecompilerBase):
                     and store_i.opname in stores and del_i.opname in deletes):
                 next_op = seq[i + 3].opname if i + 3 < len(seq) else None
                 if seq[i - 1].opname in ("POP_EXCEPT", "POP_BLOCK") or next_op == "RERAISE":
-                    self._exc_cleanup_offsets.update((store_i.offset, del_i.offset))
+                    self.prescan.exc_cleanup_offsets.update((store_i.offset, del_i.offset))
 
     def _emit_scope_declarations(self) -> None:
         """Emit the body's `global`/`nonlocal` statements, after its docstring."""
@@ -428,23 +359,23 @@ class DecompilerGeneric(DecompilerBase):
             if nops is not None and copy is not None:
                 # `try: pass` with `finally` is the finally body run once, and its
                 # `except` clauses can never run; the body is already in the stream.
-                self._empty_try_skip.update(instrs[k].offset for k in nops)
+                self.prescan.empty_try_skip.update(instrs[k].offset for k in nops)
                 drop.update(region)
                 drop.update(copy)
                 continue
             if nops is not None:
                 anchor = instrs[nops[0]].offset
-                self._empty_try_skip.update(instrs[k].offset for k in nops)
+                self.prescan.empty_try_skip.update(instrs[k].offset for k in nops)
                 drop.update(region)
             elif any(instrs[k].opname.startswith(_NAME_BINDING_OPS) for k in region):
                 # The region's first instruction stays in the stream as the anchor.
                 anchor = instrs[region[0]].offset
-                self._empty_try_skip.add(anchor)
+                self.prescan.empty_try_skip.add(anchor)
                 drop.update(region[1:])
             else:
                 drop.update(region)
                 continue
-            self._empty_try_handlers[anchor] = [instrs[k] for k in region]
+            self.prescan.empty_try_handlers[anchor] = [instrs[k] for k in region]
         self.instructions = [x for k, x in enumerate(instrs) if k not in drop]
 
     _EXCEPT_TYPE_OPS = ("LOAD_GLOBAL", "LOAD_NAME", "LOAD_FAST", "LOAD_DEREF", "LOAD_ATTR", "LOAD_CONST",
@@ -511,7 +442,7 @@ class DecompilerGeneric(DecompilerBase):
 
     def _emit_empty_try(self, offset: int) -> None:
         """Emit ``try: pass`` and the clauses of its unreachable handler."""
-        region = self._empty_try_handlers.pop(offset)
+        region = self.prescan.empty_try_handlers.pop(offset)
         # The region left the instruction stream before the prescans ran: mark the
         # handlers' jumps back to a loop head (`except E: continue`) here.
         loop_heads = {x.offset for x in self.instructions if x.opname == "FOR_ITER"}
@@ -519,8 +450,8 @@ class DecompilerGeneric(DecompilerBase):
         for k, ins in enumerate(region):
             if (k and region[k - 1].opname == "POP_EXCEPT" and ins.opname.startswith("JUMP")
                     and self._get_jump_target(ins) in loop_heads):
-                self._exc_handler_jump_offsets.add(ins.offset)
-                self._exc_handler_continue_offsets.add(ins.offset)
+                self.prescan.exc_handler_jump_offsets.add(ins.offset)
+                self.prescan.exc_handler_continue_offsets.add(ins.offset)
         self._append_reconstructed("try:")
         self.indent_level += 1
         self._append_reconstructed("pass")
@@ -586,7 +517,7 @@ class DecompilerGeneric(DecompilerBase):
         self._drop_unreachable_handlers()
         self.pc = 0
         self.blocks = []
-        self._while_header_targets = {}
+        self.prescan.while_header_targets = {}
         self._prescan_while_loops()
         self._prescan_try_structure()
         self._prescan_with_exits()
@@ -597,7 +528,7 @@ class DecompilerGeneric(DecompilerBase):
         # Docstring (#166). A function's lives in its constants (no instruction loads
         # it); a module's or class's is the first statement, stored to __doc__.
         self.has_doc = False
-        self._doc_load_offset = None
+        self.doc.doc_load_offset = None
         doc = self._function_docstring()
         if doc is None:
             first = next((ins for ins in self.instructions
@@ -607,12 +538,12 @@ class DecompilerGeneric(DecompilerBase):
                 nxt = self.instructions[idx + 1] if idx + 1 < len(self.instructions) else None
                 if nxt is not None and nxt.opname == "STORE_NAME" and nxt.argval == "__doc__":
                     doc = first.argval
-                    self._doc_load_offset = first.offset
+                    self.doc.doc_load_offset = first.offset
         if doc is not None:
             self._emit_docstring(doc)
             if self.indent_level == 0:
                 self.reconstructed.append("")
-        self._class_doc_store_offsets = self._find_class_docstring() if doc is None else {}
+        self.doc.class_doc_store_offsets = self._find_class_docstring() if doc is None else {}
 
         self._emit_scope_declarations()
 
@@ -639,7 +570,7 @@ class DecompilerGeneric(DecompilerBase):
                     # Found a trailing return None at root level.
                     # We can safely remove it if there's other code.
                     # Anything besides the docstring (which may span several lines)?
-                    doc_lines = self._doc_line_count if self.has_doc else 0
+                    doc_lines = self.doc.doc_line_count if self.has_doc else 0
                     has_others = any(self.reconstructed[i].strip() for i in range(doc_lines, last_idx))
 
                     if has_others or getattr(self, "has_doc", False):
@@ -661,19 +592,19 @@ class DecompilerGeneric(DecompilerBase):
         self._current_instr = instr
         # Close any blocks whose end offset we have passed
         self._close_blocks(instr.offset)
-        snapshot = self._else_stack_snapshots.pop(instr.offset, None)
+        snapshot = self.emit.else_stack_snapshots.pop(instr.offset, None)
         if snapshot is not None:
             self.stack = list(snapshot)
         if self._boolop_step(instr):
             return
-        if instr.offset in self._empty_try_skip:
-            if instr.offset in self._empty_try_handlers:
+        if instr.offset in self.prescan.empty_try_skip:
+            if instr.offset in self.prescan.empty_try_handlers:
                 self._emit_empty_try(instr.offset)
             return
         self._handle_instruction(instr)
-        if instr.offset in self._handler_return_close:
+        if instr.offset in self.prescan.handler_return_close:
             # The `return` that ends an except clause has been emitted inside it.
-            self._handler_return_close.discard(instr.offset)
+            self.prescan.handler_return_close.discard(instr.offset)
             self._close_except_clause()
 
     def _close_blocks(self, offset: int):
@@ -732,17 +663,17 @@ class DecompilerGeneric(DecompilerBase):
                 # If this try_body has a deferred except-only handler (loop case),
                 # emit it immediately — before outer loop blocks also pop at same offset.
                 if block_type in ("try_body", "exc_cleanup"):
-                    exc_only = getattr(self, "_except_only_merge_offsets", set())
+                    exc_only = self.prescan.except_only_merge_offsets
                     if block_end in exc_only:
                         exc_only.discard(block_end)
                         # Emitted here; the merge-label hook must not emit it again.
-                        getattr(self, "_finally_merge_offsets", set()).discard(block_end)
+                        self.prescan.finally_merge_offsets.discard(block_end)
                         self._emit_deferred_finally(block_end, self.indent_level)
-                    elif (block_end in getattr(self, "_finally_merge_offsets", ())
+                    elif (block_end in self.prescan.finally_merge_offsets
                           and self.blocks and offset >= self.blocks[-1][0]):
                         # A try body that always raises or exits ends where an enclosing
                         # block (a loop) ends too: emit its finally before that one closes.
-                        self._finally_merge_offsets.discard(block_end)
+                        self.prescan.finally_merge_offsets.discard(block_end)
                         self._emit_deferred_finally(block_end, self.indent_level)
 
     # ------------------------------------------------------------------
@@ -912,8 +843,8 @@ class DecompilerGeneric(DecompilerBase):
         Only high-level, reconstructible ternary patterns are recorded; instructions not matched remain unchanged.
         """
 
-        self._ternary_jumps: dict = {}
-        self._ternary_suppress: set = set()
+        self.prescan.ternary_jumps = {}
+        self.prescan.ternary_suppress = set()
 
         offset_to_idx = {ins.offset: i for i, ins in enumerate(self.instructions)}
 
@@ -941,7 +872,7 @@ class DecompilerGeneric(DecompilerBase):
         for idx, ins in enumerate(self.instructions):
             if not self._is_compound_cjump(ins.opname):
                 continue
-            if ins.offset in self._ternary_suppress:
+            if ins.offset in self.prescan.ternary_suppress:
                 continue  # an and/or inside a branch of a conditional already found
             jump_target = self._get_jump_target(ins)
             t_idx = offset_to_idx.get(jump_target)
@@ -1042,11 +973,11 @@ class DecompilerGeneric(DecompilerBase):
                             actual_then_expr.pop()
                             else_instrs.pop()
 
-                    self._ternary_jumps[ins.offset] = store_name, actual_then_expr, else_instrs, is_true, aug_op
+                    self.prescan.ternary_jumps[ins.offset] = store_name, actual_then_expr, else_instrs, is_true, aug_op
                     for x in then_raw:
-                        self._ternary_suppress.add(x.offset)
+                        self.prescan.ternary_suppress.add(x.offset)
                     for x in else_instrs:
-                        self._ternary_suppress.add(x.offset)
+                        self.prescan.ternary_suppress.add(x.offset)
                     continue
 
                 # ── B1: no then-STORE before the jump ────────────────────
@@ -1102,11 +1033,11 @@ class DecompilerGeneric(DecompilerBase):
                         if is_stacksink:
                             is_true_ss = "IF_TRUE" in ins.opname
                             # store_name="" signals a stacksink (push to stack, no explicit store)
-                            self._ternary_jumps[ins.offset] = "", before_jf, else_instrs_ss, is_true_ss, None
+                            self.prescan.ternary_jumps[ins.offset] = "", before_jf, else_instrs_ss, is_true_ss, None
                             for x in then_raw:
-                                self._ternary_suppress.add(x.offset)
+                                self.prescan.ternary_suppress.add(x.offset)
                             for x in else_instrs_ss:
-                                self._ternary_suppress.add(x.offset)
+                                self.prescan.ternary_suppress.add(x.offset)
                             # Do NOT suppress the join-point op itself
                             continue
 
@@ -1151,11 +1082,11 @@ class DecompilerGeneric(DecompilerBase):
                         before_jf.pop()
                         else_instrs.pop()
 
-                self._ternary_jumps[ins.offset] = store_name, before_jf, else_instrs, is_true, aug_op
+                self.prescan.ternary_jumps[ins.offset] = store_name, before_jf, else_instrs, is_true, aug_op
                 for x in then_raw:
-                    self._ternary_suppress.add(x.offset)
+                    self.prescan.ternary_suppress.add(x.offset)
                 for x in else_instrs:
-                    self._ternary_suppress.add(x.offset)
+                    self.prescan.ternary_suppress.add(x.offset)
                 continue  # done with this POP_JUMP_IF
 
             # ── Pattern A: no JUMP_FORWARD ────────────────────────────────
@@ -1216,11 +1147,11 @@ class DecompilerGeneric(DecompilerBase):
                     before_store.pop()
                     else_instrs.pop()
 
-            self._ternary_jumps[ins.offset] = store_name, before_store, else_instrs, is_true, aug_op
+            self.prescan.ternary_jumps[ins.offset] = store_name, before_store, else_instrs, is_true, aug_op
             for x in then_raw:
-                self._ternary_suppress.add(x.offset)
+                self.prescan.ternary_suppress.add(x.offset)
             for x in else_instrs:
-                self._ternary_suppress.add(x.offset)
+                self.prescan.ternary_suppress.add(x.offset)
 
     def _has_newline_const(self, instrs: List[BytecodeInstruction]) -> bool:
         """Heuristic: Return True if any instruction loads a string constant containing a literal newline."""
@@ -1293,15 +1224,15 @@ class DecompilerGeneric(DecompilerBase):
            ``_compound_suppress`` (so they are skipped during normal dispatch).
         """
 
-        self._compound_cond_map: dict = {}   # controlling_offset -> combined_cond_str
-        self._compound_suppress: set = set()  # instruction offsets to skip
+        self.prescan.compound_cond_map = {}   # controlling_offset -> combined_cond_str
+        self.prescan.compound_suppress = set()  # instruction offsets to skip
 
         instrs = self.instructions
         n = len(instrs)
         offset_to_idx = {ins.offset: i for i, ins in enumerate(instrs)}
 
         # Ternary jumps must not be touched here (they are pure expression nodes)
-        ternary_offsets = set(getattr(self, "_ternary_jumps", {}).keys())
+        ternary_offsets = set(self.prescan.ternary_jumps.keys())
 
         i = 0
         while i < n:
@@ -1542,10 +1473,10 @@ class DecompilerGeneric(DecompilerBase):
             # Register: controlling jump gets combined cond; all others are suppressed.
             # -----------------------------------------------------------
             controlling_idx, controlling_instr, _, _ = group[-1]
-            self._compound_cond_map[controlling_instr.offset] = combined
+            self.prescan.compound_cond_map[controlling_instr.offset] = combined
 
             for _, ginstr, _, _ in group[:-1]:
-                self._compound_suppress.add(ginstr.offset)
+                self.prescan.compound_suppress.add(ginstr.offset)
 
             i = controlling_idx + 1
 
@@ -2299,10 +2230,10 @@ class DecompilerGeneric(DecompilerBase):
           _while_header_targets: maps body_start -> loop-guard POP_JUMP offset
                                  (so the POP_JUMP at that offset becomes the while header)
         """
-        self._while_header_targets: dict = {}  # body_start -> guard_pjif_offset
-        self._while_true_ends: set = set()     # end offsets of while-True (NOP-driven) loops
-        self._inner_back_jumps = self._find_inner_back_jumps()
-        self._dup_guard_exits = set()
+        self.prescan.while_header_targets = {}  # body_start -> guard_pjif_offset
+        self.prescan.while_true_ends = set()     # end offsets of while-True (NOP-driven) loops
+        self.prescan.inner_back_jumps = self._find_inner_back_jumps()
+        self.prescan.dup_guard_exits = set()
 
         for jb_idx, jb in enumerate(self.instructions):
             if not self._is_backward_instruction(jb):
@@ -2314,7 +2245,7 @@ class DecompilerGeneric(DecompilerBase):
                 continue
             # A `continue`, or the end of an if/else branch threaded to the loop
             # head, is not the loop's own back-edge and defines no guard.
-            if jb.offset in self._inner_back_jumps:
+            if jb.offset in self.prescan.inner_back_jumps:
                 continue
             body_start = self._get_jump_target(jb)
 
@@ -2407,15 +2338,15 @@ class DecompilerGeneric(DecompilerBase):
                     guard_dist = dist
                     guard_offset = ins.offset
             if guard_offset >= 0:
-                self._while_header_targets[body_start] = guard_offset
+                self.prescan.while_header_targets[body_start] = guard_offset
                 # 3.12/3.13 copy the loop condition to the bottom of the body.
                 # Suppress exactly that copy's exit jumps, never body-level ifs.
                 dup_jumps = self._dup_guard_jump_offsets(jb)
                 dup_jumps.discard(guard_offset)
-                self._while_body_offsets.update(dup_jumps)
+                self.prescan.while_body_offsets.update(dup_jumps)
                 for ins in self.instructions:
                     if ins.offset in dup_jumps:
-                        self._dup_guard_exits.add(self._get_jump_target(ins))
+                        self.prescan.dup_guard_exits.add(self._get_jump_target(ins))
             else:
                 # while-True pattern: no conventional guard found, but the
                 # back-edge target is a known jump target (loop start).
@@ -2428,7 +2359,7 @@ class DecompilerGeneric(DecompilerBase):
                 # stepping, not an unconditional while-True loop body.
                 if (body_instr and body_instr.is_jump_target
                         and body_instr.opname not in _TRY_LOOP_HEADS):
-                    self._while_header_targets[body_start] = -1
+                    self.prescan.while_header_targets[body_start] = -1
 
     def _has_body_store_between(self, start: int, end: int) -> bool:
         """
@@ -2530,7 +2461,7 @@ class DecompilerGeneric(DecompilerBase):
         instrs = self.instructions
         last = None
         for k, ins in enumerate(instrs):
-            if (self._is_backward_instruction(ins) and ins.offset not in self._inner_back_jumps
+            if (self._is_backward_instruction(ins) and ins.offset not in self.prescan.inner_back_jumps
                     and self._get_jump_target(ins) == body_start):
                 last = k
         if last is None:
@@ -2734,7 +2665,7 @@ class DecompilerGeneric(DecompilerBase):
 
         The routine uses available exception-table data when present and falls back to heuristics on older hosts to identify these regions.
         """
-        self._for_iter_targets = {
+        self.prescan.for_iter_targets = {
             self._get_jump_target(fi) for fi in self.instructions if fi.opname == "FOR_ITER"
         }
         
@@ -2795,13 +2726,13 @@ class DecompilerGeneric(DecompilerBase):
             _reraise_wrapper_targets = set()
 
         # ── 1. Classify PUSH_EXC_INFO offsets ───────────────────────────
-        self._suppress_push_exc_offsets: set = set()
+        self.prescan.suppress_push_exc_offsets = set()
         for ins in instrs:
             if ins.opname != "PUSH_EXC_INFO":
                 continue
             if ins.offset in _reraise_wrapper_targets:
                 # Re-raise wrapper or with-exit handler — suppress silently
-                self._suppress_push_exc_offsets.add(ins.offset)
+                self.prescan.suppress_push_exc_offsets.add(ins.offset)
             elif ins.offset not in _except_entry_targets:
                 # Not in either set (no exception_entries available) — use heuristic:
                 # peek at what follows; if it's a LOAD + no CHECK_EXC_MATCH, suppress.
@@ -2813,7 +2744,7 @@ class DecompilerGeneric(DecompilerBase):
                     if look < n:
                         # WITH_EXCEPT_START → with-exit handler
                         if instrs[look].opname == "WITH_EXCEPT_START":
-                            self._suppress_push_exc_offsets.add(ins.offset)
+                            self.prescan.suppress_push_exc_offsets.add(ins.offset)
                         # LOAD_GLOBAL + no CHECK_EXC_MATCH within 3 steps → re-raise wrapper
                         elif instrs[look].opname in _TRY_LOAD_OPS:
                             look2 = look + 1
@@ -2826,10 +2757,10 @@ class DecompilerGeneric(DecompilerBase):
                                     break
                                 look2 += 1
                             if not found_cem:
-                                self._suppress_push_exc_offsets.add(ins.offset)
+                                self.prescan.suppress_push_exc_offsets.add(ins.offset)
 
         # ── 2. Classify NOP instructions as try-entry vs. epilogue ──────
-        self._try_nop_offsets: set = set()
+        self.prescan.try_nop_offsets = set()
         for ins in instrs:
             if ins.opname != "NOP" or ins.offset == 2:
                 continue
@@ -2838,7 +2769,7 @@ class DecompilerGeneric(DecompilerBase):
             next_off = ins.offset + 2
             if _try_covered_starts:
                 if next_off in _try_covered_starts:
-                    self._try_nop_offsets.add(ins.offset)
+                    self.prescan.try_nop_offsets.add(ins.offset)
             else:
                 # Fallback heuristic: NOP is a try-entry if the next instruction
                 # is not LOAD_CONST None (the __exit__ epilogue).
@@ -2848,7 +2779,7 @@ class DecompilerGeneric(DecompilerBase):
                     if not (next_ins.opname == "LOAD_CONST" and next_ins.argval is None):
                         if any(ins2.opname == "PUSH_EXC_INFO" and ins2.offset > ins.offset
                                for ins2 in instrs):
-                            self._try_nop_offsets.add(ins.offset)
+                            self.prescan.try_nop_offsets.add(ins.offset)
 
         # ── 3. Find finally-merge labels ─────────────────────────────────
         # A finally-merge label is an instruction offset O such that:
@@ -2858,7 +2789,7 @@ class DecompilerGeneric(DecompilerBase):
         #   - O is NOT a PUSH_EXC_INFO offset
         #   - O is NOT a FOR_ITER instruction (loop head, not a merge point)
         # The code at O..next_try_nop is the inlined finally body.
-        self._finally_merge_offsets: set = set()
+        self.prescan.finally_merge_offsets = set()
         push_exc_offs = {ins.offset for ins in instrs if ins.opname == "PUSH_EXC_INFO"}
         # Build offset-to-index map for quick look-up
         off2idx = {ins.offset: i for i, ins in enumerate(instrs)}
@@ -2891,16 +2822,14 @@ class DecompilerGeneric(DecompilerBase):
             if count >= 1 and target_off not in push_exc_offs:
                 t_ins = next((ins for ins in instrs if ins.offset == target_off), None)
                 if t_ins and t_ins.is_jump_target and t_ins.opname not in _TRY_LOOP_HEADS:
-                    self._finally_merge_offsets.add(target_off)
+                    self.prescan.finally_merge_offsets.add(target_off)
                     if not self._has_exceptional_finally_copy(target_off):
                         # Handlers return to ordinary code after the `try`: there is
                         # no `finally`, only the handlers to place before that code.
-                        if not hasattr(self, "_except_only_merge_offsets"):
-                            self._except_only_merge_offsets = set()
-                        self._except_only_merge_offsets.add(target_off)
+                        self.prescan.except_only_merge_offsets.add(target_off)
 
         # ── 4. Classify JUMP_BACKWARD as exc-handler exits ───────────────
-        self._exc_handler_jump_offsets: set = set()
+        self.prescan.exc_handler_jump_offsets = set()
         for jb in instrs:
             if not self._is_backward_instruction(jb):
                 continue
@@ -2918,16 +2847,13 @@ class DecompilerGeneric(DecompilerBase):
                 continue
             jb_idx = off2idx.get(jb.offset, -1)
             if self._handler_exit_before(jb_idx) and not _is_with_cleanup_jump(instrs, jb_idx):
-                self._exc_handler_jump_offsets.add(jb.offset)
-                if not hasattr(self, "_exc_handler_continue_offsets"):
-                    self._exc_handler_continue_offsets = set()
+                self.prescan.exc_handler_jump_offsets.add(jb.offset)
                 # A jump is a continue if its target is a loop head (FOR_ITER or while header)
                 loop_heads = {ins.offset for ins in instrs if ins.opname == "FOR_ITER"}
-                if hasattr(self, "_while_header_targets"):
-                    loop_heads.update(self._while_header_targets.values())
+                loop_heads.update(self.prescan.while_header_targets.values())
 
                 if target in loop_heads:
-                    self._exc_handler_continue_offsets.add(jb.offset)
+                    self.prescan.exc_handler_continue_offsets.add(jb.offset)
 
         # ── 6. Build deferred-finally mappings ───────────────────────────
         # For try/except/finally patterns, the inlined finally code sits
@@ -2937,20 +2863,20 @@ class DecompilerGeneric(DecompilerBase):
         # suppress their instructions from normal dispatch, and emit them in the
         # correct source order (handlers → finally) when we encounter the
         # finally-merge label.
-        self._push_exc_to_finally_merge: dict = {}   # push_exc_offset → merge_offset
-        self._finally_body_suppress: set = set()     # inlined finally code to suppress
-        self._deferred_finally_lines: dict = {}      # merge_offset → rendered finally lines
-        self._deferred_except_lines: dict = {}       # merge_offset → rendered handler lines
-        self._handler_section_suppress: set = set()  # except handler instructions to suppress
-        self._wrapper_body_suppress: set = set()     # re-raise/with-exit wrapper instructions
-        self._pending_finally_merge: Optional[int] = None
+        self.prescan.push_exc_to_finally_merge = {}   # merge_offset → sorted handler entry points
+        self.prescan.finally_body_suppress = set()     # inlined finally code to suppress
+        self.emit.deferred_finally_lines = {}      # merge_offset → rendered finally lines
+        self.emit.deferred_except_lines = {}       # merge_offset → rendered handler lines
+        self.prescan.handler_section_suppress = set()  # except handler instructions to suppress
+        self.prescan.wrapper_body_suppress = set()     # re-raise/with-exit wrapper instructions
+        self.emit.pending_finally_merge = None
 
         _exc_entries = self._exception_entries() or []
 
         real_push_exc = {
             ins.offset for ins in instrs
             if ins.opname == "PUSH_EXC_INFO"
-            and ins.offset not in self._suppress_push_exc_offsets
+            and ins.offset not in self.prescan.suppress_push_exc_offsets
         }
 
         # A `continue`/`break` in a try body is a jump the exception table leaves
@@ -2967,10 +2893,10 @@ class DecompilerGeneric(DecompilerBase):
                 merge = None
                 body_end = _body_end_by_target[e.target]
                 after_body = self._merge_after_nops(body_end)
-                if body_end in self._finally_merge_offsets:
+                if body_end in self.prescan.finally_merge_offsets:
                     # Already a known finally-merge label.
                     merge = body_end
-                elif e.end in self._finally_merge_offsets:
+                elif e.end in self.prescan.finally_merge_offsets:
                     merge = e.end
                 elif after_body is not None:
                     # Only the no-op that marks the end of the try body lies in between
@@ -2992,18 +2918,16 @@ class DecompilerGeneric(DecompilerBase):
                                 merge = t
                 if merge is not None:
                     target = e.target
-                    if merge not in self._push_exc_to_finally_merge:
-                        self._push_exc_to_finally_merge[merge] = []
-                    if target not in self._push_exc_to_finally_merge[merge]:
-                        self._push_exc_to_finally_merge[merge].append(target)
-                        self._push_exc_to_finally_merge[merge].sort()
-                    if merge not in self._finally_merge_offsets:
-                        if not hasattr(self, "_except_only_merge_offsets"):
-                            self._except_only_merge_offsets = set()
-                        self._except_only_merge_offsets.add(merge)
+                    if merge not in self.prescan.push_exc_to_finally_merge:
+                        self.prescan.push_exc_to_finally_merge[merge] = []
+                    if target not in self.prescan.push_exc_to_finally_merge[merge]:
+                        self.prescan.push_exc_to_finally_merge[merge].append(target)
+                        self.prescan.push_exc_to_finally_merge[merge].sort()
+                    if merge not in self.prescan.finally_merge_offsets:
+                        self.prescan.except_only_merge_offsets.add(merge)
 
         # ── Suppress full bodies of re-raise wrappers and with-exit handler
-        for pei_off in sorted(self._suppress_push_exc_offsets):
+        for pei_off in sorted(self.prescan.suppress_push_exc_offsets):
             pei_idx = next((i for i, ins in enumerate(instrs) if ins.offset == pei_off), None)
             if pei_idx is None:
                 continue
@@ -3015,11 +2939,11 @@ class DecompilerGeneric(DecompilerBase):
                     break
             for ins in instrs:
                 if pei_off <= ins.offset < end_off:
-                    self._wrapper_body_suppress.add(ins.offset)
+                    self.prescan.wrapper_body_suppress.add(ins.offset)
 
         # ── Find end of each handler section and pre-decompile it
         sorted_real_pei = sorted(real_push_exc)
-        for merge_off, targets in self._push_exc_to_finally_merge.items():
+        for merge_off, targets in self.prescan.push_exc_to_finally_merge.items():
             for push_off in targets:
                 # Handler section starts at push_off, ends at status of either the
                 # next real PUSH_EXC_INFO or the nearest suppress-wrapper PUSH_EXC_INFO
@@ -3033,25 +2957,25 @@ class DecompilerGeneric(DecompilerBase):
                 handler_instrs = [
                     ins for ins in instrs
                     if push_off <= ins.offset < handler_end
-                    and ins.offset not in self._finally_body_suppress
+                    and ins.offset not in self.prescan.finally_body_suppress
                 ]
                 for ins in handler_instrs:
-                    self._handler_section_suppress.add(ins.offset)
-                    self._finally_body_suppress.discard(ins.offset)  # don't double-suppress
+                    self.prescan.handler_section_suppress.add(ins.offset)
+                    self.prescan.finally_body_suppress.discard(ins.offset)  # don't double-suppress
 
                 # Pre-decompile the handler section
                 handler_lines = self._render_handler_section(handler_instrs, merge_off)
-                if merge_off not in self._deferred_except_lines:
-                    self._deferred_except_lines[merge_off] = []
-                self._deferred_except_lines[merge_off].extend(handler_lines)
+                if merge_off not in self.emit.deferred_except_lines:
+                    self.emit.deferred_except_lines[merge_off] = []
+                self.emit.deferred_except_lines[merge_off].extend(handler_lines)
 
         # ── Find and suppress finally body instructions
-        for merge_off, targets in self._push_exc_to_finally_merge.items():
-            if merge_off in getattr(self, "_except_only_merge_offsets", ()):
+        for merge_off, targets in self.prescan.push_exc_to_finally_merge.items():
+            if merge_off in self.prescan.except_only_merge_offsets:
                 continue
             # This try's finally handler is the first re-raise wrapper after its except
             # handlers (3.11+ lays them out in that order).
-            owner = min((w for w in self._suppress_push_exc_offsets if w > max(targets)), default=None)
+            owner = min((w for w in self.prescan.suppress_push_exc_offsets if w > max(targets)), default=None)
             matched = self._match_finally_wrapper(merge_off, owner)
             body_end = None if matched is None else matched[0]
             if matched is not None:
@@ -3062,7 +2986,7 @@ class DecompilerGeneric(DecompilerBase):
             if body_end is None:
                 for ins in instrs:
                     if ins.offset > merge_off and ins.opname == "NOP":
-                        if ins.offset in self._try_nop_offsets or ins.offset == 2:
+                        if ins.offset in self.prescan.try_nop_offsets or ins.offset == 2:
                             body_end = ins.offset
                             break
             if body_end is None:
@@ -3077,21 +3001,21 @@ class DecompilerGeneric(DecompilerBase):
                 continue
             for ins in instrs:
                 if merge_off <= ins.offset < body_end:
-                    self._finally_body_suppress.add(ins.offset)
+                    self.prescan.finally_body_suppress.add(ins.offset)
             sub_instrs = [ins for ins in instrs if merge_off <= ins.offset < body_end]
             lines = self._render_finally_body(sub_instrs) or ["pass"]
-            self._deferred_finally_lines[merge_off] = lines
+            self.emit.deferred_finally_lines[merge_off] = lines
 
         # ── 7. Build nop_to_push_exc: maps each try-entry NOP to the correct
         #       PUSH_EXC_INFO that handles its try body, using the exception table.
-        self._nop_to_push_exc: dict = {}  # nop_offset → push_exc_info_offset
-        self._nop_to_finally_merge: dict = {}  # nop_offset → finally start, for try/finally without except
+        self.prescan.nop_to_push_exc = {}  # nop_offset → push_exc_info_offset
+        self.prescan.nop_to_finally_merge = {}  # nop_offset → finally start, for try/finally without except
         _exc_entries_for_nop = self._exception_entries() or []
-        for nop_off in list(self._try_nop_offsets) + ([2] if any(ins.offset == 2 and ins.opname == "NOP" for ins in instrs) else []):
+        for nop_off in list(self.prescan.try_nop_offsets) + ([2] if any(ins.offset == 2 and ins.opname == "NOP" for ins in instrs) else []):
             body_start = nop_off + 2  # first instruction of the try body
             for e in _exc_entries_for_nop:
                 if e.start <= body_start < e.end and e.target in real_push_exc:
-                    self._nop_to_push_exc[nop_off] = e.target
+                    self.prescan.nop_to_push_exc[nop_off] = e.target
                     break
 
         # ── 7b. Handle try/finally without except ───────────────────────
@@ -3102,13 +3026,13 @@ class DecompilerGeneric(DecompilerBase):
         # Pattern: NOP → try body → finally body → RETURN_CONST → suppressed PEI
         # Detect by: NOP is not in _nop_to_push_exc, but there IS a suppressed
         # PUSH_EXC_INFO whose exception-table entry covers [nop+2, try_body_end).
-        for nop_off in list(self._try_nop_offsets) + ([2] if any(ins.offset == 2 and ins.opname == "NOP" for ins in instrs) else []):
-            if nop_off in self._nop_to_push_exc:
+        for nop_off in list(self.prescan.try_nop_offsets) + ([2] if any(ins.offset == 2 and ins.opname == "NOP" for ins in instrs) else []):
+            if nop_off in self.prescan.nop_to_push_exc:
                 continue  # already handled
             body_start = nop_off + 2
             # Find the suppressed PEI that handles this try body
             for e in _exc_entries_for_nop:
-                if e.start <= body_start < e.end and e.target in self._suppress_push_exc_offsets:
+                if e.start <= body_start < e.end and e.target in self.prescan.suppress_push_exc_offsets:
                     # This NOP has only a finally (no except).
                     # Find the try body end = start of finally body = e.end
                     # A continue/break/return in the body splits the protected range, so
@@ -3156,7 +3080,7 @@ class DecompilerGeneric(DecompilerBase):
                     # Suppress the finally body instructions
                     for ins in instrs:
                         if finally_start <= ins.offset < finally_end:
-                            self._finally_body_suppress.add(ins.offset)
+                            self.prescan.finally_body_suppress.add(ins.offset)
                     # Pre-render the finally body
                     sub_instrs = [ins for ins in instrs if finally_start <= ins.offset < finally_end]
                     if not sub_instrs:
@@ -3164,21 +3088,21 @@ class DecompilerGeneric(DecompilerBase):
                         # finally body; the copy in the exception handler is the only one.
                         sub_instrs = self._handler_copy_instrs(e.target)
                     lines = self._render_finally_body(sub_instrs) or ["pass"]
-                    self._deferred_finally_lines[finally_start] = lines
+                    self.emit.deferred_finally_lines[finally_start] = lines
                     # The try body ends where the finally body starts; _op_nop needs it
                     # to open and close the `try:` block (there is no handler to ask).
-                    self._nop_to_finally_merge[nop_off] = finally_start
+                    self.prescan.nop_to_finally_merge[nop_off] = finally_start
                     # Record this as a finally-merge point (even though there's no
                     # JUMP_BACKWARD — the inline finally body entry IS the merge label)
-                    self._finally_merge_offsets.add(finally_start)
+                    self.prescan.finally_merge_offsets.add(finally_start)
                     # The "push_exc_to_finally_merge" dict maps None here
                     # (no real PUSH_EXC_INFO), so no handler lines to pre-decompile.
-                    self._deferred_except_lines[finally_start] = []
+                    self.emit.deferred_except_lines[finally_start] = []
                     break
         # The normal-exit epilogue for a `with` block is:
         #   LOAD_CONST None; LOAD_CONST None; LOAD_CONST None; CALL 2; POP_TOP
         # Suppress the LOAD_CONSTs and the CALL to prevent ``None(None, None)``.
-        self._with_exit_suppress_offsets: set = set()
+        self.prescan.with_exit_suppress_offsets = set()
         for i, ins in enumerate(instrs):
             if ins.opname != "BEFORE_WITH":
                 continue
@@ -3200,7 +3124,7 @@ class DecompilerGeneric(DecompilerBase):
                             if c < n and instrs[c].opname == "CALL":
                                 for off in (instrs[j].offset, instrs[k].offset,
                                             instrs[m].offset, instrs[c].offset):
-                                    self._with_exit_suppress_offsets.add(off)
+                                    self.prescan.with_exit_suppress_offsets.add(off)
                                 break
                     break
 
@@ -3235,8 +3159,8 @@ class DecompilerGeneric(DecompilerBase):
         when that one carries a return value, at the handler, so the `return` stays in
         the block (``_with_body_end``, keyed by the first offset the handler protects).
         """
-        self._with_body_end = {}
-        self._with_exit_owner = {}
+        self.prescan.with_body_end = {}
+        self.prescan.with_exit_owner = {}
         instrs = self.instructions
         entries = self._exception_entries()
         if not entries:
@@ -3282,23 +3206,23 @@ class DecompilerGeneric(DecompilerBase):
                 if seq_end is None or not self._follows_range_end(k, range_ends):
                     k += 1
                     continue
-                self._with_exit_suppress_offsets.update(x.offset for x in instrs[k:seq_end])
+                self.prescan.with_exit_suppress_offsets.update(x.offset for x in instrs[k:seq_end])
                 # In nested with blocks the outer body's range covers the inner exits
                 # too: an exit belongs to the innermost block (the latest body start).
                 exit_off = instrs[seq_end - 1].offset
-                if self._with_exit_owner.get(exit_off, -1) < body_start:
-                    self._with_exit_owner[exit_off] = body_start
+                if self.prescan.with_exit_owner.get(exit_off, -1) < body_start:
+                    self.prescan.with_exit_owner[exit_off] = body_start
                 if k in normal_at and instrs[k].offset < cold:
                     last = (k, seq_end)
                 k = seq_end
             if last is None:
                 # The body never exits normally (it always raises, or every exit is an
                 # early one): it ends with its last protected code.
-                self._with_body_end[body_start] = limit
+                self.prescan.with_body_end[body_start] = limit
                 continue
             carries_value = instrs[last[0]].opname == "SWAP"
             end = handler if carries_value or last[1] >= len(instrs) else instrs[last[1]].offset
-            self._with_body_end[body_start] = end
+            self.prescan.with_body_end[body_start] = end
 
     def _skip_nops(self, k: int) -> int:
         """The index of the first instruction at or after *k* that is not a NOP/CACHE."""
@@ -3494,7 +3418,7 @@ class DecompilerGeneric(DecompilerBase):
             if not is_copy:
                 continue
             for k in range(start, end):
-                self._finally_body_suppress.add(self.instructions[k].offset)
+                self.prescan.finally_body_suppress.add(self.instructions[k].offset)
 
     def _merge_after_nops(self, offset: int) -> Optional[int]:
         """
@@ -3503,7 +3427,7 @@ class DecompilerGeneric(DecompilerBase):
         for ins in self.instructions:
             if ins.offset < offset:
                 continue
-            if ins.offset in self._finally_merge_offsets:
+            if ins.offset in self.prescan.finally_merge_offsets:
                 return ins.offset
             if ins.opname != "NOP":
                 return None
@@ -3560,7 +3484,7 @@ class DecompilerGeneric(DecompilerBase):
         entries = self._exception_entries()
         if entries is None:
             return None
-        suppressed = getattr(self, "_suppress_push_exc_offsets", set())
+        suppressed = self.prescan.suppress_push_exc_offsets
         if owner is not None:
             candidates = [owner]
         else:
@@ -3617,17 +3541,17 @@ class DecompilerGeneric(DecompilerBase):
             merge_offset (int): The merge-label offset used as the key into the precomputed
                 `_deferred_except_lines` and `_deferred_finally_lines` mappings.
             header_indent (int): The indentation level at which to emit `except:` / `finally:`
-                headers. If negative, the method prefers the last value in `self._except_header_indents`
+                headers. If negative, the method prefers the last value in `self.emit.except_header_indents`
                 when available and otherwise uses the current `self.indent_level`.
         """
         # Determine the header indent: prefer the explicitly passed value;
         # fall back to _except_header_indents if set; last resort: current level.
         if header_indent < 0:
-            header_indent = self._except_header_indents[-1] if self._except_header_indents \
+            header_indent = self.emit.except_header_indents[-1] if self.emit.except_header_indents \
                 else self.indent_level
 
         # Emit pre-decompiled except handler lines first
-        except_lines = getattr(self, "_deferred_except_lines", {}).get(merge_offset)
+        except_lines = self.emit.deferred_except_lines.get(merge_offset)
         if except_lines:
             save_indent = self.indent_level
             self.indent_level = header_indent
@@ -3636,7 +3560,7 @@ class DecompilerGeneric(DecompilerBase):
             self.indent_level = save_indent
 
         # Then emit the finally: block
-        finally_lines = getattr(self, "_deferred_finally_lines", {}).get(merge_offset)
+        finally_lines = self.emit.deferred_finally_lines.get(merge_offset)
         if finally_lines:
             self.indent_level = header_indent
             self._append_reconstructed("finally:")
@@ -3670,32 +3594,8 @@ class DecompilerGeneric(DecompilerBase):
         DecompilerGeneric.__init__(sub, self.code_obj, indent_level=0, beautification_level=self.beautification_level, target_version=self.target_version)
         self._share_diagnostics_with(sub)
         # Install the same prescan results so sentinel detection works
-        sub._try_nop_offsets, sub._suppress_push_exc_offsets, sub._finally_merge_offsets = set(), set(), set()
-        sub._exc_handler_jump_offsets = getattr(self, "_exc_handler_jump_offsets", set())
-        sub._exc_handler_continue_offsets = getattr(self, "_exc_handler_continue_offsets", set())
-        sub._with_exit_suppress_offsets = set()
-        sub._with_body_end = {}
-        sub._with_exit_owner = {}
-        sub._finally_body_suppress = set()
-        sub._handler_section_suppress = set()
-        sub._wrapper_body_suppress = set()
-        sub._push_exc_to_finally_merge = {}
-        sub._deferred_finally_lines = {}
-        sub._deferred_except_lines = {}
-        sub._pending_finally_merge = None
-        sub._nop_to_push_exc = {}
-        sub._nop_to_finally_merge = {}
-        # Sync while loop headers for continue detection in sub-decompiler fallback logic
-        sub._while_header_targets = getattr(self, "_while_header_targets", {})
-        sub._while_body_offsets = set()
-        sub._while_true_ends = set()
-        sub._ternary_jumps = {}
-        sub._ternary_suppress = set()
-        sub._compound_cond_map = {}
-        sub._compound_suppress = set()
-        sub._except_header_indents = [0]
-        sub._exc_cleanup_offsets = set()
-        sub._exc_bound_names = set()
+        sub.prescan = self.prescan.for_handler_section()
+        sub.emit = self.emit.for_handler_section()
         sub._enclosing_locals = self._enclosing_locals
         # Install only the handler instructions
         sub.instructions = handler_instrs
@@ -3720,8 +3620,8 @@ class DecompilerGeneric(DecompilerBase):
             sub.pc += 1
             sub._current_instr = instr
             sub._handle_instruction(instr)
-            if instr.offset in sub._handler_return_close:
-                sub._handler_return_close.discard(instr.offset)
+            if instr.offset in sub.prescan.handler_return_close:
+                sub.prescan.handler_return_close.discard(instr.offset)
                 sub._close_except_clause()
 
         return [line for line in sub.reconstructed if line or line == ""]
@@ -3863,12 +3763,12 @@ class DecompilerGeneric(DecompilerBase):
         opname = instr.opname
         # Suppress then-branch instructions of detected ternary expressions;
         # the ternary is pushed as a whole expression at POP_JUMP_IF time.
-        if instr.offset in getattr(self, "_ternary_suppress", ()):
+        if instr.offset in self.prescan.ternary_suppress:
             return
         # Suppress intermediate instructions belonging to a compound boolean
         # These are the non-controlling POP_JUMP_IF_* instructions; pop their
         # clause operand from the stack so the stack stays balanced.
-        if instr.offset in getattr(self, "_compound_suppress", ()):
+        if instr.offset in self.prescan.compound_suppress:
             if self.stack:
                 self.stack.pop()
             return
@@ -3876,32 +3776,32 @@ class DecompilerGeneric(DecompilerBase):
         # handlers + finally body in source order, then continue normally.
         # This check MUST come before _finally_body_suppress since the merge-label
         # instruction is the first instruction of the suppressed finally body range.
-        if instr.offset in getattr(self, "_finally_merge_offsets", ()) or instr.offset in getattr(self, "_except_only_merge_offsets", ()):
-            if instr.offset in getattr(self, "_finally_merge_offsets", ()):
-                self._finally_merge_offsets.discard(instr.offset)
-            if instr.offset in getattr(self, "_except_only_merge_offsets", ()):
-                self._except_only_merge_offsets.discard(instr.offset)
-            self._pending_finally_merge = None
+        if instr.offset in self.prescan.finally_merge_offsets or instr.offset in self.prescan.except_only_merge_offsets:
+            if instr.offset in self.prescan.finally_merge_offsets:
+                self.prescan.finally_merge_offsets.discard(instr.offset)
+            if instr.offset in self.prescan.except_only_merge_offsets:
+                self.prescan.except_only_merge_offsets.discard(instr.offset)
+            self.emit.pending_finally_merge = None
             # self.indent_level at this point is the correct header indent:
             # the block manager has just closed the try_body block, leaving us
             # at the same level as the enclosing try:/with: statement.
             self._emit_deferred_finally(instr.offset, self.indent_level)
             # Only return (skip instruction) if it was actually a finally merge
             # (which means this instruction is the start of a suppressed body).
-            if instr.offset in getattr(self, "_finally_body_suppress", ()):
+            if instr.offset in self.prescan.finally_body_suppress:
                 return
         # Suppress BEFORE_WITH __exit__(None,None,None) epilogue instructions. This comes
         # after the merge-label check: a try inside a with merges right at the exit call.
-        if instr.offset in getattr(self, "_with_exit_suppress_offsets", ()):
+        if instr.offset in self.prescan.with_exit_suppress_offsets:
             return
         # Suppress inlined finally-body instructions (deferred; emitted at merge label)
-        if instr.offset in getattr(self, "_finally_body_suppress", ()):
+        if instr.offset in self.prescan.finally_body_suppress:
             return
         # Suppress pre-decompiled except handler instructions (deferred; emitted at merge label)
-        if instr.offset in getattr(self, "_handler_section_suppress", ()):
+        if instr.offset in self.prescan.handler_section_suppress:
             return
         # Suppress re-raise wrapper and with-exit handler bodies
-        if instr.offset in getattr(self, "_wrapper_body_suppress", ()):
+        if instr.offset in self.prescan.wrapper_body_suppress:
             return
 
         handler = self._dispatch.get(opname)
@@ -3963,7 +3863,7 @@ class DecompilerGeneric(DecompilerBase):
         opname = instr.opname
         if _is_code(instr.argval):
             self.stack.append(("code", instr.argval))
-        elif instr.offset == self._doc_load_offset:
+        elif instr.offset == self.doc.doc_load_offset:
             pass  # already emitted as the docstring
         elif "LOAD_FAST_BORROW_LOAD_FAST_BORROW" in opname:
             # fused opcode — pushes two names
@@ -3999,8 +3899,8 @@ class DecompilerGeneric(DecompilerBase):
     def _op_store(self, instr: BytecodeInstruction):
         opname = instr.opname
         # Suppress the 'as e' STORE that was already emitted in the except header
-        if instr.offset == getattr(self, "_exc_as_store_offset", -1):
-            self._exc_as_store_offset = -1
+        if instr.offset == self.emit.exc_as_store_offset:
+            self.emit.exc_as_store_offset = -1
             return
         if self.stack:
             val = self.stack.pop()
@@ -4009,7 +3909,7 @@ class DecompilerGeneric(DecompilerBase):
                 return
             name = str(instr.argval)
             # Suppress except-cleanup: `e = None` before `del e`
-            if instr.offset in getattr(self, "_exc_cleanup_offsets", ()):
+            if instr.offset in self.prescan.exc_cleanup_offsets:
                 return
             if name in (
                 "__module__", "__qualname__", "__firstlineno__",
@@ -4030,8 +3930,8 @@ class DecompilerGeneric(DecompilerBase):
                 self._append_reconstructed(str(val[1]), indent_multiline=True)
                 if self.indent_level == 0:
                     self.reconstructed.append("")
-            elif name == "__doc__" and instr.offset in self._class_doc_store_offsets:
-                self._emit_docstring(self._class_doc_store_offsets[instr.offset])
+            elif name == "__doc__" and instr.offset in self.doc.class_doc_store_offsets:
+                self._emit_docstring(self.doc.class_doc_store_offsets[instr.offset])
             elif val == name:
                 pass  # suppress redundant x = x
             else:
@@ -4209,7 +4109,7 @@ class DecompilerGeneric(DecompilerBase):
     def _op_push_exc_info(self, instr: BytecodeInstruction):
         opname = instr.opname
         # Silently suppress re-raise wrappers and with-exit handlers
-        if instr.offset in getattr(self, "_suppress_push_exc_offsets", ()):
+        if instr.offset in self.prescan.suppress_push_exc_offsets:
             return
 
         # Close try body block if tracked
@@ -4218,11 +4118,11 @@ class DecompilerGeneric(DecompilerBase):
             self.indent_level -= 1
 
         # Record the indent at which except headers should be emitted
-        indent = getattr(self, "_pei_indents", {}).get(instr.offset, self.indent_level)
-        self._except_header_indents.append(indent)
+        indent = self.emit.pei_indents.get(instr.offset, self.indent_level)
+        self.emit.except_header_indents.append(indent)
         cleanup = self._handler_cleanup_target(instr.offset)
         if cleanup is not None:
-            self._header_indent_by_cleanup[cleanup] = indent
+            self.prescan.header_indent_by_cleanup[cleanup] = indent
         # Peek: is there a LOAD + CHECK_EXC_MATCH coming?
         look = self.pc
         while look < len(self.instructions) and self.instructions[look].opname in (
@@ -4250,11 +4150,11 @@ class DecompilerGeneric(DecompilerBase):
         # A later clause of the same try (`except A: ... except B:`) shares the first
         # clause's exception clean-up handler. When the previous clause already closed
         # (it ended in `return`, say), reopen at that try's header indent.
-        header = self._header_indent_by_cleanup.get(self._handler_cleanup_target(instr.offset))
-        if header is not None and (not self._except_header_indents or self._except_header_indents[-1] != header):
-            self._except_header_indents.append(header)
-        if self._except_header_indents:
-            self.indent_level = self._except_header_indents[-1]
+        header = self.prescan.header_indent_by_cleanup.get(self._handler_cleanup_target(instr.offset))
+        if header is not None and (not self.emit.except_header_indents or self.emit.except_header_indents[-1] != header):
+            self.emit.except_header_indents.append(header)
+        if self.emit.except_header_indents:
+            self.indent_level = self.emit.except_header_indents[-1]
         # Peek ahead from the current position to find the optional
         # STORE_NAME / STORE_FAST that binds the 'as varname' in except.
         # The bytecode varies by version:
@@ -4301,9 +4201,9 @@ class DecompilerGeneric(DecompilerBase):
             # (STORE_DEREF when a closure captures the name, STORE_GLOBAL under `global`)
             if op in ("STORE_NAME", "STORE_FAST", "STORE_DEREF", "STORE_GLOBAL"):
                 as_name = str(ins_l.argval)
-                self._exc_as_store_offset = ins_l.offset
+                self.emit.exc_as_store_offset = ins_l.offset
                 self._record_exc_cleanup_offsets(look, as_name)
-                self._exc_bound_names.add(as_name)
+                self.emit.exc_bound_names.add(as_name)
                 break
             # Step 4: definitively in handler body — no binding
             if op in _IS_COMP_GEN_STOP or self._is_backward_jump(op):
@@ -4318,7 +4218,7 @@ class DecompilerGeneric(DecompilerBase):
             # Unknown opcode — stop safely
             break
         if as_name is None:
-            self._exc_as_store_offset = -1
+            self.emit.exc_as_store_offset = -1
         if as_name:
             self._append_reconstructed(f"except {exc_type} as {as_name}:")
         else:
@@ -4336,11 +4236,11 @@ class DecompilerGeneric(DecompilerBase):
         # To avoid emitting a premature 'pass' or popping indentation before
         # the 'continue' is rendered, we check if the next instruction is a
         # jump that will be handled by our special logic.
-        if opname == "POP_EXCEPT" and self._except_header_indents:
+        if opname == "POP_EXCEPT" and self.emit.except_header_indents:
             next_is_handler_jump = False
             if self.pc < len(self.instructions):
                 nxt = self.instructions[self.pc]
-                if nxt.offset in getattr(self, "_exc_handler_jump_offsets", ()):
+                if nxt.offset in self.prescan.exc_handler_jump_offsets:
                     next_is_handler_jump = True
 
             if not next_is_handler_jump and not self._defer_close_to_handler_return():
@@ -4349,14 +4249,14 @@ class DecompilerGeneric(DecompilerBase):
 
     def _close_except_clause(self) -> None:
         """End the innermost except clause: give an empty one a `pass`, and dedent."""
-        if not self._except_header_indents:
+        if not self.emit.except_header_indents:
             return
         last_idx = len(self.reconstructed) - 1
         while last_idx >= 0 and not self.reconstructed[last_idx].strip():
             last_idx -= 1
         if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
             self._append_reconstructed("pass")
-        self.indent_level = self._except_header_indents.pop()
+        self.indent_level = self.emit.except_header_indents.pop()
 
     def _handler_cleanup_target(self, offset: int) -> Optional[int]:
         """
@@ -4393,7 +4293,7 @@ class DecompilerGeneric(DecompilerBase):
             clean-up) and the index of the RETURN instruction; or None.
         """
         instrs = self.instructions
-        bound = self._exc_bound_names
+        bound = self.emit.exc_bound_names
         k = start
         while k < len(instrs):
             op = instrs[k].opname
@@ -4405,7 +4305,7 @@ class DecompilerGeneric(DecompilerBase):
                 break
         resume = k
         targets = {self._get_jump_target(x) for x in instrs if "JUMP" in x.opname or x.opname == "FOR_ITER"}
-        placed = getattr(self, "_finally_body_suppress", set())
+        placed = self.prescan.finally_body_suppress
         while k < len(instrs):
             ins = instrs[k]
             if ins.offset in placed:
@@ -4453,13 +4353,13 @@ class DecompilerGeneric(DecompilerBase):
                 first -= 1  # the exit's own instructions before POP_EXCEPT (3.9: POP_BLOCK)
             if not any(instrs[j].starts_line is not None for j in range(first, ret + 1)):
                 return False
-            self._explicit_returns.add(instrs[ret].offset)
+            self.prescan.explicit_returns.add(instrs[ret].offset)
         self.pc = resume
-        if self._except_header_indents and self.indent_level > self._except_header_indents[-1] + 1:
+        if self.emit.except_header_indents and self.indent_level > self.emit.except_header_indents[-1] + 1:
             # The return sits in a block inside the clause (`if c: return x`); the
             # clause goes on after that block and closes at its own POP_EXCEPT.
             return True
-        self._handler_return_close.add(instrs[ret].offset)
+        self.prescan.handler_return_close.add(instrs[ret].offset)
         return True
 
     def _op_setup_finally(self, instr: BytecodeInstruction):
@@ -4536,14 +4436,14 @@ class DecompilerGeneric(DecompilerBase):
                 else:
                     break
             if suppress_start is not None:
-                _fb = getattr(self, "_finally_body_suppress", set())
+                _fb = self.prescan.finally_body_suppress
                 for k in range(j, t_idx):  # j is POP_BLOCK index now
                     op = self.instructions[k].opname
                     if op not in ("LOAD_CONST", "DUP_TOP", "CALL_FUNCTION",
                                   "POP_TOP", "JUMP_FORWARD", "JUMP_ABSOLUTE", "POP_BLOCK"):
                         break
                     _fb.add(self.instructions[k].offset)
-                self._finally_body_suppress = _fb
+                self.prescan.finally_body_suppress = _fb
             self._suppress_with_exits_39(instr.offset, t_idx)
 
     def _suppress_with_exits_39(self, setup_offset: int, handler_idx: int) -> None:
@@ -4559,7 +4459,7 @@ class DecompilerGeneric(DecompilerBase):
         """
         instrs = self.instructions
         setup_idx = next((k for k, x in enumerate(instrs) if x.offset == setup_offset), handler_idx)
-        hidden = self._finally_body_suppress
+        hidden = self.prescan.finally_body_suppress
         exit_call = ("LOAD_CONST", "DUP_TOP", "DUP_TOP", "CALL_FUNCTION", "POP_TOP")
         for k in range(setup_idx + 1, handler_idx):
             if instrs[k].opname != "POP_BLOCK":
@@ -4620,9 +4520,9 @@ class DecompilerGeneric(DecompilerBase):
             # The with-exit PUSH_EXC_INFO is NOT in _finally_push_offsets
             # (it handles the __exit__ call, not user finally: code).
         ]
-        body_end = self._with_body_end.get(self.instructions[self.pc].offset) if self.pc < len(self.instructions) else None
+        body_end = self.prescan.with_body_end.get(self.instructions[self.pc].offset) if self.pc < len(self.instructions) else None
         if body_end is None and self.pc > 0:
-            body_end = self._with_body_end.get(self.instructions[self.pc - 1].offset)
+            body_end = self.prescan.with_body_end.get(self.instructions[self.pc - 1].offset)
         if body_end is not None:
             self.blocks.append((body_end, "with"))
         elif with_exc_offsets:
@@ -4630,7 +4530,7 @@ class DecompilerGeneric(DecompilerBase):
             # that handles the __exit__ on exceptional exit from the with body.
             self.blocks.append((max(with_exc_offsets), "with"))
         # Also record the indent level so finally: de-indents correctly
-        self._except_header_indents.append(self.indent_level - 1)
+        self.emit.except_header_indents.append(self.indent_level - 1)
 
     def _op_with_except_start(self, instr: BytecodeInstruction):
         opname = instr.opname
@@ -4856,12 +4756,12 @@ class DecompilerGeneric(DecompilerBase):
         if instr.argval is None:
             # The exit path of a suppressed bottom-of-loop condition copy: the loop
             # simply ends here, there is nothing to emit.
-            if instr.offset in self._dup_guard_exits and not (getattr(self.code_obj, "co_flags", 0) & 0x1):
+            if instr.offset in self.prescan.dup_guard_exits and not (getattr(self.code_obj, "co_flags", 0) & 0x1):
                 return
             if self._module_level_return_none():
                 return
             in_while_true = any(
-                b[1] == "while" and b[0] in getattr(self, "_while_true_ends", set())
+                b[1] == "while" and b[0] in self.prescan.while_true_ends
                 for b in self.blocks
             )
             if in_while_true:
@@ -4985,7 +4885,7 @@ class DecompilerGeneric(DecompilerBase):
 
     def _op_kw_names(self, instr: BytecodeInstruction):
         """Consume a keyword-names tuple (Python 3.11+ KW_NAMES opcode)."""
-        self._kw_names = instr.argval
+        self.emit.kw_names = instr.argval
 
     def _op_push_null(self, instr: BytecodeInstruction):
         self.stack.append(StackNULL(is_method=False))
@@ -5018,7 +4918,7 @@ class DecompilerGeneric(DecompilerBase):
         # CALL_KW (3.13/3.14) or CALL_FUNCTION_KW (3.9/3.10) pops names tuple first
         if opname in ("CALL_KW", "CALL_FUNCTION_KW"):
             if self.stack:
-                self._kw_names = self.stack.pop()
+                self.emit.kw_names = self.stack.pop()
 
         # CALL_FUNCTION_EX: *args [and **kwargs]
         if opname == "CALL_FUNCTION_EX":
@@ -5044,8 +4944,8 @@ class DecompilerGeneric(DecompilerBase):
             if self.stack:
                 # Handle KW_NAMES: if preceding KW_NAMES exist, CALL pops (num_args) positional
                 # and then the keyword names tuple was already popped by _op_kw_names
-                # and stored in self._kw_names.
-                kw_names = getattr(self, "_kw_names", ())
+                # and stored in self.emit.kw_names.
+                kw_names = self.emit.kw_names
                 if isinstance(kw_names, str) and kw_names.startswith("("):
                     try:
                         import ast
@@ -5080,7 +4980,7 @@ class DecompilerGeneric(DecompilerBase):
                         v_str = self._normalize_val(val)
                         final_args.append(f"{name}={v_str}")
                         final_args_raw.append(val)
-                    self._kw_names = () # clear
+                    self.emit.kw_names = () # clear
                     # Special cases need the raw args
                     raw_args = final_args_raw
                 else:
@@ -5396,15 +5296,15 @@ class DecompilerGeneric(DecompilerBase):
                             and "JUMP" in nxt.opname
                             and isinstance(self._get_jump_target(nxt), int)
                             and self._get_jump_target(nxt) <= nxt.offset):
-                        _fb = getattr(self, "_finally_body_suppress", set())
+                        _fb = self.prescan.finally_body_suppress
                         _fb.add(nxt.offset)
-                        self._finally_body_suppress = _fb
+                        self.prescan.finally_body_suppress = _fb
                 return
 
             # Non-break forward jump -> reconstruct as else-branch only when a
             # prior if-block whose target matches jump_target is actually open.
             # (Exception-handler jumps are always excluded.)
-            if instr.offset not in getattr(self, "_exc_handler_jump_offsets", ()):
+            if instr.offset not in self.prescan.exc_handler_jump_offsets:
                 next_offset = -1
                 if self.pc < len(self.instructions):
                     next_offset = self.instructions[self.pc].offset
@@ -5472,21 +5372,21 @@ class DecompilerGeneric(DecompilerBase):
             # treated as loop back-edges.  Skip them silently.
             # Exception: if they are a 3.9-style explicit 'continue' inside
             # a handler body, emit 'continue' before returning.
-            if instr.offset in getattr(self, "_exc_handler_jump_offsets", ()):
-                if instr.offset in getattr(self, "_exc_handler_continue_offsets", ()):
+            if instr.offset in self.prescan.exc_handler_jump_offsets:
+                if instr.offset in self.prescan.exc_handler_continue_offsets:
                     self._append_reconstructed("continue")
                 return
 
             # A `continue`, or the end of an if/else branch threaded to the loop head.
-            if instr.offset in self._inner_back_jumps:
-                self._emit_inner_back_jump(instr, self._inner_back_jumps[instr.offset])
+            if instr.offset in self.prescan.inner_back_jumps:
+                self._emit_inner_back_jump(instr, self.prescan.inner_back_jumps[instr.offset])
                 return
 
             # If the prescan successfully identified the loop guard
             # (guard_offset in _while_header_targets), it already arranged for
             # the POP_JUMP_IF_FALSE handler to open a "while" block instead of
             # an "if" block.  Nothing more to do — just return.
-            if body_start in self._while_header_targets:
+            if body_start in self.prescan.while_header_targets:
                 return  # prescan handled it
 
             # Fallback for Python 3.14+ where the prescan could not identify
@@ -5536,7 +5436,7 @@ class DecompilerGeneric(DecompilerBase):
                                 "if ", "while ", 1
                             )
                             self.blocks[bi] = boff, "while"
-                            self._while_true_ends.discard(boff)
+                            self.prescan.while_true_ends.discard(boff)
                             break
                     break
 
@@ -5559,22 +5459,22 @@ class DecompilerGeneric(DecompilerBase):
         # are detected retroactively by the JUMP_BACKWARD handler.
         is_try_nop = (
             instr.offset == 2 or
-            instr.offset in getattr(self, "_try_nop_offsets", ())
+            instr.offset in self.prescan.try_nop_offsets
         )
         if is_try_nop:
             if self._has_exception_handler():
                 # Find the PUSH_EXC_INFO that handles THIS try body, using
                 # the exception-table-derived map from prescan.  Fall back to
                 # scanning for the nearest PUSH_EXC_INFO if the map is empty.
-                nop_map = getattr(self, "_nop_to_push_exc", {})
+                nop_map = self.prescan.nop_to_push_exc
                 next_pei = nop_map.get(instr.offset, -1)
                 # try/finally with no except: the handler is only a re-raise wrapper,
                 # so the prescan recorded where the finally body starts instead.
-                finally_only = getattr(self, "_nop_to_finally_merge", {}).get(instr.offset)
+                finally_only = self.prescan.nop_to_finally_merge.get(instr.offset)
                 if next_pei < 0 and finally_only is None:
                     for ins in self.instructions:
                         if ins.opname == "PUSH_EXC_INFO" and ins.offset > instr.offset:
-                            if ins.offset not in getattr(self, "_suppress_push_exc_offsets", ()):
+                            if ins.offset not in self.prescan.suppress_push_exc_offsets:
                                 next_pei = ins.offset
                                 break
                 # Only emit try: if not already inside a try block
@@ -5582,11 +5482,11 @@ class DecompilerGeneric(DecompilerBase):
                 if not already_in_try or instr.is_jump_target or instr.offset != 2:
                     self._append_reconstructed("try:")
                     if next_pei > 0:
-                        self._pei_indents[next_pei] = self.indent_level
+                        self.emit.pei_indents[next_pei] = self.indent_level
                     self.indent_level += 1
                     if next_pei > 0:
                         # Use the finally-merge label as block end when present
-                        pef_map = getattr(self, "_push_exc_to_finally_merge", {})
+                        pef_map = self.prescan.push_exc_to_finally_merge
                         merge = None
                         for m_off, targets in pef_map.items():
                             if next_pei in targets:
@@ -5621,7 +5521,7 @@ class DecompilerGeneric(DecompilerBase):
         #       instr.offset + 2 is in _while_true_body_starts.
         #   (c) offset == 2: the entire function body is an unconditional loop
         #       (old fallback path, kept for older Python version compatibility).
-        _while_header_targets = getattr(self, "_while_header_targets", {})
+        _while_header_targets = self.prescan.while_header_targets
         _while_true_body_starts = {
             bs for bs, go in _while_header_targets.items() if go == -1
         }
@@ -5646,9 +5546,9 @@ class DecompilerGeneric(DecompilerBase):
                         and self._get_jump_target(ins) == nop_body_start):
                     loop_end = max(loop_end, ins.offset + 2)
             self.blocks.append((loop_end, "while"))
-            _wte = getattr(self, "_while_true_ends", set())
+            _wte = self.prescan.while_true_ends
             _wte.add(loop_end)
-            self._while_true_ends = _wte
+            self.prescan.while_true_ends = _wte
             return
 
         # Old offset-2 fallback: function body IS a while-True loop but was not
@@ -5660,7 +5560,7 @@ class DecompilerGeneric(DecompilerBase):
                 end_offset = self._find_jump_backward_end()
                 if end_offset > 0:
                     self.blocks.append((end_offset, "while"))
-                    self._while_true_ends.add(end_offset)
+                    self.prescan.while_true_ends.add(end_offset)
 
     def _emit_inner_back_jump(self, instr: BytecodeInstruction, loop_end: int) -> None:
         """
@@ -5718,7 +5618,7 @@ class DecompilerGeneric(DecompilerBase):
         if k >= len(self.instructions):
             return None
         back = self.instructions[k]
-        loop_end = self._inner_back_jumps.get(back.offset)
+        loop_end = self.prescan.inner_back_jumps.get(back.offset)
         if loop_end is None or jump_target != back.offset + 2 or back.offset + 2 >= loop_end:
             return None
         return k, loop_end
@@ -5817,9 +5717,9 @@ class DecompilerGeneric(DecompilerBase):
         # both branches speculatively and push the ternary expression onto
         # the stack instead of opening a control-flow block.
 
-        if instr.offset in getattr(self, "_ternary_jumps", {}):
+        if instr.offset in self.prescan.ternary_jumps:
             store_name, then_instrs, else_instrs, is_true, aug_op = \
-                self._ternary_jumps[instr.offset]
+                self.prescan.ternary_jumps[instr.offset]
             cond_expr = str(self._pop())
             # For POP_JUMP_IF_NONE / POP_JUMP_IF_NOT_NONE the raw condition
             # on the stack is the *value* being tested (not a bool expression).
@@ -5853,7 +5753,7 @@ class DecompilerGeneric(DecompilerBase):
             return
 
         # Suppress dup-condition instructions pre-identified by pre-scan.
-        if instr.offset in self._while_body_offsets:
+        if instr.offset in self.prescan.while_body_offsets:
             if self.stack:
                 self.stack.pop()
             return
@@ -5862,7 +5762,7 @@ class DecompilerGeneric(DecompilerBase):
             # Suppress the POP_JUMP after CHECK_EXC_MATCH.
             if str(cond) in ("_exc_match", "_exc_info"):
                 return
-            compound_cond_map = getattr(self, "_compound_cond_map", {})
+            compound_cond_map = self.prescan.compound_cond_map
             compound_cond = compound_cond_map.get(instr.offset)
             compound_precomputed = False
             if compound_cond is not None:
@@ -5885,7 +5785,7 @@ class DecompilerGeneric(DecompilerBase):
             # The body_start is jump_target's complement: right after this instr.
             next_body_offset = instr.offset + 4  # skip past COMPARE_OP cache slot
             # Use the pre-scanned mapping: guard_offset -> body_start
-            for bs, go in self._while_header_targets.items():
+            for bs, go in self.prescan.while_header_targets.items():
                 if go == instr.offset:
                     # This POP_JUMP is the while-loop guard
                     if self._falls_to_outer_back_jump(instr, bs) and jump_target > instr.offset:
@@ -5985,7 +5885,7 @@ class DecompilerGeneric(DecompilerBase):
                     # (`print(a if f else b)` at the end of a function on 3.12+). Values
                     # pushed before the test (the callee, earlier arguments) are used up
                     # by the first arm, and the second arm needs them again.
-                    self._else_stack_snapshots[jump_target] = list(self.stack)
+                    self.emit.else_stack_snapshots[jump_target] = list(self.stack)
                 if prev.opname in (
                     "RETURN_VALUE", "RETURN_CONST", "RAISE_VARARGS",
                     "BREAK_LOOP", "JUMP_FORWARD",
@@ -6008,10 +5908,10 @@ class DecompilerGeneric(DecompilerBase):
         `*_OR_POP` closes. A chained comparison (`a < b < c`) uses the same opcodes but
         jumps to a `SWAP/ROT_TWO; POP_TOP` cleanup and is left alone.
         """
-        self._boolop_or_pop = {}
-        self._boolop_copy = {}
-        self._boolop_groups = {}
-        self._boolop_pending = []
+        self.prescan.boolop_or_pop = {}
+        self.prescan.boolop_copy = {}
+        self.prescan.boolop_groups = {}
+        self.emit.boolop_pending = []
         instrs = self.instructions
         by_offset = {ins.offset: k for k, ins in enumerate(instrs)}
         skip = ("TO_BOOL", "NOT_TAKEN", "CACHE")
@@ -6041,7 +5941,7 @@ class DecompilerGeneric(DecompilerBase):
                     target = unthread_return(ins.offset, target)
                 if isinstance(target, int) and target > ins.offset and not is_chain_cleanup(target):
                     op = "and" if ins.opname == "JUMP_IF_FALSE_OR_POP" else "or"
-                    self._boolop_or_pop[ins.offset] = (op, target)
+                    self.prescan.boolop_or_pop[ins.offset] = (op, target)
             elif ins.opname == "COPY" and ins.arg == 1:
                 j = k + 1
                 while j < len(instrs) and instrs[j].opname in skip:
@@ -6058,7 +5958,7 @@ class DecompilerGeneric(DecompilerBase):
                     continue
                 op = "and" if instrs[j].opname == "POP_JUMP_IF_FALSE" else "or"
                 resume = instrs[m + 1].offset if m + 1 < len(instrs) else instrs[m].offset + 2
-                self._boolop_copy[ins.offset] = (op, target, resume)
+                self.prescan.boolop_copy[ins.offset] = (op, target, resume)
 
         # 3.9/3.10 mixed chains: a plain POP_JUMP whose target lies inside the expression
         # that a later *_OR_POP closes.
@@ -6068,7 +5968,7 @@ class DecompilerGeneric(DecompilerBase):
             target = self._get_jump_target(ins)
             if not isinstance(target, int) or target <= ins.offset:
                 continue
-            for q_off, (_, join) in self._boolop_or_pop.items():
+            for q_off, (_, join) in self.prescan.boolop_or_pop.items():
                 if ins.offset < q_off < target < join:
                     # Code that cannot fall through to the target (a return in between)
                     # makes the jump an `if` statement, not the first operator of an
@@ -6077,7 +5977,7 @@ class DecompilerGeneric(DecompilerBase):
                            and x.opname in ("RETURN_VALUE", "RETURN_CONST", "RAISE_VARARGS")
                            for x in instrs):
                         break
-                    self._boolop_groups[ins.offset] = ("and" if ins.opname == "POP_JUMP_IF_FALSE" else "or", target)
+                    self.prescan.boolop_groups[ins.offset] = ("and" if ins.opname == "POP_JUMP_IF_FALSE" else "or", target)
                     break
 
     def _boolop_step(self, instr: BytecodeInstruction) -> bool:
@@ -6087,14 +5987,14 @@ class DecompilerGeneric(DecompilerBase):
         Closes operators whose join point has been reached, then consumes the
         operator's jump instructions. Returns True if `instr` was fully handled here.
         """
-        if instr.offset in getattr(self, "_ternary_suppress", ()) or instr.offset in getattr(self, "_ternary_jumps", ()):
+        if instr.offset in self.prescan.ternary_suppress or instr.offset in self.prescan.ternary_jumps:
             return False  # a conditional expression (or part of a branch), evaluated as a whole
-        pending = self._boolop_pending
+        pending = self.emit.boolop_pending
         if pending:
             # Reaching a join: the right operand is on top of the stack. A COPY/jump/POP_TOP
             # sequence is consumed as one unit, so a join that lands on its POP_TOP (3.14
             # shares that POP_TOP between two operators) closes before the unit is read.
-            copy_spec = self._boolop_copy.get(instr.offset)
+            copy_spec = self.prescan.boolop_copy.get(instr.offset)
             limit = copy_spec[2] if copy_spec is not None else instr.offset + 1
             pending[:] = [e for e in pending if not (e[0].startswith("g") and instr.offset <= e[2] < limit)]
             while pending and instr.offset <= pending[-1][2] < limit and not pending[-1][0].startswith("g"):
@@ -6103,19 +6003,19 @@ class DecompilerGeneric(DecompilerBase):
                     break
                 self.stack.append(_BoolExpr.join(kind, left, self.stack.pop()))
 
-        spec = self._boolop_or_pop.get(instr.offset)
+        spec = self.prescan.boolop_or_pop.get(instr.offset)
         if spec is not None and self.stack:
             self._boolop_open(spec[0], spec[1], instr.offset)
             return True
 
-        spec = self._boolop_copy.get(instr.offset)
+        spec = self.prescan.boolop_copy.get(instr.offset)
         if spec is not None and self.stack:
             self._boolop_open(spec[0], spec[1], instr.offset)
             while self.pc < len(self.instructions) and self.instructions[self.pc].offset < spec[2]:
                 self.pc += 1
             return True
 
-        spec = self._boolop_groups.get(instr.offset)
+        spec = self.prescan.boolop_groups.get(instr.offset)
         if spec is not None and self.stack:
             pending.append(["g" + spec[0], self.stack.pop(), spec[1]])
             return True
@@ -6123,7 +6023,7 @@ class DecompilerGeneric(DecompilerBase):
 
     def _boolop_open(self, op: str, join: int, offset: int) -> None:
         """Record `<TOS> op ...`, first folding any open mixed-chain groups into the left operand."""
-        pending = self._boolop_pending
+        pending = self.emit.boolop_pending
         left = self.stack.pop()
         while pending and pending[-1][0].startswith("g") and pending[-1][2] > offset:
             kind, group_left, _ = pending.pop()
@@ -6180,8 +6080,8 @@ class DecompilerGeneric(DecompilerBase):
             if self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup") and self.blocks[-1][0] == instr.offset:
                 self.blocks.pop()
                 self.indent_level -= 1
-            if self._except_header_indents:
-                self.indent_level = self._except_header_indents[-1]
+            if self.emit.except_header_indents:
+                self.indent_level = self.emit.except_header_indents[-1]
             self._append_reconstructed(f"except {exc_type}{exc_var}:")
             self.indent_level += 1
             self.stack.append("_exc_match")
@@ -6198,7 +6098,7 @@ class DecompilerGeneric(DecompilerBase):
         jump_target = self._get_jump_target(instr)
 
         # Check for ternary expression pattern (reuse existing logic)
-        if instr.offset in getattr(self, "_ternary_jumps", {}):
+        if instr.offset in self.prescan.ternary_jumps:
             # Delegate to _op_conditional_jump for ternary handling
             # Temporarily restore the dispatch to call the shared logic
             self._op_conditional_jump(instr)
@@ -6222,7 +6122,7 @@ class DecompilerGeneric(DecompilerBase):
         jump_target = self._get_jump_target(instr)
 
         # Check for ternary expression pattern (reuse existing logic)
-        if instr.offset in getattr(self, "_ternary_jumps", {}):
+        if instr.offset in self.prescan.ternary_jumps:
             # Delegate to _op_conditional_jump for ternary handling
             self._op_conditional_jump(instr)
             return
@@ -6524,7 +6424,7 @@ class DecompilerGeneric(DecompilerBase):
 
     def _op_delete(self, instr: BytecodeInstruction):
         opname = instr.opname
-        if instr.offset in getattr(self, "_exc_cleanup_offsets", ()):
+        if instr.offset in self.prescan.exc_cleanup_offsets:
             return
         self._append_reconstructed(f"del {instr.argval}")
 

@@ -39,10 +39,10 @@ class Decompiler311Plus(DecompilerGeneric):
         Parameters:
                 instr (BytecodeInstruction): The disassembled instruction to process. This method may mutate the decompiler's `stack`, `pc`, and reconstructed output.
         """
-        if instr.offset in getattr(self, "_ternary_suppress", ()):
+        if instr.offset in self.prescan.ternary_suppress:
             return
         # Suppress intermediate instructions belonging to a compound boolean
-        if instr.offset in getattr(self, "_compound_suppress", ()):
+        if instr.offset in self.prescan.compound_suppress:
             if self.stack:
                 self.stack.pop()
             return
