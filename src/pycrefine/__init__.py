@@ -3,7 +3,7 @@
 Every name that used to live in the single-file ``pycrefine`` module is re-exported here,
 so ``import pycrefine`` and ``from pycrefine import ...`` behave as before.
 """
-__version__ = "1.3.2"
+__version__ = "1.4.0"
 
 from ._constants import (  # noqa: F401
     _AUG_ASSIGN_MAP,
@@ -61,5 +61,6 @@ from .loader import (  # noqa: F401
     _MARSHAL_NULL,
     get_decompiler,
 )
+from .diagnostics import DecompilationError, Diagnostic, comment_block  # noqa: F401
 from .versions import _get_python_version_from_magic  # noqa: F401
 from .cli import main  # noqa: F401

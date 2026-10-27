@@ -4,6 +4,7 @@ import dis
 import sys
 import types
 from typing import Any, List, Optional, Set, Tuple
+from ..diagnostics import STACK_UNDERFLOW, DecompilationError, Diagnostic
 from ..instructions import BytecodeInstruction
 
 # Stem of the name used for a for-loop item that a later unpacking stores.
@@ -11,8 +12,13 @@ _LOOP_PLACEHOLDER = "_item"
 
 
 class DecompilerBase:
-    def __init__(self, code_obj: types.CodeType, indent_level: int = 0, beautification_level: str = 'core', target_version: Optional[Tuple[int, int]] = None):
+    def __init__(self, code_obj: types.CodeType, indent_level: int = 0, beautification_level: str = 'core', target_version: Optional[Tuple[int, int]] = None, strict: bool = False):
         self.code_obj = code_obj
+        # Where reconstruction was uncertain (see diagnostics.py). Decompilers of nested
+        # code share one list; in strict mode the first entry raises instead.
+        self.strict = strict
+        self.diagnostics: List[Diagnostic] = []
+        self._current_instr: Optional[BytecodeInstruction] = None
         # Exception table, filled in on first use by _exception_entries(); False = not yet read.
         self._exception_entries_cache: Any = False
         self.instructions: List[BytecodeInstruction] = []
@@ -31,6 +37,38 @@ class DecompilerBase:
         # Loop-item placeholders _loop_placeholder chose because "_item" was already in use.
         self._loop_placeholder_names: Set[str] = set()
         self._code_names_cache: Optional[Set[str]] = None
+
+    def _report(self, kind: str, reason: str, instr: Optional[BytecodeInstruction] = None) -> None:
+        """
+        Record that reconstruction was uncertain here; in strict mode, stop instead.
+
+        *instr* defaults to the instruction being handled.
+        """
+        instr = instr or self._current_instr
+        diagnostic = Diagnostic(
+            kind, reason, tuple(self.target_version),  # type: ignore[arg-type]
+            opcode=instr.opname if instr is not None else None,
+            offset=instr.offset if instr is not None else None,
+            code_name=getattr(self.code_obj, "co_qualname", None) or getattr(self.code_obj, "co_name", None))
+        if diagnostic not in self.diagnostics:
+            self.diagnostics.append(diagnostic)
+        if self.strict:
+            raise DecompilationError(diagnostic)
+
+    def _share_diagnostics_with(self, sub: "DecompilerBase") -> None:
+        """Make *sub*, a decompiler of part of this code whose output is kept, report here."""
+        sub.diagnostics = self.diagnostics
+        sub.strict = self.strict
+
+    def _pop(self, fallback: Any, reason: str = "an operand is missing from the stack") -> Any:
+        """
+        Pop the top of the expression stack. If it is empty, record a stack underflow
+        (an error in strict mode) and return *fallback*, the text to carry on with.
+        """
+        if self.stack:
+            return self.stack.pop()
+        self._report(STACK_UNDERFLOW, reason)
+        return fallback
 
     def _disassemble(self):
         """Convert code object bytecode into a list of BytecodeInstruction."""
