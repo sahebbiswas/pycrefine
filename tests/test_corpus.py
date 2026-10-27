@@ -29,6 +29,14 @@ def baselines():
             for tag in VERSIONS}
 
 
+class TestBaselinePatch(unittest.TestCase):
+
+    def test_every_baseline_names_the_patch_it_was_recorded_on(self):
+        for tag, data in baselines().items():
+            with self.subTest(baseline=tag):
+                self.assertTrue(data["python_patch"].startswith(tag + "."))
+
+
 class TestManifest(unittest.TestCase):
 
     def test_entries_have_complete_metadata(self):

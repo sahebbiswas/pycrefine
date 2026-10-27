@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "python_version": "3.11",
+  "python_patch": "3.11.17",
   "entries": {
     "features/class_basic": "mismatch",
     "features/class_special_methods": "equivalent",

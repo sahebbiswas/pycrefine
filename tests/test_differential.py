@@ -1,5 +1,7 @@
 """The differential behavior check (quality/check_differential.py) and its baselines."""
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import sys
@@ -89,6 +91,45 @@ class TestBaselineDiff(unittest.TestCase):
         self.assertLess(cd.level_of("compiles"), cd.level_of("mismatch"))
         self.assertEqual(self.kinds([result("a", "equivalent"), result("b", "mismatch"),
                                      result("c", "compiles")]), {"c": "improved"})
+
+
+class TestPatchVersion(unittest.TestCase):
+
+    def test_baseline_records_the_interpreter_patch(self):
+        baseline = cd.to_baseline([result("a", "equivalent")])
+        self.assertEqual(baseline["python_patch"], cd.python_patch())
+        self.assertTrue(cd.python_patch().startswith(cd.python_tag() + "."))
+
+    def test_drift_is_described_only_when_patches_differ(self):
+        self.assertIsNone(cd.patch_drift(cd.python_patch()))
+        self.assertIsNone(cd.patch_drift(None))
+        self.assertIn("9.9.9", cd.patch_drift("9.9.9"))
+
+    def test_report_carries_both_patches(self):
+        report = cd.build_report(sys.executable, [result("a", "equivalent")], [], None, "9.9.9")
+        self.assertEqual((report["python_patch"], report["baseline_python_patch"]), (cd.python_patch(), "9.9.9"))
+
+    def report_for(self, baseline_patch):
+        """What print_report says for a failing stdlib entry, given the baseline's recorded patch."""
+        failing = cd.FixtureResult("s", "mismatch", category="stdlib")
+        changes = [{"kind": "regressed", "name": "s", "baseline": "equivalent", "current": "mismatch"}]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cd.print_report([failing], changes, Path("baseline.json"), False, None, baseline_patch)
+        return out.getvalue()
+
+    def test_a_baseline_without_a_patch_is_said_not_to_record_one(self):
+        self.assertIn("does not record its patch version", self.report_for(None))
+
+    def test_a_baseline_with_the_same_patch_is_not_said_to_lack_one(self):
+        text = self.report_for(cd.python_patch())
+        self.assertNotIn("does not record", text)
+        self.assertNotIn("was recorded on Python", text)
+
+    def test_a_baseline_with_another_patch_reports_the_drift_instead(self):
+        text = self.report_for("9.9.9")
+        self.assertIn("was recorded on Python 9.9.9", text)
+        self.assertNotIn("does not record", text)
 
 
 @unittest.skipUnless(os.name == "posix" or sys.platform == "win32", "needs a subprocess")

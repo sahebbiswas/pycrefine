@@ -364,6 +364,13 @@ class TestEndToEnd(unittest.TestCase):
         code, _ = self._run_main(src, "--no-baseline")
         self.assertEqual(code, 0)
 
+    def test_baselines_and_report_carry_the_patch_version(self):
+        for path in sorted(cc.BASELINE_DIR.glob("py*.json")):
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self.assertTrue(data["python_patch"].startswith(data["python_version"] + "."), path.name)
+        self.assertEqual(cc.build_report([], [], None, "9.9.9")["baseline_python_patch"], "9.9.9")
+        self.assertEqual(cc.to_baseline([])["python_patch"], cc.python_patch())
+
     def test_main_rejects_baseline_for_other_python_version(self):
         src = self.dir / "mod.py"
         src.write_text("x = 1\n")

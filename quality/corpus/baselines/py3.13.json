@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "python_version": "3.13",
+  "python_patch": "3.13.17",
   "entries": {
     "features/class_basic": "equivalent",
     "features/class_special_methods": "equivalent",

@@ -72,6 +72,7 @@ import importlib.util
 import io
 import json
 import os
+import platform
 import py_compile
 import subprocess
 import sys
@@ -118,6 +119,20 @@ def level_of(status: str) -> Optional[int]:
 
 def python_tag() -> str:
     return f'{sys.version_info[0]}.{sys.version_info[1]}'
+
+
+def python_patch() -> str:
+    """The full version of the running interpreter, e.g. ``3.12.3``."""
+    return platform.python_version()
+
+
+def patch_drift(baseline_patch: Optional[str]) -> Optional[str]:
+    """A sentence saying the run and the baseline are on different patch releases, or None."""
+    if baseline_patch and baseline_patch != python_patch():
+        return (f'The baseline was recorded on Python {baseline_patch} and this run is on '
+                f'{python_patch()}. Results that read the interpreter\'s own library '
+                '(stdlib entries) can change between patch releases without a pycrefine change.')
+    return None
 
 
 def baseline_path_for(corpus: Path) -> Path:
@@ -465,6 +480,7 @@ def to_baseline(results: Sequence[FixtureResult]) -> dict:
     return {
         'schema_version': SCHEMA_VERSION,
         'python_version': python_tag(),
+        'python_patch': python_patch(),
         'entries': {r.name: r.status for r in sorted(results, key=lambda r: r.name) if r.status != SOURCE_ERROR},
     }
 
@@ -510,13 +526,15 @@ FAILING_CHANGES = ('regressed', 'new', 'missing', 'lost')
 # ---------------------------------------------------------------------------
 
 def build_report(python: str, results: Sequence[FixtureResult], changes: Sequence[dict],
-                 baseline_path: Optional[Path]) -> dict:
+                 baseline_path: Optional[Path], baseline_patch: Optional[str] = None) -> dict:
     counts: Dict[str, int] = {}
     for r in results:
         counts[r.status] = counts.get(r.status, 0) + 1
     return {
         'schema_version': SCHEMA_VERSION,
         'python_version': python_tag(),
+        'python_patch': python_patch(),
+        'baseline_python_patch': baseline_patch,
         'interpreter': python,
         'baseline': _rel(baseline_path) if baseline_path else None,
         'summary': {'entries': len(results), **dict(sorted(counts.items()))},
@@ -534,8 +552,9 @@ def _rel(path: Path) -> str:
 
 def print_report(results: Sequence[FixtureResult], changes: Sequence[dict],
                  baseline_path: Optional[Path], verbose: bool,
-                 issues: Optional[Dict[str, List[int]]] = None) -> None:
-    print(f'Differential check, Python {python_tag()}')
+                 issues: Optional[Dict[str, List[int]]] = None,
+                 baseline_patch: Optional[str] = None) -> None:
+    print(f'Differential check, Python {python_patch()}')
     issues = issues or {}
     width = max((len(r.name) for r in results), default=10)
     for r in results:
@@ -562,15 +581,18 @@ def print_report(results: Sequence[FixtureResult], changes: Sequence[dict],
     failing = [c for c in changes if c['kind'] in FAILING_CHANGES]
     print('\nRESULT: ' + ('FAIL' if failing else 'PASS'))
     if failing:
+        drift = patch_drift(baseline_patch)
+        if drift:
+            print(drift)
         print('A regression is an entry that does worse than its baseline; a new or missing '
               'entry needs the baseline updated. Once the changes are intended, run with '
               '--update-baseline on every CI Python version.')
         categories = {r.name: r.category for r in results}
-        if any(categories.get(c['name']) == 'stdlib' for c in failing):
+        if not baseline_patch and any(categories.get(c['name']) == 'stdlib' for c in failing):
             print('A stdlib entry reads the standard library of the Python that runs the check, so a '
                   'patch release of that Python can change its result even though pycrefine did not '
-                  'change. Compare the interpreter\'s patch version with the one the baseline was '
-                  'recorded on before treating it as a decompiler regression.')
+                  'change. The baseline does not record its patch version; update it to get drift '
+                  'reported.')
     elif changes:
         print('Improvements are not recorded yet; run with --update-baseline to ratchet them.')
 
@@ -703,10 +725,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             changes = [c for c in changes if c['kind'] != 'missing']
 
     issues = {e.id: e.issues_for(python_tag()) for e in entries}
-    print_report(results, changes, baseline_path, args.verbose, issues)
+    baseline_patch = baseline.get('python_patch') if baseline_path is not None else None
+    print_report(results, changes, baseline_path, args.verbose, issues, baseline_patch)
     if args.report:
         args.report.write_text(
-            json.dumps(build_report(sys.executable, results, changes, baseline_path), indent=2) + '\n',
+            json.dumps(build_report(sys.executable, results, changes, baseline_path, baseline_patch), indent=2) + '\n',
             encoding='utf-8')
     return 1 if any(c['kind'] in FAILING_CHANGES for c in changes) else 0
 

@@ -184,6 +184,19 @@ Python version, and uploads the JSON report with the correctness report.
 Bytecode from 3.10 onwards can only be decompiled by the interpreter that wrote it, so each run covers
 the interpreter it runs under; `--python` runs the whole check under others in turn.
 
+**Interpreter patch versions.** Baselines are per minor version, and each also records the
+full version it was made on (`python_patch`, e.g. `3.12.3`), as does the JSON report next to
+`baseline_python_patch`. When a run fails on a different patch release, the report says so,
+because the `stdlib` entries read the running interpreter's library and can change
+between patch releases without any pycrefine change. After a deliberate CI interpreter
+bump, refresh both sets of baselines on that version and review the diffs: only entries
+that changed should differ, plus the `python_patch` line.
+
+```bash
+python quality/check_correctness.py --update-baseline    # the correctness gate's baseline
+python quality/check_differential.py --update-baseline   # the differential check's baselines
+```
+
 **Safety.** The corpus is committed and trusted, but it is executed, so every step
 runs in a subprocess with a wall-clock timeout, no inherited environment and an empty working
 directory, and (on POSIX) limits on CPU time, memory and file size. That bounds a
