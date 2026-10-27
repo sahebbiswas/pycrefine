@@ -264,18 +264,20 @@ def check_fixture(python: str, path: Path, workdir: str) -> FixtureResult:
     source = path.read_text(encoding='utf-8')
     result = FixtureResult(name, 'decompile_error', original_source=source)
 
-    original = observe(python, str(path), workdir)
-    if original is None or (original.exception or '').startswith(('SyntaxError', 'WorkerFailure')):
-        result.status = SOURCE_ERROR
-        result.detail = (original.exception if original else 'could not run the original')
-        return result
-
     pyc = os.path.join(workdir, name + '.pyc')
     try:
         py_compile.compile(str(path), cfile=pyc, doraise=True)
     except py_compile.PyCompileError as exc:
         result.status = SOURCE_ERROR
         result.detail = f'the fixture does not compile on Python {python_tag()}: {exc.msg}'
+        return result
+
+    # Only a fixture that compiles gets here, so a SyntaxError it raises while running is
+    # behavior to compare, not a reason to skip it.
+    original = observe(python, str(path), workdir)
+    if original is None or (original.exception or '').startswith('WorkerFailure'):
+        result.status = SOURCE_ERROR
+        result.detail = (original.exception if original else 'could not run the original')
         return result
 
     process = run_worker(python, 'decompile', pyc, DECOMPILE_TIMEOUT, workdir)

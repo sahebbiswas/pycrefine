@@ -183,6 +183,10 @@ class TestEndToEnd(unittest.TestCase):
         r = self.check("def broken(:\n")
         self.assertEqual(r.status, cd.SOURCE_ERROR)
 
+    def test_a_runtime_syntax_error_is_compared_not_skipped(self):
+        r = self.check("raise SyntaxError('at run time')\n")
+        self.assertEqual(r.status, "equivalent")
+
     def test_a_runaway_fixture_is_stopped(self):
         original = cd.RUN_TIMEOUT
         cd.RUN_TIMEOUT = 2
