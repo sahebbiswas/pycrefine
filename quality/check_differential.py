@@ -2,7 +2,8 @@
 """
 Differential behavior check: does the decompiled program do what the original did?
 
-For every fixture under quality/differential/fixtures/ the harness
+For every entry of the corpus (quality/corpus/manifest.json) that applies to the running
+Python, the harness
 
   1. compiles the source to a ``.pyc`` with the running interpreter,
   2. decompiles it with pycrefine,
@@ -10,20 +11,25 @@ For every fixture under quality/differential/fixtures/ the harness
   4. runs the original and the reconstructed source in separate, limited
      subprocesses and compares what they did: the exception (type and message),
      what they wrote to stdout and stderr, and the repr of a module-level
-     ``RESULT`` if the fixture defines one.
+     ``RESULT`` if the program defines one.
 
-Each fixture lands on a ladder, lowest to highest:
+Each entry lands on a ladder, lowest to highest:
 
   decompile_error  pycrefine raised, produced nothing, or ran out of time
   syntax_error     the decompiled source does not compile
+  compiles         it compiles (the best an entry with ``equivalence: compile_only`` can do)
   mismatch         it runs, but not like the original
   equivalent       same exception, output and RESULT
 
+An entry whose manifest says ``equivalence: compile_only`` (a standard-library module, which
+is not worth running) is never executed. The two rungs above ``syntax_error`` are never
+mixed: ``compiles`` is the top for those entries, ``equivalent`` for the others.
+
 The run is compared against a committed per-Python-version baseline
-(quality/differential/baselines/py<major>.<minor>.json). A fixture that drops to a lower
-rung than its baseline is a regression and fails the run, as does a fixture
-that is not in the baseline or that the baseline has but the run did not find.
-Improvements never fail; record them with --update-baseline.
+(quality/corpus/baselines/py<major>.<minor>.json). An entry that drops to a lower rung than
+its baseline is a regression and fails the run, as does an entry that is not in the
+baseline or that the baseline has but the run did not find. Improvements never fail; record
+them with --update-baseline.
 
 Bytecode from Python 3.10 onwards can only be decompiled by the interpreter that wrote it,
 so each run covers the interpreter it runs under. CI runs it once per supported version;
@@ -32,32 +38,37 @@ other, each against its own baseline (``--report`` and ``--baseline`` name a sin
 so they are only accepted with one interpreter).
 
 Usage:
-    # Every fixture, compared with the baseline for this Python:
+    # Every entry that applies to this Python, compared with its baseline:
     python quality/check_differential.py
 
-    # A few fixtures, with the original/reconstructed source of the failures:
+    # A few entries (by id or file name), with the generated source of the failures:
     python quality/check_differential.py flow_while exc_finally --verbose
+
+    # One category: feature, generated, realworld or stdlib
+    python quality/check_differential.py --category stdlib
 
     # Accept the current results as the new baseline:
     python quality/check_differential.py --update-baseline
 
-    # Other fixtures, another interpreter, a JSON report:
-    python quality/check_differential.py --fixtures path/to/dir --python python3.9 --report report.json
+    # Another corpus (a directory of .py files, or with its own manifest.json), another
+    # interpreter, a JSON report:
+    python quality/check_differential.py --corpus path/to/dir --python python3.9 --report report.json
 
 Exit codes:
     0  No regressions against the baseline
-    1  At least one regression, or a fixture/baseline mismatch
-    2  Configuration error (no baseline, wrong-version baseline, bad path)
+    1  At least one regression, or an entry/baseline mismatch
+    2  Configuration error (no baseline, wrong-version baseline, bad path or manifest)
 
-Safety: the fixtures are committed and trusted, but they are still executed, so every run
+Safety: the corpus is committed and trusted, but it is still executed, so every run
 happens in a subprocess with a wall-clock timeout, no inherited environment, an empty
 scratch directory as its working directory and, on POSIX, limits on CPU time, memory and
-file size. That bounds a runaway fixture; it is not a sandbox. Do not point --fixtures at
+file size. That bounds a runaway program; it is not a sandbox. Do not point --corpus at
 code you do not trust without running the whole harness in a container.
 """
 
 import argparse
 import contextlib
+import importlib.util
 import io
 import json
 import os
@@ -68,20 +79,24 @@ import tempfile
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 _QUALITY = Path(__file__).resolve().parent
 _ROOT = _QUALITY.parent
 
 SCHEMA_VERSION = 1
 
-DEFAULT_FIXTURES = _QUALITY / 'differential' / 'fixtures'
-BASELINE_DIR = _QUALITY / 'differential' / 'baselines'
+DEFAULT_CORPUS = _QUALITY / 'corpus'
 
-# The ladder, lowest to highest. ``source_error`` (the fixture itself does not run on this
-# interpreter) says nothing about the decompiler and is never gated.
-LEVELS = ['decompile_error', 'syntax_error', 'mismatch', 'equivalent']
+# The ladder, lowest to highest. ``source_error`` (the source itself does not compile on
+# this interpreter) says nothing about the decompiler and is never gated.
+LEVELS = ['decompile_error', 'syntax_error', 'compiles', 'mismatch', 'equivalent']
 SOURCE_ERROR = 'source_error'
+PASSING = ('equivalent', 'compiles')
+
+CATEGORIES = ('feature', 'generated', 'realworld', 'stdlib')
+EQUIVALENCE = ('required', 'compile_only')
+SUPPORT = ('supported', 'partial', 'unsupported')
 
 DECOMPILE_TIMEOUT = 60
 RUN_TIMEOUT = 20
@@ -105,8 +120,117 @@ def python_tag() -> str:
     return f'{sys.version_info[0]}.{sys.version_info[1]}'
 
 
-def default_baseline_path() -> Path:
-    return BASELINE_DIR / f'py{python_tag()}.json'
+def baseline_path_for(corpus: Path) -> Path:
+    return corpus / 'baselines' / f'py{python_tag()}.json'
+
+
+def parse_version(text: str) -> Tuple[int, int]:
+    major, minor = text.split('.')[:2]
+    return int(major), int(minor)
+
+
+# ---------------------------------------------------------------------------
+# The corpus
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Limitation:
+    """A known gap behind a non-passing entry: the issue, the versions it affects, a summary."""
+    issue: int
+    versions: Optional[List[str]]  # None means every version
+    summary: str
+
+    def applies_to(self, tag: str) -> bool:
+        return self.versions is None or tag in self.versions
+
+
+@dataclass
+class Entry:
+    id: str
+    category: str
+    path: Optional[Path] = None          # a source file in the corpus
+    module: Optional[str] = None         # or a module of the running interpreter's standard library
+    summary: str = ''
+    python_min: Tuple[int, int] = (3, 9)
+    python_max: Optional[Tuple[int, int]] = None
+    optimize: int = 0
+    equivalence: str = 'required'
+    support: str = 'supported'
+    limitations: List[Limitation] = field(default_factory=list)
+
+    @property
+    def name(self) -> str:
+        return self.id.rsplit('/', 1)[-1]
+
+    def applies_to(self, version: Tuple[int, int]) -> bool:
+        return version >= self.python_min and (self.python_max is None or version <= self.python_max)
+
+    def source_path(self) -> Optional[Path]:
+        """The file to compile: the corpus file, or the module's source in the running Python."""
+        if self.path is not None:
+            return self.path
+        spec = importlib.util.find_spec(self.module) if self.module else None
+        origin = getattr(spec, 'origin', None)
+        return Path(origin) if origin and origin.endswith('.py') else None
+
+    def issues_for(self, tag: str) -> List[int]:
+        return [lim.issue for lim in self.limitations if lim.applies_to(tag)]
+
+
+class ManifestError(Exception):
+    pass
+
+
+def load_corpus(directory: Path) -> List[Entry]:
+    """
+    The entries of the corpus in *directory*: those of its ``manifest.json``, or, without
+    one, every ``*.py`` file below it as a required-equivalence feature.
+    """
+    manifest_path = directory / 'manifest.json'
+    if not manifest_path.exists():
+        return [Entry(id=str(p.relative_to(directory).with_suffix('')).replace(os.sep, '/'),
+                      category='feature', path=p)
+                for p in sorted(directory.rglob('*.py'))]
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+    except ValueError as exc:
+        raise ManifestError(f'{_rel(manifest_path)} is not valid JSON: {exc}')
+    if manifest.get('schema_version') != SCHEMA_VERSION:
+        raise ManifestError(f'{_rel(manifest_path)} has schema_version {manifest.get("schema_version")}, '
+                            f'expected {SCHEMA_VERSION}')
+    return [_entry_from_manifest(directory, raw) for raw in manifest.get('entries', [])]
+
+
+def _entry_from_manifest(directory: Path, raw: dict) -> Entry:
+    try:
+        source = raw.get('source_python', {})
+        entry = Entry(
+            id=raw['id'],
+            category=raw['category'],
+            path=(directory / raw['path']) if 'path' in raw else None,
+            module=raw.get('module'),
+            summary=raw.get('summary', ''),
+            python_min=parse_version(source.get('min', '3.9')),
+            python_max=parse_version(source['max']) if source.get('max') else None,
+            optimize=raw.get('compile', {}).get('optimize', 0),
+            equivalence=raw.get('equivalence', 'required'),
+            support=raw.get('support', 'supported'),
+            limitations=[Limitation(
+                issue=lim['issue'],
+                versions=None if lim.get('versions', 'all') == 'all' else list(lim['versions']),
+                summary=lim.get('summary', '')) for lim in raw.get('limitations', [])],
+        )
+    except (KeyError, ValueError, AttributeError) as exc:
+        raise ManifestError(f'bad manifest entry {raw.get("id", raw)!r}: {exc!r}')
+    if entry.category not in CATEGORIES:
+        raise ManifestError(f'{entry.id}: category must be one of {", ".join(CATEGORIES)}')
+    if entry.equivalence not in EQUIVALENCE:
+        raise ManifestError(f'{entry.id}: equivalence must be one of {", ".join(EQUIVALENCE)}')
+    if entry.support not in SUPPORT:
+        raise ManifestError(f'{entry.id}: support must be one of {", ".join(SUPPORT)}')
+    if (entry.path is None) == (entry.module is None):
+        raise ManifestError(f'{entry.id}: give exactly one of "path" and "module"')
+    return entry
 
 
 # ---------------------------------------------------------------------------
@@ -127,8 +251,11 @@ def _worker_decompile(pyc_path: str) -> int:
     return 0
 
 
-def _worker_run(source_path: str) -> int:
-    """Run *source_path* as ``__main__`` and print a JSON description of what happened."""
+def _worker_run(source_path: str, optimize: int = 0) -> int:
+    """
+    Run *source_path* as ``__main__``, compiled at *optimize* (0 keeps asserts and
+    ``__debug__`` code), and print a JSON description of what happened.
+    """
     with open(source_path, encoding='utf-8') as handle:
         source = handle.read()
     out, err = io.StringIO(), io.StringIO()
@@ -137,7 +264,7 @@ def _worker_run(source_path: str) -> int:
     result = None
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
         try:
-            exec(compile(source, '<fixture>', 'exec'), namespace)  # noqa: S102
+            exec(compile(source, '<fixture>', 'exec', optimize=optimize), namespace)  # noqa: S102
         except SystemExit as exc:
             exception = f'SystemExit: {exc.code}'
         except BaseException as exc:  # noqa: BLE001 - the exception is the observation
@@ -177,9 +304,11 @@ class Process:
     timed_out: bool = False
 
 
-def run_worker(python: str, mode: str, path: str, timeout: int, cwd: str) -> Process:
-    """Run ``check_differential.py --worker MODE PATH`` under *python*, limited."""
+def run_worker(python: str, mode: str, path: str, timeout: int, cwd: str, optimize: int = 0) -> Process:
+    """Run ``check_differential.py --worker MODE PATH [OPTIMIZE]`` under *python*, limited."""
     command = [python, '-s', '-B', str(Path(__file__).resolve()), '--worker', mode, path]
+    if mode == 'run':
+        command.append(str(optimize))
     env = {'PYTHONHASHSEED': '0', 'PYTHONIOENCODING': 'utf-8', 'PYTHONUTF8': '1'}
     for name in ('SYSTEMROOT', 'PATH'):  # Windows cannot start Python without these
         if name in os.environ and os.name == 'nt':
@@ -198,7 +327,7 @@ def _text(data: Optional[bytes]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Checking one fixture
+# Checking one entry
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -223,24 +352,27 @@ class FixtureResult:
     name: str
     status: str
     detail: str = ''
+    category: str = ''
     mismatches: List[dict] = field(default_factory=list)
     original_source: str = ''
     decompiled_source: str = ''
 
     def as_dict(self) -> dict:
         data = {'name': self.name, 'status': self.status}
+        if self.category:
+            data['category'] = self.category
         if self.detail:
             data['detail'] = self.detail
         if self.mismatches:
             data['mismatches'] = self.mismatches
-        if self.status not in ('equivalent', SOURCE_ERROR) and self.decompiled_source:
+        if self.status not in PASSING and self.status != SOURCE_ERROR and self.decompiled_source:
             data['decompiled_source'] = _clip(self.decompiled_source)
         return data
 
 
-def observe(python: str, source_path: str, workdir: str) -> Optional[Observation]:
+def observe(python: str, source_path: str, workdir: str, optimize: int = 0) -> Optional[Observation]:
     """Run a source file under the worker; None when the run itself could not be observed."""
-    process = run_worker(python, 'run', source_path, RUN_TIMEOUT, workdir)
+    process = run_worker(python, 'run', source_path, RUN_TIMEOUT, workdir, optimize)
     if process.timed_out:
         return Observation(f'Timeout: exceeded {RUN_TIMEOUT}s', '', '', None)
     try:
@@ -258,27 +390,35 @@ def compare(original: Observation, rebuilt: Observation) -> List[dict]:
             for name in FIELDS if getattr(original, name) != getattr(rebuilt, name)]
 
 
-def check_fixture(python: str, path: Path, workdir: str) -> FixtureResult:
-    """Compile, decompile, validate and run one fixture."""
-    name = path.stem
+def check_entry(python: str, entry: Entry, workdir: str) -> FixtureResult:
+    """Compile, decompile, validate and (unless compile-only) run one corpus entry."""
+    result = FixtureResult(entry.id, 'decompile_error', category=entry.category)
+    path = entry.source_path()
+    if path is None or not path.exists():
+        result.status = SOURCE_ERROR
+        result.detail = f'no source for {entry.module or entry.id} on Python {python_tag()}'
+        return result
     source = path.read_text(encoding='utf-8')
-    result = FixtureResult(name, 'decompile_error', original_source=source)
+    result.original_source = source
+    run_it = entry.equivalence == 'required'
 
-    pyc = os.path.join(workdir, name + '.pyc')
+    pyc = os.path.join(workdir, entry.name + '.pyc')
     try:
-        py_compile.compile(str(path), cfile=pyc, doraise=True)
+        py_compile.compile(str(path), cfile=pyc, doraise=True, optimize=entry.optimize)
     except py_compile.PyCompileError as exc:
         result.status = SOURCE_ERROR
-        result.detail = f'the fixture does not compile on Python {python_tag()}: {exc.msg}'
+        result.detail = f'does not compile on Python {python_tag()}: {exc.msg}'
         return result
 
-    # Only a fixture that compiles gets here, so a SyntaxError it raises while running is
+    # Only an entry that compiles gets here, so a SyntaxError it raises while running is
     # behavior to compare, not a reason to skip it.
-    original = observe(python, str(path), workdir)
-    if original is None or (original.exception or '').startswith('WorkerFailure'):
-        result.status = SOURCE_ERROR
-        result.detail = (original.exception if original else 'could not run the original')
-        return result
+    original = None
+    if run_it:
+        original = observe(python, str(path), workdir, entry.optimize)
+        if original is None or (original.exception or '').startswith('WorkerFailure'):
+            result.status = SOURCE_ERROR
+            result.detail = original.exception if original else 'could not run the original'
+            return result
 
     process = run_worker(python, 'decompile', pyc, DECOMPILE_TIMEOUT, workdir)
     if process.timed_out:
@@ -290,7 +430,7 @@ def check_fixture(python: str, path: Path, workdir: str) -> FixtureResult:
         return result
     result.decompiled_source = process.stdout
 
-    rebuilt_path = os.path.join(workdir, name + '.decompiled.py')
+    rebuilt_path = os.path.join(workdir, entry.name + '.decompiled.py')
     with open(rebuilt_path, 'w', encoding='utf-8') as handle:
         handle.write(process.stdout)
     try:
@@ -299,6 +439,9 @@ def check_fixture(python: str, path: Path, workdir: str) -> FixtureResult:
         result.status = 'syntax_error'
         result.detail = f'{type(exc).__name__}: {exc}'
         return result
+    if not run_it:
+        result.status = 'compiles'
+        return result
 
     rebuilt = observe(python, rebuilt_path, workdir)
     result.mismatches = compare(original, rebuilt) if rebuilt else []
@@ -306,11 +449,11 @@ def check_fixture(python: str, path: Path, workdir: str) -> FixtureResult:
     return result
 
 
-def run_fixtures(python: str, fixtures: Sequence[Path]) -> List[FixtureResult]:
+def run_entries(python: str, entries: Sequence[Entry]) -> List[FixtureResult]:
     results = []
-    for path in fixtures:
+    for entry in entries:
         with tempfile.TemporaryDirectory(prefix='pycrefine-diff-') as workdir:
-            results.append(check_fixture(python, path, workdir))
+            results.append(check_entry(python, entry, workdir))
     return results
 
 
@@ -318,24 +461,12 @@ def run_fixtures(python: str, fixtures: Sequence[Path]) -> List[FixtureResult]:
 # Baseline
 # ---------------------------------------------------------------------------
 
-def to_baseline(results: Sequence[FixtureResult], previous: Optional[dict] = None) -> dict:
-    """
-    The baseline for *results*. ``issues`` maps every fixture that is not ``equivalent`` to
-    the issues that track why; they are written by hand, and carried over from *previous*
-    for fixtures that still fail (a fixture that now passes loses its entry).
-    """
-    old_issues = (previous or {}).get('issues', {})
-    ordered = sorted(results, key=lambda r: r.name)
-    baseline: dict = {
+def to_baseline(results: Sequence[FixtureResult]) -> dict:
+    return {
         'schema_version': SCHEMA_VERSION,
         'python_version': python_tag(),
-        'fixtures': {r.name: r.status for r in ordered if r.status != SOURCE_ERROR},
+        'entries': {r.name: r.status for r in sorted(results, key=lambda r: r.name) if r.status != SOURCE_ERROR},
     }
-    issues = {r.name: old_issues[r.name] for r in ordered
-              if r.status not in ('equivalent', SOURCE_ERROR) and r.name in old_issues}
-    if issues:
-        baseline['issues'] = issues
-    return baseline
 
 
 def diff_baseline(results: Sequence[FixtureResult], baseline: dict) -> List[dict]:
@@ -344,7 +475,7 @@ def diff_baseline(results: Sequence[FixtureResult], baseline: dict) -> List[dict
     ``current``. Kinds: ``regressed``, ``improved``, ``new`` (not in the baseline),
     ``missing`` (in the baseline, not run) and ``lost`` (could not be scored any more).
     """
-    expected: Dict[str, str] = dict(baseline.get('fixtures', {}))
+    expected: Dict[str, str] = dict(baseline.get('entries', {}))
     changes = []
     seen = set()
     for r in results:
@@ -388,8 +519,8 @@ def build_report(python: str, results: Sequence[FixtureResult], changes: Sequenc
         'python_version': python_tag(),
         'interpreter': python,
         'baseline': _rel(baseline_path) if baseline_path else None,
-        'summary': {'fixtures': len(results), **dict(sorted(counts.items()))},
-        'fixtures': [r.as_dict() for r in results],
+        'summary': {'entries': len(results), **dict(sorted(counts.items()))},
+        'entries': [r.as_dict() for r in results],
         'changes': list(changes),
     }
 
@@ -409,19 +540,19 @@ def print_report(results: Sequence[FixtureResult], changes: Sequence[dict],
     width = max((len(r.name) for r in results), default=10)
     for r in results:
         line = f'  {r.name:<{width}}  {r.status}'
-        if r.status != 'equivalent' and r.detail:
+        if r.status not in PASSING and r.detail:
             line += f'  ({r.detail.splitlines()[0][:100]})'
-        if r.name in issues and r.status != 'equivalent':
+        if r.status not in PASSING and issues.get(r.name):
             line += '  ' + ' '.join(f'#{n}' for n in issues[r.name])
         print(line)
-        if r.status in ('mismatch', 'syntax_error') or (verbose and r.status != 'equivalent'):
+        if r.status in ('mismatch', 'syntax_error') or (verbose and r.status not in PASSING):
             for m in r.mismatches:
                 print(f'      {m["field"]}: original={m["original"]!r:.200} decompiled={m["decompiled"]!r:.200}')
-        if verbose and r.decompiled_source and r.status not in ('equivalent', SOURCE_ERROR):
+        if verbose and r.decompiled_source and r.status not in PASSING + (SOURCE_ERROR,):
             print('      --- decompiled source ---')
             print('      ' + r.decompiled_source.rstrip().replace('\n', '\n      '))
-    equivalent = sum(1 for r in results if r.status == 'equivalent')
-    print(f'\n  {equivalent} of {len(results)} fixtures behave like the original')
+    passing = sum(1 for r in results if r.status in PASSING)
+    print(f'\n  {passing} of {len(results)} entries decompile as expected')
     if baseline_path is None:
         print('  baseline: not compared')
         return
@@ -431,9 +562,15 @@ def print_report(results: Sequence[FixtureResult], changes: Sequence[dict],
     failing = [c for c in changes if c['kind'] in FAILING_CHANGES]
     print('\nRESULT: ' + ('FAIL' if failing else 'PASS'))
     if failing:
-        print('A regression is a fixture that does worse than its baseline; a new or missing '
-              'fixture needs the baseline updated. Once the changes are intended, run with '
+        print('A regression is an entry that does worse than its baseline; a new or missing '
+              'entry needs the baseline updated. Once the changes are intended, run with '
               '--update-baseline on every CI Python version.')
+        categories = {r.name: r.category for r in results}
+        if any(categories.get(c['name']) == 'stdlib' for c in failing):
+            print('A stdlib entry reads the standard library of the Python that runs the check, so a '
+                  'patch release of that Python can change its result even though pycrefine did not '
+                  'change. Compare the interpreter\'s patch version with the one the baseline was '
+                  'recorded on before treating it as a decompiler regression.')
     elif changes:
         print('Improvements are not recorded yet; run with --update-baseline to ratchet them.')
 
@@ -442,15 +579,19 @@ def print_report(results: Sequence[FixtureResult], changes: Sequence[dict],
 # Command line
 # ---------------------------------------------------------------------------
 
-def find_fixtures(directory: Path, names: Sequence[str]) -> List[Path]:
-    available = sorted(directory.glob('*.py'))
+def select_entries(entries: Sequence[Entry], names: Sequence[str], category: Optional[str],
+                   version: Tuple[int, int]) -> List[Entry]:
+    """The entries to run: applicable to *version*, in the category, named by id or file name."""
+    chosen = [e for e in entries if e.applies_to(version) and (category is None or e.category == category)]
     if not names:
-        return available
-    by_name = {p.stem: p for p in available}
-    unknown = [n for n in names if n not in by_name]
-    if unknown:
-        raise FileNotFoundError(f'no such fixture in {_rel(directory)}: {", ".join(unknown)}')
-    return [by_name[n] for n in names]
+        return chosen
+    picked = []
+    for name in names:
+        found = [e for e in chosen if name in (e.id, e.name)]
+        if not found:
+            raise LookupError(f'no entry {name!r} that applies to Python {python_tag()}')
+        picked.extend(e for e in found if e not in picked)
+    return picked
 
 
 def run_under(interpreter: str, argv: Sequence[str]) -> int:
@@ -460,13 +601,15 @@ def run_under(interpreter: str, argv: Sequence[str]) -> int:
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description='Compare the behavior of fixtures with their decompiled versions.')
-    parser.add_argument('fixtures_named', nargs='*', metavar='FIXTURE',
-                        help='Fixture names to run (default: all)')
-    parser.add_argument('--fixtures', type=Path, default=DEFAULT_FIXTURES, metavar='DIR',
-                        help='Directory of .py fixtures (default: quality/differential/fixtures)')
+        description='Compare the behavior of corpus programs with their decompiled versions.')
+    parser.add_argument('entries_named', nargs='*', metavar='ENTRY',
+                        help='Entry ids or file names to run (default: all that apply)')
+    parser.add_argument('--corpus', type=Path, default=DEFAULT_CORPUS, metavar='DIR',
+                        help='Corpus directory with a manifest.json, or a directory of .py files '
+                             '(default: quality/corpus)')
+    parser.add_argument('--category', choices=CATEGORIES, help='Only entries of this category')
     parser.add_argument('--baseline', type=Path,
-                        help='Baseline file (default: quality/differential/baselines/py<ver>.json)')
+                        help='Baseline file (default: <corpus>/baselines/py<ver>.json)')
     parser.add_argument('--no-baseline', action='store_true',
                         help='Report only; do not compare against a baseline')
     parser.add_argument('--update-baseline', action='store_true',
@@ -476,8 +619,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help='Run under this interpreter instead (repeatable); each runs the '
                              'whole check against its own baseline')
     parser.add_argument('--verbose', '-v', action='store_true',
-                        help='Show the decompiled source of fixtures that are not equivalent')
-    parser.add_argument('--worker', nargs=2, metavar=('MODE', 'PATH'), help=argparse.SUPPRESS)
+                        help='Show the decompiled source of entries that do not pass')
+    parser.add_argument('--worker', nargs='+', metavar='ARG', help=argparse.SUPPRESS)
     return parser.parse_args(argv)
 
 
@@ -489,8 +632,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # -s keeps the PYTHON* variables the harness sets (hash seed, UTF-8) but, unlike -I,
         # leaves this script's own directory on sys.path; a fixture must not import the harness.
         sys.path[:] = [entry for entry in sys.path if Path(entry or '.').resolve() != _QUALITY]
-        mode, path = args.worker
-        return _worker_decompile(path) if mode == 'decompile' else _worker_run(path)
+        mode, path = args.worker[:2]
+        if mode == 'decompile':
+            return _worker_decompile(path)
+        return _worker_run(path, int(args.worker[2]) if len(args.worker) > 2 else 0)
 
     if len(args.python) > 1 and (args.report or args.baseline):
         print('Error: --report and --baseline name one file, but each --python interpreter needs '
@@ -507,36 +652,38 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.no_baseline and args.update_baseline:
         print('Error: --no-baseline and --update-baseline are mutually exclusive', file=sys.stderr)
         return 2
-    if not args.fixtures.is_dir():
-        print(f'Error: {args.fixtures} is not a directory', file=sys.stderr)
+    if not args.corpus.is_dir():
+        print(f'Error: {args.corpus} is not a directory', file=sys.stderr)
         return 2
-    args.fixtures = args.fixtures.resolve()  # workers run in a scratch directory
+    args.corpus = args.corpus.resolve()  # workers run in a scratch directory
     try:
-        fixtures = find_fixtures(args.fixtures, args.fixtures_named)
-    except FileNotFoundError as exc:
+        corpus = load_corpus(args.corpus)
+    except ManifestError as exc:
         print(f'Error: {exc}', file=sys.stderr)
         return 2
-    if not fixtures:
-        print(f'Error: no fixtures in {_rel(args.fixtures)}', file=sys.stderr)
+    try:
+        entries = select_entries(corpus, args.entries_named, args.category, sys.version_info[:2])
+    except LookupError as exc:
+        print(f'Error: {exc}', file=sys.stderr)
+        return 2
+    if not entries:
+        print(f'Error: nothing to run in {_rel(args.corpus)} on Python {python_tag()}', file=sys.stderr)
+        return 2
+    partial = bool(args.entries_named or args.category)
+    if args.update_baseline and partial:
+        print('Error: --update-baseline records every entry; do not name entries or a category',
+              file=sys.stderr)
         return 2
 
-    baseline_path = None if args.no_baseline else (args.baseline or default_baseline_path())
-    results = run_fixtures(sys.executable, fixtures)
+    baseline_path = None if args.no_baseline else (args.baseline or baseline_path_for(args.corpus))
+    results = run_entries(sys.executable, entries)
 
     if args.update_baseline:
-        if args.fixtures_named:
-            print('Error: --update-baseline records every fixture; do not name fixtures', file=sys.stderr)
-            return 2
         baseline_path.parent.mkdir(parents=True, exist_ok=True)
-        previous = (json.loads(baseline_path.read_text(encoding='utf-8'))
-                    if baseline_path.exists() else None)
-        baseline_path.write_text(json.dumps(to_baseline(results, previous), indent=2) + '\n',
-                                 encoding='utf-8')
+        baseline_path.write_text(json.dumps(to_baseline(results), indent=2) + '\n', encoding='utf-8')
         print(f'Baseline written to {_rel(baseline_path)}', file=sys.stderr)
-        baseline_path = None if args.no_baseline else baseline_path
 
     changes: List[dict] = []
-    issues: Dict[str, List[int]] = {}
     if baseline_path is not None:
         if not baseline_path.exists():
             print(f'Error: no baseline at {_rel(baseline_path)}. Create it with --update-baseline, '
@@ -552,10 +699,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                   f'but this is Python {python_tag()}', file=sys.stderr)
             return 2
         changes = diff_baseline(results, baseline)
-        issues = baseline.get('issues', {})
-        if args.fixtures_named:
+        if partial:
             changes = [c for c in changes if c['kind'] != 'missing']
 
+    issues = {e.id: e.issues_for(python_tag()) for e in entries}
     print_report(results, changes, baseline_path, args.verbose, issues)
     if args.report:
         args.report.write_text(
