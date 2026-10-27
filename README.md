@@ -81,6 +81,7 @@ print(source)
 | [Troubleshooting](https://github.com/sahebbiswas/pycrefine/blob/main/docs/troubleshooting.md) | fix setup problems and understand each error message |
 | [Limitations](https://github.com/sahebbiswas/pycrefine/blob/main/docs/limitations.md) | see what is not reconstructed yet, and how to tell |
 | [Architecture](https://github.com/sahebbiswas/pycrefine/blob/main/docs/architecture.md) | find your way around the code |
+| [Extending pycrefine](https://github.com/sahebbiswas/pycrefine/blob/main/docs/extending.md) | add an opcode handler or a Python version, and debug a bad decompile |
 | [Contributing](https://github.com/sahebbiswas/pycrefine/blob/main/CONTRIBUTING.md) | set up a development environment, run the checks, version and release |
 
 ## Contributing

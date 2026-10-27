@@ -4,7 +4,7 @@ Thank you for helping! This guide gets a development environment running and exp
 every pull request needs. [Every pull request](#every-pull-request) is the checklist,
 [Reporting gaps](#reporting-gaps) covers problems you find along the way, and
 [Versioning](#versioning) and [Releasing](#releasing) cover how versions and releases work.
-[Architecture](docs/architecture.md) is the map of the code.
+[Architecture](docs/architecture.md) is the map of the code, and [Extending pycrefine](docs/extending.md) covers adding an opcode or a Python version and debugging a bad decompile.
 
 ## Prerequisites
 
