@@ -156,7 +156,7 @@ Bytecode from 3.10 onwards can only be decompiled by the interpreter that wrote 
 the interpreter it runs under; `--python` runs the whole check under others in turn.
 
 **Safety.** The fixtures are committed and trusted, but they are executed, so every step
-runs in a subprocess with a wall-clock timeout, an empty environment and working
+runs in a subprocess with a wall-clock timeout, no inherited environment and an empty working
 directory, and (on POSIX) limits on CPU time, memory and file size. That bounds a
 runaway fixture; it is not a sandbox. Do not point `--fixtures` at code you do not trust
 without running the whole check in a container.

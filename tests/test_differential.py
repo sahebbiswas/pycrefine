@@ -86,6 +86,77 @@ class TestBaselineDiff(unittest.TestCase):
 
 
 @unittest.skipUnless(os.name == "posix" or sys.platform == "win32", "needs a subprocess")
+class TestSourceErrorsAreNotScored(unittest.TestCase):
+
+    def test_baseline_leaves_out_fixtures_that_did_not_run(self):
+        baseline = cd.to_baseline([result("a", "equivalent"), result("b", cd.SOURCE_ERROR)])
+        self.assertEqual(baseline["fixtures"], {"a": "equivalent"})
+
+    def test_a_fixture_that_never_ran_is_not_new(self):
+        base = {"fixtures": {"a": "equivalent"}}
+        self.assertEqual(cd.diff_baseline([result("a", "equivalent"), result("b", cd.SOURCE_ERROR)], base), [])
+
+    def test_a_scored_fixture_that_stops_running_is_still_lost(self):
+        base = {"fixtures": {"a": "equivalent"}}
+        (change,) = cd.diff_baseline([result("a", cd.SOURCE_ERROR)], base)
+        self.assertEqual(change["kind"], "lost")
+
+
+class TestCommandLine(unittest.TestCase):
+
+    def run_main(self, *argv):
+        from contextlib import redirect_stderr, redirect_stdout
+        from io import StringIO
+        out, err = StringIO(), StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = cd.main(list(argv))
+        return code, out.getvalue(), err.getvalue()
+
+    def test_unknown_fixture_is_a_configuration_error(self):
+        code, _, err = self.run_main("no_such_fixture", "--no-baseline")
+        self.assertEqual(code, 2)
+        self.assertIn("no such fixture", err)
+
+    def test_relative_fixture_directory_works(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "plain.py").write_text("print('hi')\nRESULT = 3\n", encoding="utf-8")
+            old = os.getcwd()
+            os.chdir(tmp)
+            try:
+                code, out, _ = self.run_main("--fixtures", ".", "--no-baseline")
+            finally:
+                os.chdir(old)
+        self.assertEqual(code, 0, out)
+        self.assertIn("equivalent", out)
+
+    def test_one_report_cannot_serve_several_interpreters(self):
+        code, _, err = self.run_main("--python", "a", "--python", "b", "--report", "r.json")
+        self.assertEqual(code, 2)
+        self.assertIn("one at a time", err)
+
+    def test_one_baseline_cannot_serve_several_interpreters(self):
+        code, _, _ = self.run_main("--python", "a", "--python", "b", "--baseline", "b.json")
+        self.assertEqual(code, 2)
+
+
+class TestWorkerEnvironment(unittest.TestCase):
+
+    def run_fixture(self, source):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "f.py")
+            path.write_text(source, encoding="utf-8")
+            done = cd.run_worker(sys.executable, "run", str(path), 30, tmp)
+        return json.loads(done.stdout)
+
+    def test_the_harness_sets_hash_seed_and_utf8(self):
+        seen = self.run_fixture("import os, sys\nprint(os.environ.get('PYTHONHASHSEED'), sys.flags.utf8_mode)\n")
+        self.assertEqual(seen["stdout"].split(), ["0", "1"])
+
+    def test_a_fixture_cannot_import_the_harness(self):
+        seen = self.run_fixture("import check_differential\n")
+        self.assertIn("ModuleNotFoundError", seen["exception"])
+
+
 class TestEndToEnd(unittest.TestCase):
     """Runs the real harness on throwaway fixtures, with the interpreter running the tests."""
 

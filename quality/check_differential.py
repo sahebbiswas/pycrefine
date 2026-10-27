@@ -27,8 +27,9 @@ Improvements never fail; record them with --update-baseline.
 
 Bytecode from Python 3.10 onwards can only be decompiled by the interpreter that wrote it,
 so each run covers the interpreter it runs under. CI runs it once per supported version;
-``--python EXE`` (repeatable) runs it under other interpreters from here and merges the
-results.
+``--python EXE`` (repeatable) runs it under other interpreters from here, one after the
+other, each against its own baseline (``--report`` and ``--baseline`` name a single file,
+so they are only accepted with one interpreter).
 
 Usage:
     # Every fixture, compared with the baseline for this Python:
@@ -178,7 +179,7 @@ class Process:
 
 def run_worker(python: str, mode: str, path: str, timeout: int, cwd: str) -> Process:
     """Run ``check_differential.py --worker MODE PATH`` under *python*, limited."""
-    command = [python, '-I', '-B', str(Path(__file__).resolve()), '--worker', mode, path]
+    command = [python, '-s', '-B', str(Path(__file__).resolve()), '--worker', mode, path]
     env = {'PYTHONHASHSEED': '0', 'PYTHONIOENCODING': 'utf-8', 'PYTHONUTF8': '1'}
     for name in ('SYSTEMROOT', 'PATH'):  # Windows cannot start Python without these
         if name in os.environ and os.name == 'nt':
@@ -326,7 +327,7 @@ def to_baseline(results: Sequence[FixtureResult], previous: Optional[dict] = Non
     baseline: dict = {
         'schema_version': SCHEMA_VERSION,
         'python_version': python_tag(),
-        'fixtures': {r.name: r.status for r in ordered},
+        'fixtures': {r.name: r.status for r in ordered if r.status != SOURCE_ERROR},
     }
     issues = {r.name: old_issues[r.name] for r in ordered
               if r.status not in ('equivalent', SOURCE_ERROR) and r.name in old_issues}
@@ -347,6 +348,8 @@ def diff_baseline(results: Sequence[FixtureResult], baseline: dict) -> List[dict
     for r in results:
         seen.add(r.name)
         before = expected.get(r.name)
+        if before is None and r.status == SOURCE_ERROR:
+            continue  # it never ran on this interpreter, so the baseline has no rung for it
         if before is None:
             changes.append({'name': r.name, 'kind': 'new', 'baseline': None, 'current': r.status})
             continue
@@ -444,7 +447,7 @@ def find_fixtures(directory: Path, names: Sequence[str]) -> List[Path]:
     by_name = {p.stem: p for p in available}
     unknown = [n for n in names if n not in by_name]
     if unknown:
-        raise SystemExit(f'Error: no such fixture in {_rel(directory)}: {", ".join(unknown)}')
+        raise FileNotFoundError(f'no such fixture in {_rel(directory)}: {", ".join(unknown)}')
     return [by_name[n] for n in names]
 
 
@@ -481,9 +484,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
 
     if args.worker:
+        # -s keeps the PYTHON* variables the harness sets (hash seed, UTF-8) but, unlike -I,
+        # leaves this script's own directory on sys.path; a fixture must not import the harness.
+        sys.path[:] = [entry for entry in sys.path if Path(entry or '.').resolve() != _QUALITY]
         mode, path = args.worker
         return _worker_decompile(path) if mode == 'decompile' else _worker_run(path)
 
+    if len(args.python) > 1 and (args.report or args.baseline):
+        print('Error: --report and --baseline name one file, but each --python interpreter needs '
+              'its own; run them one at a time', file=sys.stderr)
+        return 2
     if args.python:
         forwarded = _strip_python_options(argv)
         codes = []
@@ -498,7 +508,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not args.fixtures.is_dir():
         print(f'Error: {args.fixtures} is not a directory', file=sys.stderr)
         return 2
-    fixtures = find_fixtures(args.fixtures, args.fixtures_named)
+    args.fixtures = args.fixtures.resolve()  # workers run in a scratch directory
+    try:
+        fixtures = find_fixtures(args.fixtures, args.fixtures_named)
+    except FileNotFoundError as exc:
+        print(f'Error: {exc}', file=sys.stderr)
+        return 2
     if not fixtures:
         print(f'Error: no fixtures in {_rel(args.fixtures)}', file=sys.stderr)
         return 2
