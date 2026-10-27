@@ -8,8 +8,8 @@ every pull request needs. [Every pull request](#every-pull-request) is the check
 
 ## Prerequisites
 
-- **Python 3.9 or later**, and ideally the five versions CI tests: **3.9, 3.11, 3.12,
-  3.13 and 3.14**. Bytecode from 3.10 onwards is only readable by the matching interpreter, so a
+- **Python 3.9 or later**, and ideally the six versions CI tests: **3.9, 3.10, 3.11,
+  3.12, 3.13 and 3.14**. Bytecode from 3.10 onwards is only readable by the matching interpreter, so a
   fix is checked under each of them. [uv](https://docs.astral.sh/uv/) installs and runs
   them on demand (`uv python install 3.9 3.12 3.14`); pyenv or system packages work too.
 - Git.
@@ -46,32 +46,33 @@ CI runs all of these on every pull request; run them locally first.
 
 | Check | Command | CI workflow |
 |---|---|---|
-| Tests | `python -m pytest` | `Python 3.9`, `3.11`, `3.12`, `3.13`, `3.14` |
-| Correctness gate | `python quality/check_correctness.py` | the same five |
+| Tests | `python -m pytest` | `Python 3.9`, `3.10`, `3.11`, `3.12`, `3.13`, `3.14` |
+| Correctness gate | `python quality/check_correctness.py` | the same six |
 | Lint ratchet (pylint) | `python quality/check_lint.py` (on Python 3.12) | `Lint` |
 | Types (mypy) | `mypy` | `Lint` |
 | Version bumped | see [Versioning](#versioning) | `Version` |
 
-**Tests on each Python version.** A change to the decompiler needs the suite on 3.9, 3.11,
-3.12, 3.13 and 3.14:
+**Tests on each Python version.** A change to the decompiler needs the suite on 3.9, 3.10,
+3.11, 3.12, 3.13 and 3.14:
 
 ```bash
-for v in 3.9 3.11 3.12 3.13 3.14; do uv run --no-project --python "$v" --with pytest python -m pytest -q; done
+for v in 3.9 3.10 3.11 3.12 3.13 3.14; do uv run --no-project --python "$v" --with pytest python -m pytest -q; done
 ```
 
-3.11 is only partly supported. Its known failures are listed in
+3.10 and 3.11 are only partly supported. Their known failures are listed in
 [`tests/known_failures.json`](tests/known_failures.json), grouped by the issue that tracks
 each one, and run as strict expected failures: CI stays green while the gap exists and goes
 red when a listed test starts to pass. **When you fix a gap, delete its entries** (and
-close the issue). A test that checks several cases with `subTest` is listed with
-`"mode": "skip"` instead, because pytest reports each subtest separately. A change must not
-add new failures on 3.11; if you find one you won't fix, file an issue and list the test.
-3.10 is partly supported too and not in CI yet.
+close the issue). A test that checks several cases with `subTest(case=name)` is listed
+under `"cases"` instead, with the names of the cases that fail: pytest reports each
+subtest separately, so only those cases are expected to fail (strictly, like a test) and
+the rest keep running. A change must not
+add new failures on 3.10 or 3.11; if you find one you won't fix, file an issue and list the test.
 
 **Correctness gate.** `quality/check_correctness.py` decompiles the corpus (`corpus/` and
 the foreign-version fixtures) and fails if any file or function gets worse than its
 per-version baseline in `quality/baselines/`. When your change improves results, record
-the new baseline **on each of 3.9, 3.11, 3.12, 3.13 and 3.14**:
+the new baseline **on each of 3.9, 3.10, 3.11, 3.12, 3.13 and 3.14**:
 
 ```bash
 python quality/check_correctness.py --update-baseline
@@ -111,8 +112,10 @@ done
   `decompile(src)` and `assert_contains`.
 - **Every fix gets a regression test** with the reproduction from its issue.
 - **Mark version limits explicitly**, with the reason:
-  `@unittest.skipIf(sys.version_info[:2] in ((3, 10), (3, 11)), "...")`. Do not skip a
-  version that CI tests (3.9, 3.11, 3.12, 3.13, 3.14) to make a test pass.
+  `@unittest.skipIf(sys.version_info[:2] in ((3, 10), (3, 11)), "...")` for something a
+  version cannot do at all. A test that fails on a version because of a decompiler gap is
+  not skipped: list it in [`tests/known_failures.json`](tests/known_failures.json) under
+  the issue that tracks the gap, so CI notices when the gap is fixed.
 - **Keep fixtures out of the repository.** Tests compile their input on the fly. The only
   committed `.pyc` files are the foreign-version fixtures in `tests/fixtures/foreign_pyc/`,
   rebuilt with `tests/fixtures/regenerate_foreign_pyc.py` (which records their source
