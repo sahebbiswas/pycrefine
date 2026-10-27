@@ -381,24 +381,16 @@ class Decompiler39(DecompilerGeneric):
         self.blocks.append((end, "finally_body"))
 
     # clean instruction dispatch for 3.9-specific opcodes
-    def _handle_instruction(self, instr: BytecodeInstruction):
+    def _dispatch_instruction(self, instr: BytecodeInstruction):
         # Suppress exception-path finally bodies
         """
         Process a single disassembled instruction and update the decompiler's internal state and reconstructed output accordingly.
 
-        This method dispatches on the instruction's opname to mutate the expression stack, emit or suppress reconstructed source lines, open/close control-flow blocks, adjust indentation and block stacks, modify prescan/suppression tables, and advance or adjust the program counter as needed. It implements numerous 3.9-specific and generic bytecode-to-source translations (for example: binary/inplace ops, comparisons, various CALL/CALL_* forms including class and decorator patterns, while-loop guards and while True headers, ternary/compound-condition suppression, unpacking/call/attribute/method patterns, and try/except/finally handler and with/cleanup machinery). The handler delegates to the superclass for opcodes it does not special-case.
+        This method dispatches on the instruction's opname to mutate the expression stack, emit or suppress reconstructed source lines, open/close control-flow blocks, adjust indentation and block stacks, modify prescan/suppression tables, and advance or adjust the program counter as needed. It implements numerous 3.9-specific and generic bytecode-to-source translations (for example: binary/inplace ops, comparisons, various CALL/CALL_* forms including class and decorator patterns, while-loop guards and while True headers, unpacking/call/attribute/method patterns, and try/except/finally handler and with/cleanup machinery). The handler delegates to the superclass for opcodes it does not special-case.
 
         Parameters:
             instr (BytecodeInstruction): The instruction to handle; uses fields such as opname, arg, argval, offset, and is_jump_target.
         """
-        # Suppress then-branch instructions of detected ternary expressions
-        if instr.offset in self.prescan.ternary_suppress:
-            return
-        # Suppress intermediate instructions belonging to a compound boolean
-        if instr.offset in self.prescan.compound_suppress:
-            if self.stack:
-                self.stack.pop()
-            return
         if instr.offset in self.prescan.finally_from_handler:
             self._open_finally_from_handler(instr)
         if self.prescan.finally_body_suppress and instr.offset in self.prescan.finally_body_suppress:
@@ -511,7 +503,7 @@ class Decompiler39(DecompilerGeneric):
             # Pattern for 3.9 asserts: if not cond: raise AssertionError
             # We skip explicit emit here and let DecompilerGeneric._op_pop_jump_if_false handle it
             # if it's not a while-break. This prevents double-emission or mis-indentation.
-            super()._handle_instruction(instr)
+            super()._dispatch_instruction(instr)
             return
 
         if opname in _bin39:
@@ -953,7 +945,7 @@ class Decompiler39(DecompilerGeneric):
                         and prev_instr.opname == "POP_BLOCK"):
                     # Implicit for-loop continuation after try clean exit — suppress.
                     return
-                super()._handle_instruction(instr)
+                super()._dispatch_instruction(instr)
             else:
                 # Check for break: forward jump whose target matches the enclosing
                 # while-loop end.  This must be tested BEFORE the _except_header_indents
@@ -980,7 +972,7 @@ class Decompiler39(DecompilerGeneric):
                         instr.arg, instr.argval,
                         instr.offset, instr.starts_line, instr.is_jump_target,
                     )
-                    super()._handle_instruction(fwd_instr)
+                    super()._dispatch_instruction(fwd_instr)
 
         # JUMP_FORWARD: in try/except context (after POP_BLOCK) suppress the
         # if/else detection logic in the parent handler — it would create spurious
@@ -989,7 +981,7 @@ class Decompiler39(DecompilerGeneric):
             if self.emit.except_header_indents:
                 pass  # suppress else-detection inside try/except context
             else:
-                super()._handle_instruction(instr)
+                super()._dispatch_instruction(instr)
 
         # DUP_TOP — Python 3.9 typed/bare except handler entry.
         # Real 3.9.13 bytecode layout for typed except (from dis_out_39.txt):
@@ -1176,7 +1168,7 @@ class Decompiler39(DecompilerGeneric):
 
                 if is_nested_handler:
                     # Real nested try: inside an except — emit try: normally.
-                    super()._handle_instruction(instr)
+                    super()._dispatch_instruction(instr)
                 else:
                     # 'as e' cleanup guard — silent, track boundary without try:.
                     self.blocks.append((jump_target, "exc_cleanup"))
@@ -1203,9 +1195,9 @@ class Decompiler39(DecompilerGeneric):
                     # Plain try/finally (no except) — emit try: normally.
                     # POP_BLOCK will see try_body with a finally_targets offset
                     # and emit finally:.
-                    super()._handle_instruction(instr)
+                    super()._dispatch_instruction(instr)
             else:
-                super()._handle_instruction(instr)
+                super()._dispatch_instruction(instr)
 
         # POP_TOP at a handler jump-target: Python 3.9 bare except starts with
         # three consecutive POP_TOPs (exc_type, exc_value, traceback) instead of
@@ -1304,4 +1296,4 @@ class Decompiler39(DecompilerGeneric):
             pass  # already handled by the JUMP target structure; no source emission
 
         else:
-            super()._handle_instruction(instr)
+            super()._dispatch_instruction(instr)

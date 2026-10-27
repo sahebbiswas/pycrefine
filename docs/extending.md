@@ -29,14 +29,25 @@ How to add an opcode handler, add a Python version, and track down a bad decompi
        self.stack.append(f"({left} @@ {right})")
    ```
 
-3. **Register it** in `_build_dispatch` (a dict from opcode name, the string in
-   `dis.opname`, to bound method). Add one entry per opcode the handler serves:
+3. **Register it** in `_BASE_DISPATCH`, a module-level dict in `generic.py` from opcode
+   name (the string in `dis.opname`) to the handler's method *name*, as a string, not a
+   bound method or a function. Add one entry per opcode the handler serves:
 
    ```python
-   "FOO_BAR": self._op_foo_bar,
+   "FOO_BAR": "_op_foo_bar",
    ```
 
-   Opcodes with no effect on the source map to `_op_nop`. An opcode with no entry falls
+   When only one backend has the opcode, or a backend handles it differently, declare it
+   in that class's `DISPATCH_OVERRIDES` instead, a class attribute of the same shape.
+   Declare it in the class body; the table is built when the class is created, so
+   changing either dict at run time has no effect:
+
+   ```python
+   class Decompiler311Plus(DecompilerGeneric):
+       DISPATCH_OVERRIDES = {"FOO_BAR": "_op_foo_bar"}
+   ```
+
+   Opcodes with no effect on the source map to `_op_no_op` (`_op_nop` is the handler for `NOP`, which can mark where a `try` or `while True` begins). An opcode with no entry falls
    to `_op_unknown`, which guesses from the name; a guess is a bug waiting for a
    version that names things differently, so register what you add.
 4. **Add a test** in the `tests/` file for the feature area, as a minimal source that
@@ -49,8 +60,20 @@ How to add an opcode handler, add a Python version, and track down a bad decompi
    every CI Python and remove any `tests/known_failures.json` entry or corpus
    `limitations` item that the change fixes.
 
-`tests/test_dispatch.py` fails when a dispatch entry names a method that does not exist,
-so a typo in step 3 shows up as a test failure on every version.
+`tests/test_dispatch.py` fails when a dispatch entry names a method that does not exist or an
+opcode no supported Python has (`test_every_entry_names_a_handler_method` and
+`test_registered_names_are_real_opcodes`), so a typo in step 3 shows up as a test failure on
+every version. A name is accepted when the running interpreter's `dis.opmap` has it, or when
+it is listed in one of two sets at the top of that file:
+
+- `OPCODES_OF_OTHER_VERSIONS`: a real CPython opcode that the interpreter running the tests
+  may not have, because it exists only in another supported version (or is a specialised
+  form). Add the opcode here when you register one.
+- `SYNTHETIC_OPCODES`: an instruction the decompiler builds itself (opcode -1), such as
+  `INLINED_COMPREHENSION`.
+
+Check the spelling against `dis.opmap` of the Python the opcode comes from before adding it:
+the list exists to allow real names, so a typo added to it would silence the test.
 
 ## Add a Python version
 

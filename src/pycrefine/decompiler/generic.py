@@ -4,7 +4,7 @@ import dis
 import re
 import sys
 import types
-from typing import Any, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from .._constants import (
     _AUG_ASSIGN_MAP,
     _FILLER_OPS,
@@ -119,9 +119,131 @@ _ASYNC_DEF_REASON = "async def is not decompiled and is written as a plain def (
 _NO_SOURCE_OPS = frozenset(("RETURN_GENERATOR", "GEN_START", "EXTENDED_ARG", "LOAD_LOCALS", "POP_BLOCK"))
 
 
+# Opcode name -> name of the handler method. Built once, merged per backend class by
+# `DecompilerGeneric.__init_subclass__` (a backend adds `DISPATCH_OVERRIDES`).
+_BASE_DISPATCH: Dict[str, str] = {
+    # Loads
+    "LOAD_CONST": "_op_load", "LOAD_NAME": "_op_load", "LOAD_FAST": "_op_load",
+    "LOAD_GLOBAL": "_op_load", "LOAD_SMALL_INT": "_op_load", "LOAD_FAST_BORROW": "_op_load",
+    "LOAD_CONST_BORROW": "_op_load", "LOAD_DEREF": "_op_load",
+    "LOAD_FAST_BORROW_LOAD_FAST_BORROW": "_op_load", "LOAD_GLOBAL_MODULE": "_op_load",
+    "LOAD_CLOSURE": "_op_load", "LOAD_CLASSDEREF": "_op_load", "LOAD_COMMON_CONSTANT": "_op_load",
+
+    # Stores
+    "STORE_NAME": "_op_store", "STORE_FAST": "_op_store", "STORE_GLOBAL": "_op_store",
+    "STORE_DEREF": "_op_store",  # closure variable assignment (issue_2, Python 3.9 closures)
+    "STORE_ATTR": "_op_store_attr", "STORE_SUBSCR": "_op_store_subscr",
+
+    # Imports
+    "IMPORT_NAME": "_op_import_name", "IMPORT_FROM": "_op_import_from",
+
+    # Subscripts
+    "BINARY_SLICE": "_op_binary_slice",
+    "BINARY_OP": "_op_binary",
+    "BINARY_SUBSCR": "_op_binary_subscr",
+
+    # Exceptions
+    "RAISE_VARARGS": "_op_raise_varargs", "PUSH_EXC_INFO": "_op_push_exc_info",
+    "CHECK_EXC_MATCH": "_op_check_exc_match", "POP_EXCEPT": "_op_cleanup",
+    "RERAISE": "_op_cleanup",
+    "SETUP_FINALLY": "_op_setup_finally",
+    "SETUP_WITH": "_op_setup_with", "BEFORE_WITH": "_op_before_with",
+    "WITH_EXCEPT_START": "_op_with_except_start",
+
+    # Functions
+    "MAKE_FUNCTION": "_op_make_function", "SET_FUNCTION_ATTRIBUTE": "_op_set_function_attribute",
+
+    # Returns
+    "RETURN_VALUE": "_op_return_value", "RETURN_CONST": "_op_return_const",
+
+    # Functions
+    "CALL": "_op_call", "CALL_FUNCTION": "_op_call",
+    "CALL_FUNCTION_KW": "_op_call", "CALL_FUNCTION_EX": "_op_call",
+    "CALL_METHOD": "_op_call", "CALL_KW": "_op_call",
+    "KW_NAMES": "_op_kw_names",
+    "PUSH_NULL": "_op_push_null",
+
+    # Pops
+    "POP_TOP": "_op_pop_top",
+
+    # Load build class
+    "LOAD_BUILD_CLASS": "_op_load_build_class",
+
+    # Stack manip
+    "ROT_TWO": "_op_stack_manip", "ROT_THREE": "_op_stack_manip", "ROT_FOUR": "_op_stack_manip",
+    "COPY": "_op_stack_manip", "SWAP": "_op_stack_manip",
+    "DUP_TOP": "_op_dup_top", "DUP_TOP_TWO": "_op_dup_top",
+
+    # Strings
+    "FORMAT_VALUE": "_op_fstring", "FORMAT_SIMPLE": "_op_fstring",
+    "BUILD_STRING": "_op_build_string",
+
+    # Jumps
+    "JUMP_FORWARD": "_op_jump", "JUMP_BACKWARD": "_op_jump",
+    "JUMP_ABSOLUTE": "_op_jump",
+    "POP_JUMP_IF_FALSE": "_op_conditional_jump",
+    "POP_JUMP_IF_TRUE": "_op_conditional_jump",
+    "JUMP_IF_FALSE_OR_POP": "_op_jump_if_false_or_pop",
+    "JUMP_IF_TRUE_OR_POP": "_op_jump_if_true_or_pop",
+    "POP_JUMP_IF_NONE": "_op_conditional_jump",
+    "POP_JUMP_IF_NOT_NONE": "_op_conditional_jump",
+    "JUMP_IF_NOT_EXC_MATCH": "_op_jump_if_not_exc_match",
+
+    # Unary operators
+    "UNARY_NEGATIVE": "_op_unary", "UNARY_POSITIVE": "_op_unary",
+    "UNARY_INVERT": "_op_unary", "UNARY_NOT": "_op_unary",
+    "CALL_INTRINSIC_1": "_op_unary",   # 3.12+: unary plus is an intrinsic
+
+    # Iteration
+    "FOR_ITER": "_op_for_iter",
+
+    # Collections
+    "BUILD_TUPLE": "_op_build_collection", "BUILD_LIST": "_op_build_collection",
+    "BUILD_SET": "_op_build_collection", "BUILD_MAP": "_op_build_map",
+    "BUILD_SLICE": "_op_build_slice",
+    "BUILD_CONST_KEY_MAP": "_op_build_const_key_map",
+    "GET_ITER": "_op_no_op", "UNPACK_SEQUENCE": "_op_unpack_sequence",
+    "UNPACK_EX": "_op_unpack_sequence",
+    "LIST_APPEND": "_op_list_append",
+    "LIST_EXTEND": "_op_list_extend", "DICT_MERGE": "_op_dict_merge",
+    "DICT_UPDATE": "_op_dict_merge",
+    "SET_ADD": "_op_set_add", "SET_UPDATE": "_op_set_update",
+    "MAP_ADD": "_op_map_add",
+
+    # Secondary loads
+    "LOAD_ATTR": "_op_load_attr", "LOAD_METHOD": "_op_load_attr",
+    "LOAD_SUPER_ATTR": "_op_load_super_attr",
+    "LOAD_FROM_DICT_OR_GLOBALS": "_op_load_from_dict_or_globals",
+
+    # Coroutines
+    "YIELD_VALUE": "_op_yield_value",
+
+    # Deletes
+    "DELETE_NAME": "_op_delete", "DELETE_FAST": "_op_delete", "DELETE_GLOBAL": "_op_delete",
+    "DELETE_DEREF": "_op_delete",
+
+    # Error
+    "LOAD_ASSERTION_ERROR": "_op_load_assertion_error",
+
+    # Nops
+    "RESUME": "_op_no_op", "PRECALL": "_op_no_op", "CACHE": "_op_no_op",
+    "COPY_FREE_VARS": "_op_no_op", "NOT_TAKEN": "_op_no_op", "MAKE_CELL": "_op_no_op",
+    "END_FOR": "_op_no_op", "POP_ITER": "_op_no_op", "YIELD_FROM": "_op_no_op",
+    "NOP": "_op_nop",
+    # Synthetic: the comprehension inliner builds this instruction itself (opcode -1).
+    "INLINED_COMPREHENSION": "_op_inlined_comprehension",
+}
+
+
 class DecompilerGeneric(DecompilerBase):
+    _DISPATCH: Dict[str, str] = _BASE_DISPATCH
+    # A backend declares only what it adds or changes; the table is merged along the MRO
+    # when the class is created, so no instance builds a table of its own.
+    DISPATCH_OVERRIDES: Dict[str, str] = {}
+
     def __init_subclass__(cls, **kw):
         super().__init_subclass__(**kw)
+        cls._DISPATCH = {**cls._DISPATCH, **cls.__dict__.get("DISPATCH_OVERRIDES", {})}
 
     def __init__(self, code_obj: types.CodeType, indent_level: int = 0, beautification_level: str = 'core', target_version: Optional[Tuple[int, int]] = None, strict: bool = False):
         """
@@ -138,7 +260,6 @@ class DecompilerGeneric(DecompilerBase):
         self.emit = EmissionState()
         self.doc = DocState()
         self._enclosing_locals: set = set()           # names bound in enclosing function scopes
-        self._build_dispatch()
 
     # ------------------------------------------------------------------
     # Main loop
@@ -3630,148 +3751,44 @@ class DecompilerGeneric(DecompilerBase):
     # Instruction dispatch
     # ------------------------------------------------------------------
 
-    def _build_dispatch(self):
+    def _handle_instruction(self, instr: BytecodeInstruction):
         """
-        Initialize the opcode dispatch table used to route bytecode instructions to handler methods.
-
-        Populates self._dispatch with a mapping from opcode name strings to the corresponding
-        instance methods that implement their decompilation behavior (loads, stores, imports,
-        calls, control-flow, exception handling, collection builders, stack manipulation, and
-        no-op/suppressed opcodes). The table includes expanded call opcode routing, sequence
-        unpack handling, slice/subscript operators, combined no-op entries, and specialized
-        handlers for exception/with/try-related opcodes.
-        """
-        self._dispatch = {
-            # Loads
-            "LOAD_CONST": self._op_load, "LOAD_NAME": self._op_load, "LOAD_FAST": self._op_load,
-            "LOAD_GLOBAL": self._op_load, "LOAD_SMALL_INT": self._op_load, "LOAD_FAST_BORROW": self._op_load,
-            "LOAD_CONST_BORROW": self._op_load, "LOAD_DEREF": self._op_load,
-            "LOAD_FAST_BORROW_LOAD_FAST_BORROW": self._op_load, "LOAD_GLOBAL_MODULE": self._op_load,
-            "LOAD_CLOSURE": self._op_load, "LOAD_CLASSDEREF": self._op_load, "LOAD_COMMON_CONSTANT": self._op_load,
-
-            # Stores
-            "STORE_NAME": self._op_store, "STORE_FAST": self._op_store, "STORE_GLOBAL": self._op_store,
-            "STORE_DEREF": self._op_store,  # closure variable assignment (issue_2, Python 3.9 closures)
-            "STORE_ATTR": self._op_store_attr, "STORE_SUBSCR": self._op_store_subscr,
-
-            # Imports
-            "IMPORT_NAME": self._op_import_name, "IMPORT_FROM": self._op_import_from,
-
-            # Subscripts
-            "BINARY_SLICE": self._op_binary_slice,
-            "BINARY_OP": self._op_binary,
-            "BINARY_SUBSCR": self._op_binary_subscr,
-
-            # Exceptions
-            "RAISE_VARARGS": self._op_raise_varargs, "PUSH_EXC_INFO": self._op_push_exc_info,
-            "CHECK_EXC_MATCH": self._op_check_exc_match, "POP_EXCEPT": self._op_cleanup,
-            "RERAISE": self._op_cleanup,
-            "SETUP_FINALLY": self._op_setup_finally, "SETUP_EXCEPT": self._op_setup_finally,
-            "SETUP_WITH": self._op_setup_with, "BEFORE_WITH": self._op_before_with,
-            "WITH_EXCEPT_START": self._op_with_except_start, "BEGIN_FINALLY": self._op_with_except_start,
-
-            # Functions
-            "MAKE_FUNCTION": self._op_make_function, "SET_FUNCTION_ATTRIBUTE": self._op_set_function_attribute,
-
-            # Returns
-            "RETURN_VALUE": self._op_return_value, "RETURN_CONST": self._op_return_const,
-
-            # Functions
-            "CALL": self._op_call, "CALL_FUNCTION": self._op_call,
-            "CALL_FUNCTION_KW": self._op_call, "CALL_FUNCTION_EX": self._op_call,
-            "CALL_METHOD": self._op_call, "CALL_KW": self._op_call,
-            "KW_NAMES": self._op_kw_names,
-            "PUSH_NULL": self._op_push_null,
-
-            # Pops
-            "POP_TOP": self._op_pop_top,
-
-            # Load build class
-            "LOAD_BUILD_CLASS": self._op_load_build_class,
-
-            # Stack manip
-            "ROT_TWO": self._op_stack_manip, "ROT_THREE": self._op_stack_manip, "ROT_FOUR": self._op_stack_manip,
-            "COPY": self._op_stack_manip, "SWAP": self._op_stack_manip,
-            "DUP_TOP": self._op_dup_top, "DUP_TOP_TWO": self._op_dup_top,
-
-            # Strings
-            "FORMAT_VALUE": self._op_fstring, "FORMAT_SIMPLE": self._op_fstring,
-            "BUILD_STRING": self._op_build_string,
-
-            # Jumps
-            "JUMP_FORWARD": self._op_jump, "JUMP_BACKWARD": self._op_jump,
-            "JUMP_ABSOLUTE": self._op_jump,
-            "POP_JUMP_IF_FALSE": self._op_conditional_jump,
-            "POP_JUMP_IF_TRUE": self._op_conditional_jump,
-            "JUMP_IF_FALSE_OR_POP": self._op_jump_if_false_or_pop,
-            "JUMP_IF_TRUE_OR_POP": self._op_jump_if_true_or_pop,
-            "POP_JUMP_IF_NONE": self._op_conditional_jump,
-            "POP_JUMP_IF_NOT_NONE": self._op_conditional_jump,
-            "JUMP_IF_NOT_EXC_MATCH": self._op_jump_if_not_exc_match,
-
-            # Unary operators
-            "UNARY_NEGATIVE": self._op_unary, "UNARY_POSITIVE": self._op_unary,
-            "UNARY_INVERT": self._op_unary, "UNARY_NOT": self._op_unary,
-            "CALL_INTRINSIC_1": self._op_unary,   # 3.12+: unary plus is an intrinsic
-
-            # Iteration
-            "FOR_ITER": self._op_for_iter,
-            "INLINED_COMPREHENSION": self._op_inlined_comprehension,
-
-            # Collections
-            "BUILD_TUPLE": self._op_build_collection, "BUILD_LIST": self._op_build_collection,
-            "BUILD_SET": self._op_build_collection, "BUILD_MAP": self._op_build_map,
-            "BUILD_SLICE": self._op_build_slice,
-            "BUILD_CONST_KEY_MAP": self._op_build_const_key_map,
-            "GET_ITER": self._op_no_op, "UNPACK_SEQUENCE": self._op_unpack_sequence,
-            "UNPACK_EX": self._op_unpack_sequence,
-            "LIST_APPEND": self._op_list_append,
-            "LIST_EXTEND": self._op_list_extend, "DICT_MERGE": self._op_dict_merge,
-            "DICT_UPDATE": self._op_dict_merge,
-            "SET_ADD": self._op_set_add, "SET_UPDATE": self._op_set_update,
-            "MAP_ADD": self._op_map_add,
-
-            # Secondary loads
-            "LOAD_ATTR": self._op_load_attr, "LOAD_METHOD": self._op_load_attr,
-            "LOAD_SUPER_ATTR": self._op_load_super_attr,
-            "LOAD_FROM_DICT_OR_GLOBALS": self._op_load_from_dict_or_globals,
-
-            # Coroutines
-            "YIELD_VALUE": self._op_yield_value,
-
-            # Deletes
-            "DELETE_NAME": self._op_delete, "DELETE_FAST": self._op_delete, "DELETE_GLOBAL": self._op_delete,
-            "DELETE_DEREF": self._op_delete,
-
-            # Error
-            "LOAD_ASSERTION_ERROR": self._op_load_assertion_error,
-
-            # Nops
-            "RESUME": self._op_no_op, "PRECALL": self._op_no_op, "CACHE": self._op_no_op,
-            "COPY_FREE_VARS": self._op_no_op, "NOT_TAKEN": self._op_no_op, "MAKE_CELL": self._op_no_op,
-            "END_FOR": self._op_no_op, "POP_ITER": self._op_no_op, "YIELD_FROM": self._op_no_op,
-            "NOP": self._op_nop,
-        }
-
-    def _handle_instruction(self, instr: BytecodeInstruction):  # noqa: C901
-        """
-        Process a single disassembled bytecode instruction, update the decompiler's internal state, and emit reconstructed source lines when appropriate.
+        Process one disassembled instruction. This is the only `_handle_instruction`: a
+        template that applies the suppression every backend shares and then hands the
+        instruction to `_dispatch_instruction`, which backends override.
 
         Parameters:
             instr (BytecodeInstruction): The instruction to handle; this method may mutate the decompiler's expression stack, block/indentation state, program counter, and reconstructed output buffer.
         """
-        opname = instr.opname
-        # Suppress then-branch instructions of detected ternary expressions;
-        # the ternary is pushed as a whole expression at POP_JUMP_IF time.
-        if instr.offset in self.prescan.ternary_suppress:
+        if self._suppressed_by_prescan(instr):
             return
-        # Suppress intermediate instructions belonging to a compound boolean
-        # These are the non-controlling POP_JUMP_IF_* instructions; pop their
-        # clause operand from the stack so the stack stays balanced.
+        self._dispatch_instruction(instr)
+
+    def _suppressed_by_prescan(self, instr: BytecodeInstruction) -> bool:
+        """
+        Whether a prescan marked `instr` as part of a larger construct, so it must not be replayed.
+
+        The checks run in this order, and the order matters:
+
+        1. `ternary_suppress`: then-branch instructions of a ternary; the ternary is pushed
+           as a whole at its POP_JUMP_IF.
+        2. `compound_suppress`: the non-controlling POP_JUMP_IF_* of a compound condition.
+           Replay pops that clause's operand so the stack stays balanced.
+
+        Everything later (finally and handler bodies, with-exit calls) is checked by
+        `_dispatch_instruction`, because those depend on the merge labels it handles first.
+        """
+        if instr.offset in self.prescan.ternary_suppress:
+            return True
         if instr.offset in self.prescan.compound_suppress:
             if self.stack:
                 self.stack.pop()
-            return
+            return True
+        return False
+
+    def _dispatch_instruction(self, instr: BytecodeInstruction):  # noqa: C901
+        """Replay `instr` once the shared suppression has let it through; backends override this."""
+        opname = instr.opname
         # When we reach a finally-merge label, emit the pre-decompiled except
         # handlers + finally body in source order, then continue normally.
         # This check MUST come before _finally_body_suppress since the merge-label
@@ -3804,9 +3821,9 @@ class DecompilerGeneric(DecompilerBase):
         if instr.offset in self.prescan.wrapper_body_suppress:
             return
 
-        handler = self._dispatch.get(opname)
-        if handler:
-            handler(instr)
+        handler_name = self._DISPATCH.get(opname)
+        if handler_name:
+            getattr(self, handler_name)(instr)
         else:
             self._op_unknown(instr)
 
