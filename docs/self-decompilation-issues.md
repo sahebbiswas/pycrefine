@@ -1,5 +1,12 @@
 # pycrefine.py — Self-Decompilation Issue Registry
 
+> **Archived (October 2026).** This is a historical analysis of `pycrefine_v2.py`
+> decompiling itself on Python 3.12, from before the code became the `pycrefine` package.
+> It is not maintained: the status markers, line numbers and file names below describe
+> that version, not the current code. For what does not work today, see
+> [Limitations](limitations.md) and the open issues; for how to debug a decompile, see
+> [Extending pycrefine](extending.md#debug-a-bad-decompile).
+
 > **Scope:** Analysis of `pycrefine_v2.py` decompiling its own `.pyc` (Python 3.12, CPython).
 > Issues are ranked by severity within each category. Each entry includes the source construct,
 > the decompiled output, and a description of the impact.

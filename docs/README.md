@@ -18,8 +18,11 @@
 
 - [Contributing](../CONTRIBUTING.md): setup, the checks every pull request runs, writing
   tests, reporting gaps, versioning and releasing.
-- [Architecture](architecture.md): the repository and package layout, and how a `.pyc`
-  file becomes source.
+- [Architecture](architecture.md): the repository and package layout, how a `.pyc`
+  file becomes source, the passes and their order, the decompiler's state, and the
+  quirks of each Python version.
+- [Extending pycrefine](extending.md): add an opcode handler or a Python version, and
+  debug a bad decompile.
 - [Correctness gate](correctness.md): the corpus check that keeps results from getting
   worse, its baselines and its report.
 - [Linting and type checking](linting.md): the pylint ratchet and strict mypy.
