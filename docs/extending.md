@@ -79,9 +79,11 @@ the list exists to allow real names, so a typo added to it would silence the tes
 
 Support for a new CPython has these parts, in this order:
 
-1. **Magic numbers.** `versions.py` maps the header's magic number to a version, and
-   `loader.get_decompiler` maps the version to a backend. A version that is not in both
-   is an error.
+1. **The version row.** `versions.VERSIONS` is the one table: add a `PythonVersion` row with the
+   magic-number band, the backend's class name and the support level (`reconstructable` while it is
+   being brought up, `tested` once CI and the baselines exist). A backend that is a new class is
+   also added to `loader._BACKENDS`. Magic numbers above the table are refused, not sent to the
+   newest backend, so a new Python is rejected until it has a row.
 2. **A backend.** Start from the closest one: `Decompiler311Plus` covers 3.10–3.12 and
    `Decompiler314` covers 3.13–3.14. Copy only what differs. Opcodes that were renamed
    or fused (the 3.13 `LOAD_FAST_LOAD_FAST` family, 3.14's `LOAD_SPECIAL`) are handled by

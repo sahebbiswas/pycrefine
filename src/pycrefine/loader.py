@@ -8,11 +8,17 @@ import types
 from typing import Any, Dict, List, Optional, Tuple
 from .codeobj import ForeignCode, _is_code
 from .decompiler.base import DecompilerBase
-from .decompiler.generic import DecompilerGeneric
 from .decompiler.py311 import Decompiler311Plus
 from .decompiler.py314 import Decompiler314
 from .decompiler.py39 import Decompiler39
-from .versions import _get_python_version_from_magic
+from .versions import _get_python_version_from_magic, supported_range, version_for_magic
+
+# Backend classes by the names the version table uses (versions.VERSIONS).
+_BACKENDS = {
+    "Decompiler39": Decompiler39,
+    "Decompiler311Plus": Decompiler311Plus,
+    "Decompiler314": Decompiler314,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -263,14 +269,17 @@ def get_decompiler(filepath: str, beautification_level: str = 'core', strict: bo
     host_magic = int.from_bytes(importlib.util.MAGIC_NUMBER, "little")
     host_version_id = host_magic & 0xFFFF
 
-    if magic != host_magic and not (3410 <= version_id <= 5000):
-        # We don't recognize the magic or it's very old/corrupt
+    row = version_for_magic(version_id)
+    if row is None or not row.reconstructable:
+        # Not a Python this table can rebuild: unrecognized or corrupt, an old one it only
+        # recognizes, or one newer than the table. Say which, rather than guess a backend.
         input_ver = _get_python_version_from_magic(version_id)
         host_ver = _get_python_version_from_magic(host_version_id)
 
         msg = f"Invalid or unsupported Python magic number: 0x{magic:08x} (version id: {version_id})."
         if input_ver:
-            msg += f"\n- Input file appears to be from Python {input_ver}."
+            msg += f"\n- Input file appears to be from Python {input_ver}, which pycrefine does not support"
+            msg += f" (it supports Python {supported_range()})."
         else:
             msg += "\n- Input file version is unrecognized or may be corrupt."
 
@@ -279,23 +288,20 @@ def get_decompiler(filepath: str, beautification_level: str = 'core', strict: bo
 
         raise ValueError(msg)
 
-    tv_str = _get_python_version_from_magic(version_id)
-    if tv_str:
-        target_version = tuple(map(int, tv_str.rstrip('+').split('.')))
-    else:
-        target_version = sys.version_info[:2]
+    tv_str = row.tag
+    target_version = row.version
 
     # Only the 3.9 backend decodes bytecode itself; the 3.10+ backends read
     # instructions through the host's dis module, so they need a host of the
     # same minor version.
-    if (magic != host_magic and version_id >= 3430
+    if (magic != host_magic and not row.cross_host
             and target_version != sys.version_info[:2]):
         host_ver = f"{sys.version_info[0]}.{sys.version_info[1]}"
         raise ValueError(
-            f"Cannot decompile Python {tv_str or 'unknown'} bytecode from '{filepath}' "
+            f"Cannot decompile Python {tv_str} bytecode from '{filepath}' "
             f"under Python {host_ver}: Python 3.10+ bytecode can only be decompiled "
             f"by the same Python minor version that wrote it. Run pycrefine under "
-            f"Python {tv_str or 'that version'}. (Python 3.9 bytecode works on any host.)"
+            f"Python {tv_str}. (Python 3.9 bytecode works on any host.)"
         )
 
     code_obj = None
@@ -325,23 +331,12 @@ def get_decompiler(filepath: str, beautification_level: str = 'core', strict: bo
                 failures.append(f"parser at offset {offset}: {type(exc).__name__}: {exc}")
 
     if not _is_code(code_obj):
-        msg = f"Could not find valid marshal code object in .pyc file '{filepath}'."
-        if tv_str:
-            msg += f" (Inferred version: Python {tv_str})"
+        msg = f"Could not find valid marshal code object in .pyc file '{filepath}'. (Inferred version: Python {tv_str})"
         if failures:
             msg += "\nTried each header size:\n" + "\n".join(f"- {f}" for f in failures)
         raise ValueError(msg)
 
-    if 3410 <= version_id <= 3429:      # 3.9
-        dec = Decompiler39(code_obj, beautification_level=beautification_level, target_version=target_version, strict=strict)
-    elif version_id >= 3550:            # 3.13+
-        # 3.13 introduced the STORE_FAST_STORE_FAST / LOAD_FAST_LOAD_FAST
-        # superinstructions, which only Decompiler314 understands.
-        dec = Decompiler314(code_obj, beautification_level=beautification_level, target_version=target_version, strict=strict)
-    elif version_id >= 3430:            # 3.10 - 3.12
-        dec = Decompiler311Plus(code_obj, beautification_level=beautification_level, target_version=target_version, strict=strict)
-    else:
-        # Fallback for very old or unrecognised versions
-        dec = DecompilerGeneric(code_obj, target_version=target_version, beautification_level=beautification_level, strict=strict)
+    backend = _BACKENDS[row.backend]  # type: ignore[index]  # a reconstructable row always names one
+    dec = backend(code_obj, beautification_level=beautification_level, target_version=target_version, strict=strict)
 
     return dec

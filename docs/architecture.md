@@ -23,7 +23,7 @@ source. For the development workflow, see [CONTRIBUTING.md](../CONTRIBUTING.md).
 | `__init__.py` | `__version__` (the single source of the version) and re-exports. `import pycrefine` keeps exposing every name the former single-file module had. |
 | `cli.py`, `__main__.py` | the `pycrefine` command |
 | `loader.py` | `get_decompiler`: reads the header, picks the backend, and loads the code object (with `MarshalParser` for files from another Python version) |
-| `versions.py` | magic-number ranges → Python versions |
+| `versions.py` | the version table: for each Python, its magic-number band, backend, support level (`recognized`, `reconstructable`, `tested`) and whether its bytecode reads on another host |
 | `codeobj.py` | `ForeignCode`, a stand-in for code objects of another Python version |
 | `decompiler/base.py` | `DecompilerBase`: the shared state and helpers (return-statement checks, literal formatting) |
 | `decompiler/generic.py` | `DecompilerGeneric`: the version-independent engine (prescans, dispatch table, opcode handlers) |
@@ -39,7 +39,7 @@ source. For the development workflow, see [CONTRIBUTING.md](../CONTRIBUTING.md).
 ## From `.pyc` to source
 
 1. **Load** (`loader.get_decompiler`). The 16-byte header gives the magic number, which
-   `versions.py` maps to a Python version and that to a backend class. A file from the
+   `versions.py` maps to a row of its version table, and the row names the backend class. A number in a row that is only recognized is refused with the version it belongs to, and one above every band (a newer Python) is refused as `3.15+`. A number outside both the table and that band is refused as unrecognized or possibly corrupt. A file from the
    running Python is loaded with `marshal`. A 3.9 file under another Python is parsed by
    `MarshalParser` and disassembled with the bundled 3.9 opcode table. 3.10+ files need
    the matching interpreter, because those backends read instructions through the host's
@@ -239,8 +239,8 @@ Things CPython does that the passes undo, each with the test or issue that taugh
   `python -m dis` on a minimal example under each Python shows the difference.
 - **A new opcode.** Add a handler to the dispatch table in `generic.py`, or to the
   backend whose Python introduced it ([Extending pycrefine](extending.md)).
-- **A new Python version.** Map its magic numbers in `versions.py`, pick or add a backend
-  in `loader.py` and `decompiler/`, add a CI workflow and a correctness baseline
+- **A new Python version.** Add a row to the table in `versions.py` (its magic band, backend and
+  support level), add the backend to `loader._BACKENDS` if it is a new class, add a CI workflow and a correctness baseline
   (`quality/baselines/py3.X.json`), and update [Limitations](limitations.md)
   ([checklist](extending.md#add-a-python-version)).
 - **Output formatting only.** `postprocess.py`, gated on the beautification level when it

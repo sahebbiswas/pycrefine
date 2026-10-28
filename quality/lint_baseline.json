@@ -118,7 +118,6 @@
     "src/pycrefine/decompiler/py39.py::trailing-whitespace::<module>": 5,
     "src/pycrefine/expr.py::arguments-differ::_BoolExpr.join": 1,
     "src/pycrefine/instructions.py::too-many-instance-attributes::BytecodeInstruction": 1,
-    "src/pycrefine/loader.py::superfluous-parens::<module>": 1,
     "src/pycrefine/loader.py::too-complex::MarshalParser._load_inner": 1,
     "src/pycrefine/loader.py::too-complex::get_decompiler": 1,
     "src/pycrefine/loader.py::too-few-public-methods::MarshalParser": 1,
@@ -134,7 +133,6 @@
     "src/pycrefine/postprocess.py::too-many-nested-blocks::flatten_elif": 4,
     "src/pycrefine/postprocess.py::too-many-statements::flatten_elif": 1,
     "src/pycrefine/postprocess.py::too-many-statements::post_process_source": 1,
-    "src/pycrefine/postprocess.py::trailing-whitespace::<module>": 4,
-    "src/pycrefine/versions.py::too-many-return-statements::_get_python_version_from_magic": 1
+    "src/pycrefine/postprocess.py::trailing-whitespace::<module>": 4
   }
 }

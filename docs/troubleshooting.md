@@ -86,7 +86,12 @@ This is typical for files extracted from PyInstaller archives or written with
 `marshal.dump`. Add a header and try again; see
 [Use cases](use-cases.md#decompile-a-pyc-without-a-header-pyinstaller-marshal-dumps).
 
-### `Invalid or unsupported Python magic number ... appears to be from Python 3.15+`
+### `Invalid or unsupported Python magic number ... appears to be from Python 3.15+` (or `3.8`, `3.7`, ...)
+
+The message names the Python the file seems to come from and the versions pycrefine supports
+(3.9 to 3.14). A Python newer or older than that is refused instead of being decompiled with the
+nearest backend.
+
 
 If the file is not really from a future Python, it is not a `.pyc` file at all: a source
 file, a text file or a compressed archive also starts with four bytes that pycrefine reads
@@ -94,18 +99,17 @@ as a magic number. Check that you passed the `.pyc` (usually in `__pycache__/`) 
 the `.py` next to it. ([#153](https://github.com/sahebbiswas/pycrefine/issues/153) will
 make this message clearer.)
 
-### `Could not find valid marshal code object ... (Inferred version: Python 3.8)`
+### `Could not find valid marshal code object ... (Inferred version: Python 3.12)`
 
-The file was written by Python 3.8 or older, which pycrefine does not support. Use a
-decompiler that targets those versions (for example `uncompyle6` or `decompyle3`).
-
-When the version is not the cause, the message ends with `Tried each header size` and a list of
-why each place a code object could start failed to load (`marshal at offset 16: EOFError: ...`).
-That happens to a file that passes the first checks (at least 16 bytes, a recognized magic
-number) but has a truncated or corrupt body, and it fails at every offset. A file that is
-shorter than 16 bytes or has an unrecognized magic number is rejected before any offset is
-tried, with its own message (`Invalid or unsupported Python magic number` above, or `too short`
-below) and no such list.
+The file's version is supported but its code object cannot be read. (Files from Python 3.8 or
+older are refused earlier, with `appears to be from Python 3.8`; use a decompiler that targets
+those versions, for example `uncompyle6` or `decompyle3`.) The message ends with
+`Tried each header size` and a list of why each place a code object could start failed to load
+(`marshal at offset 16: EOFError: ...`). That happens to a file that passes the first checks (at
+least 16 bytes, a supported magic number) but has a truncated or corrupt body, and it fails at
+every offset. A file that is shorter than 16 bytes or has an unrecognized or unsupported magic
+number is rejected before any offset is tried, with its own message
+(`Invalid or unsupported Python magic number` above, or `too short` below) and no such list.
 
 ### `Invalid .pyc file '...': too short (found N bytes)`
 

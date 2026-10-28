@@ -104,7 +104,7 @@ python -c "import sys; print(int.from_bytes(open(sys.argv[1], 'rb').read(2), 'li
 | 3531 | 3.12 |
 | 3571 | 3.13 |
 | 3627 | 3.14 |
-| 3413 or lower | 3.8 or older (not supported) |
+| 3419 or lower | 3.8 or older (not supported) |
 
 Pre-release Pythons use numbers between these; pycrefine accepts the whole range of each
 version. If you try the wrong interpreter, pycrefine's error names the right one anyway.
