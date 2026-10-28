@@ -7,7 +7,7 @@ start with [Getting started](getting-started.md); for recipes, see
 ## Command line
 
 ```text
-pycrefine [-h] [-o OUTPUT] [--beautification-level {none,core,aggressive}] input
+pycrefine [-h] [-o OUTPUT] [--beautification-level {none,core,aggressive}] [--strict] input
 ```
 
 `python -m pycrefine ...` and, from a source checkout, `python pycrefine.py ...` take the
@@ -18,6 +18,7 @@ same arguments.
 | `input` | The `.pyc` file to decompile. |
 | `-o OUTPUT`, `--output OUTPUT` | Write the source to `OUTPUT` (UTF-8) instead of standard output. A confirmation goes to standard error. |
 | `--beautification-level LEVEL` | How much the output is tidied after decompiling: `core` (the default), `none` or `aggressive`. See below. |
+| `--strict` | Stop at the first place the decompiler cannot reconstruct reliably (exit status `3`) instead of guessing. See [Diagnostics](#diagnostics). |
 | `-h`, `--help` | Show the usage and exit. |
 
 There is no `--version` option yet ([#153](https://github.com/sahebbiswas/pycrefine/issues/153));
@@ -41,6 +42,25 @@ Newer Pythons often compile a short `if/elif/else` at the end of a function into
 `if` blocks that each repeat the rest of the function, so the levels can give the same
 output there.
 
+### Diagnostics
+
+When the decompiler has to guess, it says so. Each such place becomes a diagnostic: a
+`Warning: ...` line on standard error, and a block of `#` comment lines at the top of the
+output that lists them, so the source cannot be mistaken for a clean decompile. Output with
+nothing to report has no header. With `--strict` the first diagnostic stops the run instead.
+
+Each diagnostic has a kind:
+
+| Kind | Meaning |
+|---|---|
+| `unsupported_opcode` | No handler for this instruction. |
+| `unknown_control_flow` | Jumps or blocks that do not form a shape the decompiler knows. |
+| `stack_underflow` | An instruction needed an operand that was not there. |
+| `ambiguous_expression` | An operator or operand could not be determined. |
+| `incomplete_exception_reconstruction` | A `try`/`except`/`finally` the backend cannot rebuild (Python 3.10). |
+| `unsupported_version_construct` | A construct this Python version's backend lacks, such as `match`, `async` or type parameters. |
+| `internal_error` | The decompiler itself failed on this part. |
+
 ### Output and exit status
 
 | Exit status | When | Output |
@@ -50,6 +70,7 @@ output there.
 | `1` | The file decompiled to nothing (for example an empty module). | `Warning: Decompiler returned no source code for INPUT` on standard error. |
 | `1` | `-o OUTPUT` could not be written. | `Error: Failed to save decompiled output to OUTPUT: ...` |
 | `1` | Any other failure, including a missing input file ([#153](https://github.com/sahebbiswas/pycrefine/issues/153)). | A Python traceback on standard error. |
+| `3` | `--strict` was given and the decompiler hit a place it cannot reconstruct reliably. | `Error: strict mode: ...` on standard error, naming the problem and where it is. Nothing is written to standard output or `OUTPUT`. |
 | `2` | The arguments are invalid (for example an unknown `--beautification-level`). | The usage and an error from argparse. |
 
 Decompiled source is only ever written to standard output or `OUTPUT`; every message goes
@@ -64,13 +85,14 @@ decompiler = pycrefine.get_decompiler("module.cpython-312.pyc", beautification_l
 source = decompiler.decompile()
 ```
 
-### `pycrefine.get_decompiler(filepath, beautification_level="core")`
+### `pycrefine.get_decompiler(filepath, beautification_level="core", strict=False)`
 
 Reads the `.pyc` file at `filepath`, works out which Python wrote it from the magic number,
 and returns a decompiler for it.
 
 - `filepath`: path to a `.pyc` file (a `str` or an `os.PathLike`).
 - `beautification_level`: `"core"`, `"none"` or `"aggressive"`, as on the command line.
+- `strict`: raise `DecompilationError` at the first diagnostic instead of guessing.
 
 Raises:
 
@@ -90,6 +112,19 @@ or simplified instead of raising, and the rest of the file is still decompiled (
 (`compile(source, filename, "exec")`) when you need to know that it is at least valid
 Python.
 
+### `decompiler.diagnostics`
+
+After `decompile()`, a list of `pycrefine.Diagnostic` values, one per place the decompiler
+had to guess (empty for a clean decompile). Each has `kind`, `reason`, `python_version`,
+`opcode`, `offset` and `code_name`; `str(d)` is a one-line description and `d.as_dict()` a
+plain dict. `pycrefine.comment_block(diagnostics)` formats them as the `#` header the
+command writes.
+
+### `pycrefine.DecompilationError`
+
+A `ValueError` raised by `decompile()` in strict mode. Its `diagnostic` attribute is the
+`Diagnostic` that stopped it.
+
 ### `pycrefine.__version__`
 
 The installed version, for example `"1.1.1"`.
@@ -101,7 +136,7 @@ that wants to behave exactly like the `pycrefine` command.
 
 ### Stability
 
-`get_decompiler`, `decompile()`, `__version__`, `main` and the `pycrefine` command are the
+`get_decompiler`, `decompile()`, `diagnostics`, `Diagnostic`, `DecompilationError`, `__version__`, `main` and the `pycrefine` command are the
 public interface and follow the [versioning policy](../CONTRIBUTING.md#versioning).
 `import pycrefine` also exposes the decompiler classes and many helpers (most of them
 starting with `_`) for compatibility with the old single-file module and for the tests;

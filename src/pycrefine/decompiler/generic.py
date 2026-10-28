@@ -34,6 +34,8 @@ from .._constants import (
 from ..codeobj import _is_code
 from .base import DecompilerBase
 from ..expr import StackNULL, _BoolExpr, _CollectionAccumSentinel, _UnpackAccessor, _unary_operand
+from ..diagnostics import (AMBIGUOUS_EXPRESSION, UNKNOWN_CONTROL_FLOW, UNSUPPORTED_OPCODE,
+                           UNSUPPORTED_VERSION_CONSTRUCT, DecompilationError)
 from ..instructions import (BytecodeInstruction, _const_repr, _copy_signature, _is_anonymous_func_body,
                             _match_finally_copy, _render_func_tuple)
 from ..postprocess import _string_continuation_rows, collapse_chained_comparisons, post_process_source
@@ -90,11 +92,36 @@ _BOOLOP_PARTS = frozenset(("JUMP_IF_TRUE_OR_POP", "JUMP_IF_FALSE_OR_POP", "COPY"
                            "POP_JUMP_IF_TRUE", "POP_JUMP_IF_FALSE", "POP_TOP"))
 
 
+# Constructs the backends do not rebuild yet, by the opcode that gives them away.
+_UNSUPPORTED_CONSTRUCTS = {
+    **dict.fromkeys(("MATCH_SEQUENCE", "MATCH_MAPPING", "MATCH_KEYS", "MATCH_CLASS", "GET_LEN"),
+                    "match statements are not decompiled (issue #85)"),
+    **dict.fromkeys(("GET_AWAITABLE", "GET_AITER", "GET_ANEXT", "END_ASYNC_FOR", "SEND", "END_SEND",
+                     "CLEANUP_THROW", "ASYNC_GEN_WRAP", "BEFORE_ASYNC_WITH"),
+                    "await, async for and async with are not decompiled (issue #85)"),
+    **dict.fromkeys(("LOAD_FROM_DICT_OR_DEREF", "CALL_INTRINSIC_2"),
+                    "type parameters (PEP 695) are not decompiled (issue #85)"),
+    **dict.fromkeys(("CONVERT_VALUE", "FORMAT_WITH_SPEC"),
+                    "f-string conversions and format specs are dropped on 3.13 and later (issue #157)"),
+}
+
+# `async def` functions (CO_COROUTINE, CO_ASYNC_GENERATOR). One with no `await` in it has no opcode
+# that gives it away, so it is found by its flags when the function is made.
+_CO_COROUTINE = 0x80
+_CO_ASYNC_GENERATOR = 0x200
+_ASYNC_DEF_REASON = "async def is not decompiled and is written as a plain def (issue #85)"
+
+# Opcodes that reach `_op_unknown` and are correctly left out of the source: they set up
+# generators and wide operands, or (3.10's `POP_BLOCK`) belong to block-based exception
+# handling, which is reported once per code object by `_report_version_gaps`.
+_NO_SOURCE_OPS = frozenset(("RETURN_GENERATOR", "GEN_START", "EXTENDED_ARG", "LOAD_LOCALS", "POP_BLOCK"))
+
+
 class DecompilerGeneric(DecompilerBase):
     def __init_subclass__(cls, **kw):
         super().__init_subclass__(**kw)
 
-    def __init__(self, code_obj: types.CodeType, indent_level: int = 0, beautification_level: str = 'core', target_version: Optional[Tuple[int, int]] = None):
+    def __init__(self, code_obj: types.CodeType, indent_level: int = 0, beautification_level: str = 'core', target_version: Optional[Tuple[int, int]] = None, strict: bool = False):
         """
         Initialize the decompiler state for generic Python bytecode reconstruction.
 
@@ -127,7 +154,7 @@ class DecompilerGeneric(DecompilerBase):
             _pending_finally_merge (Optional[int]): Merge offset currently pending emission, if any.
             _nop_to_push_exc (dict): Mapping from try-entry NOP offsets to the following PUSH_EXC_INFO offset (populated by prescan).
         """
-        super().__init__(code_obj, indent_level, beautification_level, target_version)
+        super().__init__(code_obj, indent_level, beautification_level, target_version, strict)
         self.has_doc = False
         self._doc_load_offset: Optional[int] = None    # LOAD_CONST of a module/class docstring
         self._class_doc_store_offsets: dict = {}       # STORE_NAME __doc__ of a class docstring
@@ -550,6 +577,8 @@ class DecompilerGeneric(DecompilerBase):
         """
         self._disassemble()
         self.instructions = self._split_superinstructions(self.instructions)
+        self._report_version_gaps()
+        self._check_jump_targets()
         self._collapse_inlined_comprehensions()
         self._fold_inlined_builtin_calls()
         self._drop_unreachable_handlers()
@@ -627,6 +656,7 @@ class DecompilerGeneric(DecompilerBase):
 
     def _decompile_step(self, instr: BytecodeInstruction) -> None:
         """Decompile one instruction of the main pass (``self.pc`` is already past it)."""
+        self._current_instr = instr
         # Close any blocks whose end offset we have passed
         self._close_blocks(instr.offset)
         snapshot = self._else_stack_snapshots.pop(instr.offset, None)
@@ -1392,6 +1422,7 @@ class DecompilerGeneric(DecompilerBase):
             parts: list = []  # list of (cond_str, is_or_connector, next_t)
 
             sub = _pick_decompiler_class(self)(self.code_obj, self.indent_level, self.beautification_level, target_version=self.target_version)
+            self._share_diagnostics_with(sub)
 
             for _, jinstr, expr_instrs, _ in group:
                 for xi in expr_instrs:
@@ -1772,6 +1803,10 @@ class DecompilerGeneric(DecompilerBase):
         sub = _pick_decompiler_class(self)(self.code_obj, self.indent_level,
                                           self.beautification_level,
                                           target_version=self.target_version)
+        # The slice is only a candidate: when it is rejected the caller reconstructs the
+        # comprehension another way. So its reports are collected apart, and reach this
+        # decompiler (and stop a strict run) only if the slice is the one that is used.
+        sub.diagnostics = []
         try:
             run = [ins for ins in instrs if ins.opname not in self._COMP_SKIP]
             sub.instructions = run + ([consumer] if consumer is not None else [])
@@ -1786,6 +1821,11 @@ class DecompilerGeneric(DecompilerBase):
             return None
         if sub.reconstructed or len(sub.stack) != count:
             return None
+        for diagnostic in sub.diagnostics:
+            if diagnostic not in self.diagnostics:
+                self.diagnostics.append(diagnostic)
+            if self.strict:
+                raise DecompilationError(diagnostic)
         return [str(v) for v in sub.stack]
 
     def _parse_comprehension_body(self, body: list, head, acc_op: str):
@@ -1892,7 +1932,7 @@ class DecompilerGeneric(DecompilerBase):
 
     def _op_inlined_comprehension(self, instr: BytecodeInstruction):
         open_, element, clauses, close, target = instr.argval
-        iterable = str(self.stack.pop()) if self.stack else "?"
+        iterable = str(self._pop("?"))
         self.stack.append(f"{open_}{element} for {target} in {iterable}{clauses}{close}")
 
     def _eval_cond_expr(self, instrs: list) -> str:
@@ -3601,10 +3641,9 @@ class DecompilerGeneric(DecompilerBase):
         sub = dec_class.__new__(dec_class)
         # Minimal __init__ — borrow from DecompilerGeneric
         DecompilerGeneric.__init__(sub, self.code_obj, indent_level=0, beautification_level=self.beautification_level, target_version=self.target_version)
+        self._share_diagnostics_with(sub)
         # Install the same prescan results so sentinel detection works
-        sub._try_nop_offsets = set()
-        sub._suppress_push_exc_offsets = set()
-        sub._finally_merge_offsets = set()
+        sub._try_nop_offsets, sub._suppress_push_exc_offsets, sub._finally_merge_offsets = set(), set(), set()
         sub._exc_handler_jump_offsets = getattr(self, "_exc_handler_jump_offsets", set())
         sub._exc_handler_continue_offsets = getattr(self, "_exc_handler_continue_offsets", set())
         sub._with_exit_suppress_offsets = set()
@@ -3652,6 +3691,7 @@ class DecompilerGeneric(DecompilerBase):
                     sub._append_reconstructed("pass")
                 sub.indent_level -= 1
             sub.pc += 1
+            sub._current_instr = instr
             sub._handle_instruction(instr)
             if instr.offset in sub._handler_return_close:
                 sub._handler_return_close.discard(instr.offset)
@@ -3843,6 +3883,21 @@ class DecompilerGeneric(DecompilerBase):
         else:
             self._op_unknown(instr)
 
+    def _check_jump_targets(self) -> None:
+        """Report a jump that lands where no instruction starts: the control flow cannot be followed."""
+        offsets = {ins.offset for ins in self.instructions}
+        # A target may be the EXTENDED_ARG prefix of the instruction (up to three 2-byte
+        # prefixes), which the instruction list does not keep.
+        landing = offsets | {t - 2 * k for t in offsets for k in (1, 2, 3)}
+        for ins in self.instructions:
+            if ("JUMP" in ins.opname or ins.opname == "FOR_ITER") and isinstance(ins.argval, int) \
+                    and ins.argval not in landing:
+                self._report(UNKNOWN_CONTROL_FLOW,
+                             f"the jump goes to offset {ins.argval}, which is not an instruction", ins)
+
+    def _report_version_gaps(self) -> None:
+        """Report, once per code object, constructs this Python version's backend cannot rebuild."""
+
     def _op_unknown(self, instr: BytecodeInstruction):
         opname = instr.opname
         if "BINARY" in opname and opname != "BINARY_SUBSCR":
@@ -3859,12 +3914,23 @@ class DecompilerGeneric(DecompilerBase):
             self._op_is(instr)
         elif "TO_BOOL" in opname:
             pass  # value already on stack
+        elif opname in _NO_SOURCE_OPS:
+            pass  # bookkeeping of the compiler or the interpreter with no source of its own
         elif "LOAD_FAST" in opname or "LOAD_GLOBAL" in opname:
             self._op_load_fallback(instr)
         elif self._is_backward_instruction(instr):
             self._op_jump(instr)
         elif self._is_compound_cjump(opname):
             self._op_conditional_jump(instr)
+        else:
+            self._report_unhandled(instr)
+
+    def _report_unhandled(self, instr: BytecodeInstruction):
+        """Record an instruction no handler reconstructs: a known gap of this backend, or an unknown opcode."""
+        if instr.opname in _UNSUPPORTED_CONSTRUCTS:
+            self._report(UNSUPPORTED_VERSION_CONSTRUCT, _UNSUPPORTED_CONSTRUCTS[instr.opname], instr)
+        else:
+            self._report(UNSUPPORTED_OPCODE, f"no handler for {instr.opname}", instr)
 
     def _op_load(self, instr: BytecodeInstruction):
         opname = instr.opname
@@ -4148,7 +4214,7 @@ class DecompilerGeneric(DecompilerBase):
 
     def _op_check_exc_match(self, instr: BytecodeInstruction):
         opname = instr.opname
-        exc_type = self.stack.pop() if self.stack else "Exception"
+        exc_type = self._pop("Exception")
         if self.stack and str(self.stack[-1]) == "_exc_info":
             self.stack.pop()
         # Reset indent to the except-header level (handles multi-except chains
@@ -4394,7 +4460,7 @@ class DecompilerGeneric(DecompilerBase):
 
     def _op_setup_with(self, instr: BytecodeInstruction):
         opname = instr.opname
-        ctx = self.stack.pop() if self.stack else "ctx"
+        ctx = self._pop("ctx")
         # Peek ahead for the STORE that binds the 'as' variable (3.9/3.10).
         # In 3.9 the instruction immediately after SETUP_WITH is always
         # STORE_FAST / STORE_NAME binding the __enter__() return value.
@@ -4499,7 +4565,7 @@ class DecompilerGeneric(DecompilerBase):
         # leaves the __enter__ return value on top of the stack.
         # The STORE_FAST / STORE_NAME that immediately follows binds the
         # 'as' variable.
-        ctx = self.stack.pop() if self.stack else "ctx"
+        ctx = self._pop("ctx")
         # Peek ahead for the STORE that binds the 'as' variable name.
         as_var = None
         look = self.pc
@@ -4658,8 +4724,11 @@ class DecompilerGeneric(DecompilerBase):
             if varkw_name:
                 params.append(varkw_name)
 
+            if inner_code.co_flags & (_CO_COROUTINE | _CO_ASYNC_GENERATOR):
+                self._report(UNSUPPORTED_VERSION_CONSTRUCT, _ASYNC_DEF_REASON, instr)
             dec_class = _pick_decompiler_class(self)
             dec = dec_class(inner_code, indent_level=1, beautification_level=self.beautification_level, target_version=self.target_version)
+            self._share_diagnostics_with(dec)
             dec._enclosing_locals = self._child_enclosing_locals()
             body = dec.decompile()
             sig = f"def {inner_code.co_name}({', '.join(params)}):"
@@ -4683,8 +4752,8 @@ class DecompilerGeneric(DecompilerBase):
         # Stack layout: TOS=func_tuple, TOS-1=attribute_value
         # arg bitmask: 0x01=defaults, 0x02=kwonly_defaults, 0x04=annotations, 0x08=closure
         attr_flags = int(instr.arg) if instr.arg is not None else 0
-        func_val = self.stack.pop() if self.stack else None
-        attr_val = self.stack.pop() if self.stack else None
+        func_val = self._pop(None)
+        attr_val = self._pop(None)
 
         if (func_val is not None and isinstance(func_val, tuple)
                 and func_val[0] == "func" and attr_val is not None
@@ -4825,6 +4894,8 @@ class DecompilerGeneric(DecompilerBase):
                 }
                 op = op_map.get(opname, "?")
 
+            if op == "?":
+                self._report(AMBIGUOUS_EXPRESSION, f"unknown binary operator ({instr.arg})", instr)
             l_str = str(left)
             r_str = str(right)
             if " " in l_str and not (l_str.startswith("(") and l_str.endswith(")")):
@@ -4915,12 +4986,12 @@ class DecompilerGeneric(DecompilerBase):
             flags = num_args
             kwargs_dict = None
             if flags & 1:
-                item = self.stack.pop() if self.stack else "{}"
+                item = self._pop("{}")
                 while self._is_null_sentinel(item) and self.stack:
                     item = self.stack.pop()
                 kwargs_dict = item
             
-            item = self.stack.pop() if self.stack else "()"
+            item = self._pop("()")
             while self._is_null_sentinel(item) and self.stack:
                 item = self.stack.pop()
             args_tuple = item
@@ -4987,7 +5058,7 @@ class DecompilerGeneric(DecompilerBase):
                     raw_args = raw_args
 
         # Standard functional name is the first pop (or Pattern 2 sentinel).
-        func_val = self.stack.pop() if self.stack else "func"
+        func_val = self._pop("func")
 
         # Handle NULL sentinels (e.g. from PUSH_NULL in Python 3.11+).
         # Pattern 1 (3.11-3.12): Sentinel is BELOW functional name: [obj/NULL, func, args]
@@ -5002,7 +5073,7 @@ class DecompilerGeneric(DecompilerBase):
         sentinel = _get_sentinel(func_val)
         if sentinel:
             # Pattern 2: Popped sentinel as callable. Real callable is on stack.
-            func_val = self.stack.pop() if self.stack else "func"
+            func_val = self._pop("func")
             if sentinel.is_method and self.stack:
                 obj = self.stack.pop()
                 func_val = f"{self._wrap_negative_literal(obj)}.{func_val}"
@@ -5210,11 +5281,11 @@ class DecompilerGeneric(DecompilerBase):
         format_spec = ""
         if (arg & 0x04):
             # The format spec follows the value on the stack
-            spec = self.stack.pop() if self.stack else ""
+            spec = self._pop("")
             spec_str = str(spec).strip("'\"")
             format_spec = f":{spec_str}"
             
-        val = self.stack.pop() if self.stack else "{expr}"
+        val = self._pop("{expr}")
         
         self.stack.append(f"{{{val}{conversion}{format_spec}}}")
 
@@ -5710,7 +5781,7 @@ class DecompilerGeneric(DecompilerBase):
         if instr.offset in getattr(self, "_ternary_jumps", {}):
             store_name, then_instrs, else_instrs, is_true, aug_op = \
                 self._ternary_jumps[instr.offset]
-            cond_expr = str(self.stack.pop()) if self.stack else "?"
+            cond_expr = str(self._pop("?"))
             # For POP_JUMP_IF_NONE / POP_JUMP_IF_NOT_NONE the raw condition
             # on the stack is the *value* being tested (not a bool expression).
             # Rewrite it to the appropriate 'is None' / 'is not None' form
@@ -6192,8 +6263,8 @@ class DecompilerGeneric(DecompilerBase):
         num = int(instr.arg) if instr.arg is not None else 0
         pairs = []
         for _ in range(num):
-            val = str(self.stack.pop()) if self.stack else "?"
-            key = str(self.stack.pop()) if self.stack else "?"
+            val = str(self._pop("?"))
+            key = str(self._pop("?"))
             pairs.insert(0, f"{key}: {val}")
         self.stack.append("{" + ", ".join(pairs) + "}")
 
@@ -6215,7 +6286,7 @@ class DecompilerGeneric(DecompilerBase):
         self.stack.append(slice_str)
 
     def _op_build_const_key_map(self, instr: BytecodeInstruction):
-        keys_val = self.stack.pop() if self.stack else "()"
+        keys_val = self._pop("()")
         count = int(instr.arg) if instr.arg is not None else 0
         
         # keys_val is e.g. "('a', 'b')" or "(0, 1)"
@@ -6249,10 +6320,10 @@ class DecompilerGeneric(DecompilerBase):
 
     def _collection_mutator(self, instr: BytecodeInstruction, kind: str):
         if kind == "map":
-            val = str(self.stack.pop()) if self.stack else "None"
-            key = str(self.stack.pop()) if self.stack else "None"
+            val = str(self._pop("None"))
+            key = str(self._pop("None"))
         else:
-            val = str(self.stack.pop()) if self.stack else "None"
+            val = str(self._pop("None"))
             key = None
 
         i = int(instr.arg) if instr.arg is not None else 1
@@ -6408,7 +6479,7 @@ class DecompilerGeneric(DecompilerBase):
 
     def _op_yield_value(self, instr: BytecodeInstruction):
         opname = instr.opname
-        val = self.stack.pop() if self.stack else "None"
+        val = self._pop("None")
         self._append_reconstructed(f"yield {val}")
 
     def _op_delete(self, instr: BytecodeInstruction):

@@ -109,6 +109,17 @@ that it was copied completely (binary mode, no line-ending conversion).
 The module has no code, for example an empty `__init__.py`. The exit status is 1 so that
 scripts notice; the empty result is correct. From Python, `decompile()` returns `"\n"`.
 
+### `Warning: unsupported_opcode: ...` or a `# pycrefine:` header in the output
+
+The decompiler reached a place it could not reconstruct and guessed. The warning names the
+kind, the function and the instruction; the source near it should not be trusted. Run with
+`--strict` to stop at the first such place. See [Diagnostics](usage.md#diagnostics).
+
+### `Error: strict mode: ...` (exit status 3)
+
+`--strict` found a diagnostic. Drop `--strict` to get the best-effort source with the
+diagnostics listed, or decompile under the Python version that wrote the file.
+
 ### A traceback ending in `FileNotFoundError` or `PermissionError`
 
 The input path is wrong or unreadable. Quote paths with spaces, and remember that shells

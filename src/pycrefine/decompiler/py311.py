@@ -1,6 +1,11 @@
 """Decompiler backend for CPython 3.10-3.12 bytecode (uses the host ``dis`` module)."""
 from .generic import DecompilerGeneric
+from ..diagnostics import AMBIGUOUS_EXPRESSION, INCOMPLETE_EXCEPTION
 from ..instructions import BytecodeInstruction
+
+# 3.10 sets up try, with and finally with block-stack instructions (3.11 replaced them
+# with an exception table), and no backend rebuilds them yet (#179).
+_BLOCK_SETUP_OPS = frozenset(("SETUP_FINALLY", "SETUP_WITH", "SETUP_ASYNC_WITH"))
 
 
 # ---------------------------------------------------------------------------
@@ -8,6 +13,15 @@ from ..instructions import BytecodeInstruction
 # ---------------------------------------------------------------------------
 
 class Decompiler311Plus(DecompilerGeneric):
+
+    def _report_version_gaps(self) -> None:
+        if self.target_version < (3, 11):
+            first = next((ins for ins in self.instructions if ins.opname in _BLOCK_SETUP_OPS), None)
+            if first is not None:
+                self._report(
+                    INCOMPLETE_EXCEPTION,
+                    "try, except, finally and with are not decompiled on Python 3.10 "
+                    "(block-based exception handlers, issue #179)", first)
 
     def _handle_instruction(self, instr: BytecodeInstruction):
         # Suppress then-branch instructions of detected ternary expressions
@@ -104,6 +118,7 @@ class Decompiler311Plus(DecompilerGeneric):
                     self.stack.append(f"({l_str} {bin_op} {r_str})")
                 else:
                     # Unknown BINARY_OP index — use ? as a safe placeholder
+                    self._report(AMBIGUOUS_EXPRESSION, f"unknown binary operator ({instr.arg})", instr)
                     self.stack.append(f"({left} ? {right})")
         else:
             super()._handle_instruction(instr)

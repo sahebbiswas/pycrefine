@@ -41,6 +41,10 @@ These change what the code does, or produce code that does not compile:
 | `while` loop that ends a function | 3.12 | a `return None` inside the loop body, so it runs once | [#161](https://github.com/sahebbiswas/pycrefine/issues/161) |
 | Some code in the test corpus | 3.12, 3.14 | output that does not parse | [#91](https://github.com/sahebbiswas/pycrefine/issues/91) |
 
+Whenever the decompiler knows it is guessing, it records a diagnostic instead of staying
+silent: see [Diagnostics](usage.md#diagnostics). Constructs below that it cannot detect still
+come out wrong without one.
+
 ## Constructs that come out different but equivalent
 
 The code runs the same way, but it does not read like the original:

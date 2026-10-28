@@ -98,7 +98,7 @@ class Decompiler314(Decompiler311Plus):
                     seq[3].opcode == 95 and seq[3].arg == 0 and
                         seq[4].opname == "CALL" and seq[4].arg == 0):
 
-                    ctx_mgr = str(self.stack.pop()) if self.stack else "unknown_ctx"
+                    ctx_mgr = str(self._pop("unknown_ctx"))
                     # Push internal sentinel representing EX and CM that stay on stack
                     body_start = self.instructions[self.pc + 5].offset if self.pc + 5 < len(self.instructions) else instr.offset
                     self.stack.append(("_with_info", ctx_mgr, body_start))
@@ -216,10 +216,10 @@ class Decompiler314(Decompiler311Plus):
                 return
             if isinstance(instr.argval, (tuple, list)) and len(instr.argval) >= 2:
                 names = ", ".join(str(x) for x in instr.argval)
-                expr = str(self.stack.pop()) if self.stack else "?"
+                expr = str(self._pop("?"))
                 self._append_reconstructed(f"{names} = {expr}")
             else:
-                expr = str(self.stack.pop()) if self.stack else "?"
+                expr = str(self._pop("?"))
                 # Use argrepr which contains the original target text like "(foo, bar)"
                 targets = instr.argrepr if instr.argrepr else "var1, var2"
                 self._append_reconstructed(f"{targets} = {expr}")

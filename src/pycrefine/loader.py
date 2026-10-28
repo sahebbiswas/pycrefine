@@ -250,7 +250,7 @@ class MarshalParser:
 # Entry point: load .pyc and pick decompiler
 # ---------------------------------------------------------------------------
 
-def get_decompiler(filepath: str, beautification_level: str = 'core') -> DecompilerBase:
+def get_decompiler(filepath: str, beautification_level: str = 'core', strict: bool = False) -> DecompilerBase:
     with open(filepath, "rb") as f:
         all_data = f.read()
 
@@ -328,15 +328,15 @@ def get_decompiler(filepath: str, beautification_level: str = 'core') -> Decompi
         raise ValueError(msg)
 
     if 3410 <= version_id <= 3429:      # 3.9
-        dec = Decompiler39(code_obj, beautification_level=beautification_level, target_version=target_version)
+        dec = Decompiler39(code_obj, beautification_level=beautification_level, target_version=target_version, strict=strict)
     elif version_id >= 3550:            # 3.13+
         # 3.13 introduced the STORE_FAST_STORE_FAST / LOAD_FAST_LOAD_FAST
         # superinstructions, which only Decompiler314 understands.
-        dec = Decompiler314(code_obj, beautification_level=beautification_level, target_version=target_version)
+        dec = Decompiler314(code_obj, beautification_level=beautification_level, target_version=target_version, strict=strict)
     elif version_id >= 3430:            # 3.10 - 3.12
-        dec = Decompiler311Plus(code_obj, beautification_level=beautification_level, target_version=target_version)
+        dec = Decompiler311Plus(code_obj, beautification_level=beautification_level, target_version=target_version, strict=strict)
     else:
         # Fallback for very old or unrecognised versions
-        dec = DecompilerGeneric(code_obj, target_version=target_version, beautification_level=beautification_level)
+        dec = DecompilerGeneric(code_obj, target_version=target_version, beautification_level=beautification_level, strict=strict)
 
     return dec
