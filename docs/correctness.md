@@ -217,6 +217,15 @@ The differential check's baselines (`quality/corpus/baselines/`) keep one top-le
 `diagnostics` object, `{corpus entry: {kind: count}}`, listing only the entries that
 reported something. A baseline without that key is not held to diagnostics.
 
+**Post-processing guard.** The text rewrites after emission (`post_process_source`,
+`flatten_elif`) are checked by `tests/test_postprocess_guard.py`: for every corpus entry that
+applies to the running Python (compiled at the optimization level the entry declares), every
+decompiled unit whose raw output parses, nested function bodies included, must be rewritten
+to text that parses to the same syntax tree and that rewriting again leaves unchanged.
+Import statements are compared one name per line with repeats within a run dropped, because
+merging them is a deliberate rewrite. A rewrite that changes
+meaning shows up there, with the entry that exposed it.
+
 **Interpreter patch versions.** Baselines are per minor version, and each also records the
 full version it was made on (`python_patch`, e.g. `3.12.3`), as does the JSON report next to
 `baseline_python_patch`. When a run fails on a different patch release, the report says so,
