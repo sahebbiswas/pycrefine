@@ -4,7 +4,7 @@ import dis
 import sys
 import types
 from typing import Any, List, Optional, Set, Tuple
-from ..diagnostics import STACK_UNDERFLOW, DecompilationError, Diagnostic
+from ..diagnostics import INTERNAL_ERROR, STACK_UNDERFLOW, DecompilationError, Diagnostic
 from ..instructions import BytecodeInstruction
 
 # Stem of the name used for a for-loop item that a later unpacking stores.
@@ -258,10 +258,12 @@ class DecompilerBase:
         """
         cached = self._exception_entries_cache
         if cached is False:
-            try:
-                cached = list(dis.Bytecode(self.code_obj).exception_entries)
-            except (AttributeError, TypeError, ValueError, IndexError):
-                cached = None
+            cached = None
+            if tuple(self.target_version) >= (3, 11):
+                try:
+                    cached = list(dis.Bytecode(self.code_obj).exception_entries)
+                except (AttributeError, TypeError, ValueError, IndexError) as exc:
+                    self._report(INTERNAL_ERROR, f"could not read the exception table: {type(exc).__name__}: {exc}")
             self._exception_entries_cache = cached
         return cached
 

@@ -34,7 +34,7 @@ from .._constants import (
 from ..codeobj import _is_code
 from .base import DecompilerBase
 from ..expr import StackNULL, _BoolExpr, _CollectionAccumSentinel, _UnpackAccessor, _unary_operand
-from ..diagnostics import (AMBIGUOUS_EXPRESSION, UNKNOWN_CONTROL_FLOW, UNSUPPORTED_OPCODE,
+from ..diagnostics import (AMBIGUOUS_EXPRESSION, INTERNAL_ERROR, UNKNOWN_CONTROL_FLOW, UNSUPPORTED_OPCODE,
                            UNSUPPORTED_VERSION_CONSTRUCT, DecompilationError)
 from ..instructions import (BytecodeInstruction, _const_repr, _copy_signature, _is_anonymous_func_body,
                             _match_finally_copy, _render_func_tuple)
@@ -1597,10 +1597,7 @@ class DecompilerGeneric(DecompilerBase):
         instrs = self.instructions
         if not any(ins.opname == "LOAD_FAST_AND_CLEAR" for ins in instrs):
             return
-        try:
-            entries = list(dis.Bytecode(self.code_obj).exception_entries)
-        except Exception:
-            entries = []
+        entries = self._exception_entries() or []
         i = len(instrs) - 1
         while i >= 0:
             if (instrs[i].opname == "LOAD_FAST_AND_CLEAR"
@@ -1817,7 +1814,10 @@ class DecompilerGeneric(DecompilerBase):
                 ins = sub.instructions[sub.pc]
                 sub.pc += 1
                 sub._handle_instruction(ins)
-        except Exception:
+        except (IndexError, KeyError, AttributeError, TypeError, ValueError) as exc:
+            # The slice was not a plain expression, or the sub-decompiler failed on it. Either
+            # way no expression comes out, so the caller keeps its own rendering.
+            self._report(INTERNAL_ERROR, f"evaluating a comprehension slice failed: {type(exc).__name__}: {exc}")
             return None
         if sub.reconstructed or len(sub.stack) != count:
             return None
@@ -2712,7 +2712,8 @@ class DecompilerGeneric(DecompilerBase):
         # exception_entries available on Python 3.11+ (same versions that use
         # NOP / PUSH_EXC_INFO rather than SETUP_FINALLY).
         try:
-            _exc_entries = dis.Bytecode(self.code_obj).exception_entries
+            # The shared, cached read: a table that cannot be read is reported once there.
+            _exc_entries = self._exception_entries() or []
             # Build a set of offsets that start a try-covered range.
             # Include ALL depths (depth=0 for module-level try, depth=1+ for nested).
             _try_covered_starts = {e.start for e in _exc_entries}
@@ -2911,10 +2912,7 @@ class DecompilerGeneric(DecompilerBase):
         self._wrapper_body_suppress: set = set()     # re-raise/with-exit wrapper instructions
         self._pending_finally_merge: Optional[int] = None
 
-        try:
-            _exc_entries = dis.Bytecode(self.code_obj).exception_entries  # type: ignore[name-defined]
-        except Exception:
-            _exc_entries = []
+        _exc_entries = self._exception_entries() or []
 
         real_push_exc = {
             ins.offset for ins in instrs
@@ -3055,10 +3053,7 @@ class DecompilerGeneric(DecompilerBase):
         #       PUSH_EXC_INFO that handles its try body, using the exception table.
         self._nop_to_push_exc: dict = {}  # nop_offset → push_exc_info_offset
         self._nop_to_finally_merge: dict = {}  # nop_offset → finally start, for try/finally without except
-        try:
-            _exc_entries_for_nop = dis.Bytecode(self.code_obj).exception_entries  # type: ignore[name-defined]
-        except (AttributeError, IndexError, TypeError, ValueError):
-            _exc_entries_for_nop = []
+        _exc_entries_for_nop = self._exception_entries() or []
         for nop_off in list(self._try_nop_offsets) + ([2] if any(ins.offset == 2 and ins.opname == "NOP" for ins in instrs) else []):
             body_start = nop_off + 2  # first instruction of the try body
             for e in _exc_entries_for_nop:
@@ -3210,9 +3205,8 @@ class DecompilerGeneric(DecompilerBase):
         self._with_body_end = {}
         self._with_exit_owner = {}
         instrs = self.instructions
-        try:
-            entries = list(dis.Bytecode(self.code_obj).exception_entries)
-        except (AttributeError, IndexError, TypeError, ValueError):
+        entries = self._exception_entries()
+        if not entries:
             return
         by_offset = {ins.offset: k for k, ins in enumerate(instrs)}
         handlers = {e.target for e in entries
@@ -5011,8 +5005,8 @@ class DecompilerGeneric(DecompilerBase):
                     try:
                         import ast
                         kw_names = ast.literal_eval(kw_names)
-                    except:
-                        pass
+                    except (ValueError, SyntaxError):
+                        self._report(AMBIGUOUS_EXPRESSION, f"keyword names {kw_names!r} are not a tuple literal", instr)
                 
                 if kw_names and len(self.stack) >= num_args:
                     n_kw = len(kw_names)
@@ -6293,7 +6287,8 @@ class DecompilerGeneric(DecompilerBase):
         try:
             import ast
             keys = ast.literal_eval(keys_val)
-        except:
+        except (ValueError, SyntaxError):
+            self._report(AMBIGUOUS_EXPRESSION, f"dict keys {keys_val!r} are not a tuple literal", instr)
             keys = [k.strip("'\"") for k in str(keys_val).strip("() ").split(",") if k.strip()]
             
         values = []

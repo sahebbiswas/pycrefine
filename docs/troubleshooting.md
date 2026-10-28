@@ -99,6 +99,14 @@ make this message clearer.)
 The file was written by Python 3.8 or older, which pycrefine does not support. Use a
 decompiler that targets those versions (for example `uncompyle6` or `decompyle3`).
 
+When the version is not the cause, the message ends with `Tried each header size` and a list of
+why each place a code object could start failed to load (`marshal at offset 16: EOFError: ...`).
+That happens to a file that passes the first checks (at least 16 bytes, a recognized magic
+number) but has a truncated or corrupt body, and it fails at every offset. A file that is
+shorter than 16 bytes or has an unrecognized magic number is rejected before any offset is
+tried, with its own message (`Invalid or unsupported Python magic number` above, or `too short`
+below) and no such list.
+
 ### `Invalid .pyc file '...': too short (found N bytes)`
 
 The file is shorter than a `.pyc` header, so it is truncated or not a `.pyc` file. Check
@@ -120,11 +128,16 @@ kind, the function and the instruction; the source near it should not be trusted
 `--strict` found a diagnostic. Drop `--strict` to get the best-effort source with the
 diagnostics listed, or decompile under the Python version that wrote the file.
 
-### A traceback ending in `FileNotFoundError` or `PermissionError`
+### `Error: [Errno 2] No such file or directory: ...`
 
 The input path is wrong or unreadable. Quote paths with spaces, and remember that shells
-do not expand `*` inside quotes. ([#153](https://github.com/sahebbiswas/pycrefine/issues/153)
-will turn this into a one-line error.)
+do not expand `*` inside quotes.
+
+### `Internal error: ...` (exit status 4)
+
+pycrefine hit a bug. The message ends with a pointer to the issue tracker. Run again with
+`--debug` to get the traceback, and include it when you
+[report the problem](#reporting-a-problem).
 
 ### `__main__.py: error: argument --beautification-level: invalid choice`
 

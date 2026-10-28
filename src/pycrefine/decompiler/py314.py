@@ -1,5 +1,4 @@
 """Decompiler backend for CPython 3.13/3.14 bytecode."""
-import dis
 from .._constants import _VALUE_OPS
 from ..expr import _UnpackAccessor
 from .py311 import Decompiler311Plus
@@ -118,12 +117,14 @@ class Decompiler314(Decompiler311Plus):
 
                     try_end = None
                     exit_body_start = None
+                    # The exception table (3.11+), read once and shared by every pass. It is read
+                    # outside the `try` below: in strict mode an unreadable table raises
+                    # DecompilationError, a ValueError, which that handler would swallow.
+                    entries = self._exception_entries()
                     try:
                         curr_offset = self.instructions[self.pc].offset if self.pc < len(
                             self.instructions) else getattr(instr, "offset", 0)
-                        # We use the host Python's dis.Bytecode if it supports exception_entries (3.11+)
-                        if hasattr(dis, "Bytecode"):
-                            entries = dis.Bytecode(self.code_obj).exception_entries
+                        if entries is not None:
                             handler_target = None
                             for e in entries:
                                 # Re-sync with exception table: the protected range

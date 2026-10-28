@@ -7,6 +7,9 @@ from .loader import get_decompiler
 
 # Exit status when --strict stops at the first place the decompiler would have had to guess.
 EXIT_STRICT_FAILURE = 3
+# Exit status for a failure inside pycrefine itself, as opposed to a file it cannot read.
+EXIT_INTERNAL_ERROR = 4
+ISSUES_URL = "https://github.com/sahebbiswas/pycrefine/issues"
 
 
 # ---------------------------------------------------------------------------
@@ -31,6 +34,11 @@ def main() -> None:
     parser.add_argument(
         "--strict", action="store_true",
         help="Stop with exit status 3 at the first place the decompiler cannot reconstruct reliably, instead of guessing."
+    )
+
+    parser.add_argument(
+        "--debug", action="store_true",
+        help="Print the full Python traceback when pycrefine fails internally (exit status 4)."
     )
 
     args = parser.parse_args()
@@ -65,6 +73,14 @@ def main() -> None:
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-    except Exception:
-        traceback.print_exc()
+    except OSError as e:
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+    except Exception as e:  # broad: last-resort guard so a decompiler bug never ends in a bare traceback  # pylint: disable=broad-exception-caught
+        if args.debug:
+            traceback.print_exc()
+        else:
+            print(f"Internal error: {type(e).__name__}: {e}\n"
+                  f"(Run again with --debug for the traceback, and include it when you report this: {ISSUES_URL})",
+                  file=sys.stderr)
+        sys.exit(EXIT_INTERNAL_ERROR)

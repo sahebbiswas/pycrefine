@@ -7,7 +7,7 @@ start with [Getting started](getting-started.md); for recipes, see
 ## Command line
 
 ```text
-pycrefine [-h] [-o OUTPUT] [--beautification-level {none,core,aggressive}] [--strict] input
+pycrefine [-h] [-o OUTPUT] [--beautification-level {none,core,aggressive}] [--strict] [--debug] input
 ```
 
 `python -m pycrefine ...` and, from a source checkout, `python pycrefine.py ...` take the
@@ -19,6 +19,7 @@ same arguments.
 | `-o OUTPUT`, `--output OUTPUT` | Write the source to `OUTPUT` (UTF-8) instead of standard output. A confirmation goes to standard error. |
 | `--beautification-level LEVEL` | How much the output is tidied after decompiling: `core` (the default), `none` or `aggressive`. See below. |
 | `--strict` | Stop at the first place the decompiler cannot reconstruct reliably (exit status `3`) instead of guessing. See [Diagnostics](#diagnostics). |
+| `--debug` | Print the full Python traceback when pycrefine fails internally (exit status `4`). |
 | `-h`, `--help` | Show the usage and exit. |
 
 There is no `--version` option yet ([#153](https://github.com/sahebbiswas/pycrefine/issues/153));
@@ -69,7 +70,8 @@ Each diagnostic has a kind:
 | `1` | The file is not a `.pyc` pycrefine can read: wrong or unknown magic number, unsupported Python version, too short, or bytecode from 3.10+ under a different Python. | `Error: ...` on standard error, explaining why ([Troubleshooting](troubleshooting.md#error-messages)). |
 | `1` | The file decompiled to nothing (for example an empty module). | `Warning: Decompiler returned no source code for INPUT` on standard error. |
 | `1` | `-o OUTPUT` could not be written. | `Error: Failed to save decompiled output to OUTPUT: ...` |
-| `1` | Any other failure, including a missing input file ([#153](https://github.com/sahebbiswas/pycrefine/issues/153)). | A Python traceback on standard error. |
+| `1` | The input file cannot be read (missing, a directory, no permission). | `Error: ...` on standard error. |
+| `4` | pycrefine failed internally: a bug, not a problem with your file or arguments. | `Internal error: TYPE: message` on standard error; add `--debug` for the traceback. Please [report it](troubleshooting.md#reporting-a-problem). |
 | `3` | `--strict` was given and the decompiler hit a place it cannot reconstruct reliably. | `Error: strict mode: ...` on standard error, naming the problem and where it is. Nothing is written to standard output or `OUTPUT`. |
 | `2` | The arguments are invalid (for example an unknown `--beautification-level`). | The usage and an error from argparse. |
 

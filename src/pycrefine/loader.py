@@ -299,6 +299,7 @@ def get_decompiler(filepath: str, beautification_level: str = 'core', strict: bo
         )
 
     code_obj = None
+    failures: list = []  # why each header offset could not be read, for the final error
     # The marshal format only changes between minor versions, so the native
     # loader also handles e.g. a pre-release .pyc of the host's own version.
     if magic == host_magic or target_version == sys.version_info[:2]:
@@ -308,8 +309,9 @@ def get_decompiler(filepath: str, beautification_level: str = 'core', strict: bo
                 if isinstance(obj, types.CodeType):
                     code_obj = obj
                     break
-            except Exception:
-                continue
+                failures.append(f"marshal at offset {offset}: no code object (found {type(obj).__name__})")
+            except Exception as exc:  # broad: marshal.load raises many types on corrupt data; each cause is reported  # pylint: disable=broad-exception-caught
+                failures.append(f"marshal at offset {offset}: {type(exc).__name__}: {exc}")
 
     if code_obj is None:
         for offset in (16, 12, 8, 4):
@@ -318,13 +320,16 @@ def get_decompiler(filepath: str, beautification_level: str = 'core', strict: bo
                 if _is_code(obj):
                     code_obj = obj
                     break
-            except Exception:
-                continue
+                failures.append(f"parser at offset {offset}: no code object (found {type(obj).__name__})")
+            except Exception as exc:  # broad: the parser reads untrusted bytes and fails in many ways; each cause is reported  # pylint: disable=broad-exception-caught
+                failures.append(f"parser at offset {offset}: {type(exc).__name__}: {exc}")
 
     if not _is_code(code_obj):
         msg = f"Could not find valid marshal code object in .pyc file '{filepath}'."
         if tv_str:
             msg += f" (Inferred version: Python {tv_str})"
+        if failures:
+            msg += "\nTried each header size:\n" + "\n".join(f"- {f}" for f in failures)
         raise ValueError(msg)
 
     if 3410 <= version_id <= 3429:      # 3.9
