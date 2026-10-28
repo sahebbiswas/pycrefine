@@ -78,5 +78,115 @@
     "stdlib/queue": "syntax_error",
     "stdlib/shlex": "compiles",
     "stdlib/textwrap": "compiles"
+  },
+  "diagnostics": {
+    "features/exc_finally": {
+      "incomplete_exception_reconstruction": 2
+    },
+    "features/exc_raise_chain": {
+      "incomplete_exception_reconstruction": 2
+    },
+    "features/exc_try_except": {
+      "incomplete_exception_reconstruction": 3
+    },
+    "features/flow_try_in_loops": {
+      "incomplete_exception_reconstruction": 2
+    },
+    "features/modern_async": {
+      "incomplete_exception_reconstruction": 1,
+      "unsupported_version_construct": 11
+    },
+    "features/modern_match": {
+      "unsupported_version_construct": 6
+    },
+    "features/opt_asserts_debug": {
+      "incomplete_exception_reconstruction": 1
+    },
+    "features/with_context": {
+      "incomplete_exception_reconstruction": 1
+    },
+    "generated/cf_for_finally_break": {
+      "incomplete_exception_reconstruction": 1
+    },
+    "generated/cf_for_finally_continue": {
+      "incomplete_exception_reconstruction": 1
+    },
+    "generated/cf_for_finally_return": {
+      "incomplete_exception_reconstruction": 1
+    },
+    "generated/cf_for_try_break": {
+      "incomplete_exception_reconstruction": 1
+    },
+    "generated/cf_for_try_continue": {
+      "incomplete_exception_reconstruction": 1
+    },
+    "generated/cf_for_try_return": {
+      "incomplete_exception_reconstruction": 1
+    },
+    "generated/cf_for_with_break": {
+      "incomplete_exception_reconstruction": 1
+    },
+    "generated/cf_for_with_continue": {
+      "incomplete_exception_reconstruction": 1
+    },
+    "generated/cf_for_with_return": {
+      "incomplete_exception_reconstruction": 1
+    },
+    "generated/cf_while_finally_break": {
+      "incomplete_exception_reconstruction": 1
+    },
+    "generated/cf_while_finally_continue": {
+      "incomplete_exception_reconstruction": 1
+    },
+    "generated/cf_while_finally_return": {
+      "incomplete_exception_reconstruction": 1
+    },
+    "generated/cf_while_try_break": {
+      "incomplete_exception_reconstruction": 1
+    },
+    "generated/cf_while_try_continue": {
+      "incomplete_exception_reconstruction": 1
+    },
+    "generated/cf_while_try_return": {
+      "incomplete_exception_reconstruction": 1
+    },
+    "generated/cf_while_with_break": {
+      "incomplete_exception_reconstruction": 1
+    },
+    "generated/cf_while_with_continue": {
+      "incomplete_exception_reconstruction": 1
+    },
+    "generated/cf_while_with_return": {
+      "incomplete_exception_reconstruction": 1
+    },
+    "realworld/lru_cache": {
+      "incomplete_exception_reconstruction": 1
+    },
+    "realworld/tokenizer": {
+      "incomplete_exception_reconstruction": 1
+    },
+    "stdlib/bisect": {
+      "incomplete_exception_reconstruction": 1,
+      "unsupported_opcode": 1
+    },
+    "stdlib/copy": {
+      "incomplete_exception_reconstruction": 3,
+      "unsupported_opcode": 2
+    },
+    "stdlib/fnmatch": {
+      "unsupported_opcode": 1
+    },
+    "stdlib/getopt": {
+      "incomplete_exception_reconstruction": 2
+    },
+    "stdlib/queue": {
+      "incomplete_exception_reconstruction": 8
+    },
+    "stdlib/shlex": {
+      "incomplete_exception_reconstruction": 1
+    },
+    "stdlib/textwrap": {
+      "unsupported_opcode": 3
+    }
   }
 }

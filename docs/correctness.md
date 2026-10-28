@@ -184,6 +184,39 @@ Python version, and uploads the JSON report with the correctness report.
 Bytecode from 3.10 onwards can only be decompiled by the interpreter that wrote it, so each run covers
 the interpreter it runs under; `--python` runs the whole check under others in turn.
 
+**Diagnostics.** Both tools decompile with diagnostics on (see
+[Diagnostics](usage.md#diagnostics)) and record, in the baseline, how many of each kind
+every entry, unit or corpus entry reported. A run fails with `noisier` when something
+reports more of a kind than its baseline allows, so a clean entry cannot start guessing
+unnoticed, and a construct known to be unsupported cannot silently stop saying so
+(`tests/test_diagnostic_constructs.py` checks that for `match`, async, type parameters,
+f-string conversions and 3.10 exception blocks). Fewer diagnostics never fail; record
+them with `--update-baseline`. Each report also counts **silent failures**: output that
+does not compile (gate) or is wrong (differential) and carries no diagnostic. That number is
+the measure of the roadmap's "no silent fallbacks" goal; it should only go down.
+
+The correctness gate's baselines (`quality/baselines/`) carry these counts in three optional keys; `schema_version` stays `1`
+because a baseline without them is still read:
+
+| Key | Where | Shape |
+|---|---|---|
+| `diagnostics_recorded` | top level | `true` when the file was made with diagnostics on. Only then is `noisier` enforced; a baseline without it is not held to diagnostics until it is re-recorded. |
+| `diagnostics` | an entry | `{kind: count}` for the whole-file run of that source or `.pyc` entry. Absent when it reported nothing, or when the whole-file run failed outright. |
+| `unit_diagnostics` | a source entry | `{unit id: {kind: count}}`, only for units that reported something. Every unit id is also a key of `units`. |
+
+The summary (text and JSON) reports them apart too: `diagnostics` totals the units and
+`entry_diagnostics` the whole-file runs (a `.pyc` has only the latter), and each entry in the
+JSON report carries its own `diagnostics` when it has any. A whole-file result that does not
+compile and carries no diagnostic counts as a silent failure alongside the units.
+
+`diagnostics` and `unit_diagnostics` are counted by separate runs (the file, then each unit
+on its own), so they are compared separately and need not add up. The kinds are those of
+`pycrefine.diagnostics.KINDS`.
+
+The differential check's baselines (`quality/corpus/baselines/`) keep one top-level
+`diagnostics` object, `{corpus entry: {kind: count}}`, listing only the entries that
+reported something. A baseline without that key is not held to diagnostics.
+
 **Interpreter patch versions.** Baselines are per minor version, and each also records the
 full version it was made on (`python_patch`, e.g. `3.12.3`), as does the JSON report next to
 `baseline_python_patch`. When a run fails on a different patch release, the report says so,

@@ -2,6 +2,7 @@
   "schema_version": 1,
   "python_version": "3.14",
   "python_patch": "3.14.6",
+  "diagnostics_recorded": true,
   "entries": {
     "corpus/comprehensive.py": {
       "kind": "source",
@@ -120,6 +121,17 @@
         "def issue_3": "compiles",
         "def issue_4": "compiles",
         "def issue_5": "compiles"
+      },
+      "unit_diagnostics": {
+        "def api_30": {
+          "unsupported_version_construct": 3
+        },
+        "def api_32": {
+          "unsupported_version_construct": 2
+        }
+      },
+      "diagnostics": {
+        "unsupported_version_construct": 5
       }
     },
     "tests/fixtures/foreign_pyc/comprehensive.cpython-312.pyc": {
@@ -132,7 +144,10 @@
     },
     "tests/fixtures/foreign_pyc/comprehensive.cpython-39.pyc": {
       "kind": "pyc",
-      "status": "compiles"
+      "status": "compiles",
+      "diagnostics": {
+        "unsupported_opcode": 1
+      }
     },
     "tests/fixtures/foreign_pyc/simple.cpython-313.pyc": {
       "kind": "pyc",

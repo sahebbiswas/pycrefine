@@ -93,6 +93,57 @@ class TestBaselineDiff(unittest.TestCase):
                                      result("c", "compiles")]), {"c": "improved"})
 
 
+def noisy(name, status, **kinds):
+    r = result(name, status)
+    r.diagnostics = [{"kind": k} for k, n in kinds.items() for _ in range(n)]
+    return r
+
+
+class TestDiagnosticsInTheBaseline(unittest.TestCase):
+
+    def test_worker_line_is_parsed_and_counted(self):
+        line = cd.DIAGNOSTICS_MARK + json.dumps([{"kind": "a"}, {"kind": "a"}, {"kind": "b"}])
+        parsed = cd.parse_diagnostics("noise\n" + line + "\n")
+        self.assertEqual(cd.count_kinds(parsed), {"a": 2, "b": 1})
+        self.assertEqual(cd.parse_diagnostics("nothing here"), [])
+        self.assertEqual(cd.parse_diagnostics(cd.DIAGNOSTICS_MARK + "{broken"), [])
+
+    def test_baseline_records_only_entries_that_reported(self):
+        base = cd.to_baseline([noisy("a", "equivalent"), noisy("b", "mismatch", unsupported_opcode=2)])
+        self.assertEqual(base["diagnostics"], {"b": {"unsupported_opcode": 2}})
+
+    def baseline(self, **recorded):
+        return {"entries": {"a": "equivalent", "b": "mismatch"}, "diagnostics": recorded}
+
+    def test_a_clean_entry_that_gains_a_diagnostic_fails(self):
+        changes = cd.diff_baseline([noisy("a", "equivalent", stack_underflow=1), noisy("b", "mismatch")], self.baseline())
+        self.assertEqual([(c["name"], c["kind"]) for c in changes], [("a", "noisier")])
+        self.assertIn("noisier", cd.FAILING_CHANGES)
+
+    def test_more_of_a_kind_fails_fewer_does_not(self):
+        base = self.baseline(b={"unsupported_opcode": 2})
+        worse = cd.diff_baseline([noisy("a", "equivalent"), noisy("b", "mismatch", unsupported_opcode=3)], base)
+        better = cd.diff_baseline([noisy("a", "equivalent"), noisy("b", "mismatch", unsupported_opcode=1)], base)
+        self.assertEqual([c["kind"] for c in worse], ["noisier"])
+        self.assertEqual(better, [])
+
+    def test_a_baseline_from_before_diagnostics_is_not_held_to_them(self):
+        old = {"entries": {"a": "equivalent"}}
+        self.assertEqual(cd.diff_baseline([noisy("a", "equivalent", stack_underflow=5)], old), [])
+
+    def test_silent_failures_are_wrong_output_without_a_diagnostic(self):
+        self.assertTrue(noisy("a", "mismatch").is_silent_failure())
+        self.assertTrue(noisy("a", "syntax_error").is_silent_failure())
+        self.assertFalse(noisy("a", "mismatch", unsupported_opcode=1).is_silent_failure())
+        self.assertFalse(noisy("a", "decompile_error").is_silent_failure())
+        self.assertFalse(noisy("a", "equivalent").is_silent_failure())
+
+    def test_report_summary_counts_them(self):
+        report = cd.build_report(sys.executable, [noisy("a", "mismatch"), noisy("b", "mismatch", x=1)], [], None)
+        self.assertEqual(report["summary"]["silent_failures"], 1)
+        self.assertEqual(report["summary"]["diagnostics"], {"x": 1})
+
+
 class TestPatchVersion(unittest.TestCase):
 
     def test_baseline_records_the_interpreter_patch(self):

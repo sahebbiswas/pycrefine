@@ -99,7 +99,7 @@ START_TIMEOUT = 120     # for the decompiling child to start; separate from the 
 #   lost       a scored record now has a source_error and can't be scored
 #   ambiguous  the number of units sharing a label changed, so the ``#n``
 #              suffixes may now point at different statements
-FAILING_CHANGES = ('regressed', 'missing', 'lost', 'ambiguous')
+FAILING_CHANGES = ('regressed', 'missing', 'lost', 'ambiguous', 'noisier')
 
 
 def level_of(status: str) -> Optional[int]:
@@ -115,6 +115,7 @@ class Check:
     status: str
     error: Optional[dict] = None
     output: str = ''
+    diagnostics: Dict[str, int] = field(default_factory=dict)   # kind -> count, as reported by the decompiler
 
 
 class _Timeout(Exception):
@@ -140,9 +141,10 @@ def _decompile_worker(conn) -> None:
         sink = io.StringIO()
         try:
             with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
-                text = get_decompiler(path).decompile()
+                decompiler = get_decompiler(path)
+                text = decompiler.decompile()
             if isinstance(text, str):
-                reply = ('ok', text)
+                reply = ('ok', text, [d.as_dict() for d in decompiler.diagnostics])
             else:
                 reply = ('error', 'TypeError', f'decompile() returned {type(text).__name__}')
         except Exception as exc:          # includes RecursionError
@@ -274,7 +276,17 @@ def check_pyc(pyc_path: str, timeout: int = DEFAULT_TIMEOUT) -> Check:
         _, type_name, message = reply
         return Check('decompile_error', {'stage': 'decompile', 'type': type_name,
                                          'message': message[:300] + ('...' if len(message) > 300 else '')})
-    return classify(reply[1])
+    check = classify(reply[1])
+    if len(reply) > 2:
+        check.diagnostics = _count_kinds(reply[2])
+    return check
+
+
+def _count_kinds(diagnostics) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for d in diagnostics:
+        counts[d['kind']] = counts.get(d['kind'], 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def check_source_text(source: str, workdir: str, name: str,
@@ -387,6 +399,15 @@ class EntryResult:
     error: Optional[dict] = None
     units: Dict[str, dict] = field(default_factory=dict)
     coherency: Optional[dict] = None
+    diagnostics: Dict[str, int] = field(default_factory=dict)
+
+    def silent_failures(self) -> int:
+        """Whole-file results and units that do not compile and were not flagged."""
+        bad = ('syntax_error', 'compile_error')
+        whole = int(self.status in bad and not self.diagnostics)
+        if self.kind == 'pyc':
+            return whole
+        return whole + sum(1 for u in self.units.values() if u['status'] in bad and not u.get('diagnostics'))
 
     def unit_counts(self) -> Dict[str, int]:
         counts: Dict[str, int] = {}
@@ -405,6 +426,8 @@ class EntryResult:
                 'ast_equal': sum(1 for u in self.units.values() if u.get('ast_equal')),
             }
             d['units'] = self.units
+        if self.diagnostics:
+            d['diagnostics'] = self.diagnostics
         if self.coherency is not None:
             d['coherency'] = self.coherency
         return d
@@ -451,7 +474,7 @@ def check_entry(path: Path, workdir: str, timeout: int = DEFAULT_TIMEOUT,
     rel = _rel(path)
     if path.suffix == '.pyc':
         c = check_pyc(str(path), timeout)
-        return EntryResult(rel, 'pyc', c.status, c.error)
+        return EntryResult(rel, 'pyc', c.status, c.error, diagnostics=c.diagnostics)
 
     try:
         with tokenize.open(str(path)) as f:     # honours PEP 263 coding cookies
@@ -459,7 +482,7 @@ def check_entry(path: Path, workdir: str, timeout: int = DEFAULT_TIMEOUT,
     except (SyntaxError, UnicodeDecodeError, LookupError) as exc:
         return EntryResult(rel, 'source', SOURCE_ERROR, _error('source', exc))
     whole = check_source_text(source, workdir, 'entry', timeout, encoding)
-    result = EntryResult(rel, 'source', whole.status, whole.error)
+    result = EntryResult(rel, 'source', whole.status, whole.error, diagnostics=whole.diagnostics)
     if whole.status == SOURCE_ERROR:
         return result
 
@@ -468,6 +491,8 @@ def check_entry(path: Path, workdir: str, timeout: int = DEFAULT_TIMEOUT,
         u = {'status': c.status}
         if c.error:
             u['error'] = c.error
+        if c.diagnostics:
+            u['diagnostics'] = c.diagnostics
         if c.status == 'compiles':
             u['ast_equal'] = _ast_equal(unit.source, c.output)
         result.units[unit.id] = u
@@ -500,9 +525,14 @@ def to_baseline(results: List[EntryResult]) -> dict:
         e = {'kind': r.kind, 'status': r.status}
         if r.kind == 'source' and r.status != SOURCE_ERROR:
             e['units'] = {uid: u['status'] for uid, u in sorted(r.units.items())}
+            unit_diag = {uid: u['diagnostics'] for uid, u in sorted(r.units.items()) if u.get('diagnostics')}
+            if unit_diag:
+                e['unit_diagnostics'] = unit_diag
+        if r.diagnostics:
+            e['diagnostics'] = r.diagnostics
         entries[r.path] = e
     return {'schema_version': SCHEMA_VERSION, 'python_version': python_tag(),
-            'python_patch': python_patch(), 'entries': entries}
+            'python_patch': python_patch(), 'diagnostics_recorded': True, 'entries': entries}
 
 
 def _label_counts(unit_ids) -> Dict[str, int]:
@@ -523,6 +553,15 @@ def _change(before: str, after: str) -> Optional[str]:
     if lb is None or la is None:
         return 'unscorable'
     return 'regressed' if la < lb else 'improved'
+
+
+def _more_kinds(now: Dict[str, int], before: Dict[str, int]) -> bool:
+    """True if any diagnostic kind is reported more often than the baseline allows."""
+    return any(n > before.get(kind, 0) for kind, n in now.items())
+
+
+def _fmt_kinds(counts: Dict[str, int]) -> str:
+    return ', '.join(f'{k} x{n}' for k, n in counts.items()) or 'no diagnostics'
 
 
 def compare(results: List[EntryResult], baseline: dict) -> List[dict]:
@@ -565,6 +604,19 @@ def compare(results: List[EntryResult], baseline: dict) -> List[dict]:
                 if uid not in r.units:
                     add(r.path, uid, 'missing', b_units[uid], None)
 
+    if baseline.get('diagnostics_recorded'):
+        for r in results:
+            b = base_entries.get(r.path)
+            if b is None:
+                continue
+            if _more_kinds(r.diagnostics, b.get('diagnostics', {})):
+                add(r.path, None, 'noisier', _fmt_kinds(b.get('diagnostics', {})), _fmt_kinds(r.diagnostics))
+            b_unit_diag = b.get('unit_diagnostics', {})
+            for uid, u in r.units.items():
+                now, before = u.get('diagnostics', {}), b_unit_diag.get(uid, {})
+                if uid in b.get('units', {}) and _more_kinds(now, before):
+                    add(r.path, uid, 'noisier', _fmt_kinds(before), _fmt_kinds(now))
+
     seen = {r.path for r in results}
     for path, b in base_entries.items():
         if path not in seen:
@@ -575,6 +627,24 @@ def compare(results: List[EntryResult], baseline: dict) -> List[dict]:
 # ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
+
+def _total_kinds(results: List[EntryResult], whole_file: bool = False) -> Dict[str, int]:
+    """
+    Diagnostics per kind: over every unit (the default), or over the whole-file run of
+    every entry. The two come from separate runs, so they are reported apart, not summed.
+    A .pyc, or an entry without units, has only the whole-file run and counts there.
+    """
+    totals: Dict[str, int] = {}
+    for r in results:
+        if whole_file:
+            sources = [r.diagnostics]
+        else:
+            sources = [u.get('diagnostics', {}) for u in r.units.values()] if r.units else []
+        for counts in sources:
+            for kind, n in counts.items():
+                totals[kind] = totals.get(kind, 0) + n
+    return dict(sorted(totals.items()))
+
 
 def summarize(results: List[EntryResult], changes: Optional[List[dict]]) -> dict:
     entries: Dict[str, int] = {}
@@ -587,7 +657,10 @@ def summarize(results: List[EntryResult], changes: Optional[List[dict]]) -> dict
             units[u['status']] = units.get(u['status'], 0) + 1
             ast_equal += bool(u.get('ast_equal'))
     s = {'entries': {'total': len(results), 'by_status': entries},
-         'units': {'total': total_units, 'by_status': units, 'ast_equal': ast_equal}}
+         'units': {'total': total_units, 'by_status': units, 'ast_equal': ast_equal},
+         'diagnostics': _total_kinds(results),
+         'entry_diagnostics': _total_kinds(results, whole_file=True),
+         'silent_failures': sum(r.silent_failures() for r in results)}
     if changes is not None:
         by_change: Dict[str, int] = {}
         for c in changes:
@@ -639,13 +712,16 @@ def print_text(report: dict, verbose: bool = False) -> None:
     print(f"  entries: {_fmt_counts(s['entries']['by_status'])}")
     print(f"  units:   {_fmt_counts(s['units']['by_status'])}; "
           f"{s['units']['ast_equal']} ast-equal of {s['units']['total']}")
+    print(f"  diagnostics: {sum(s['diagnostics'].values())} in units, "
+          f"{sum(s['entry_diagnostics'].values())} in whole-file runs; "
+          f"{s['silent_failures']} silent failures (does not compile, no diagnostic)")
 
     changes = report['changes']
     if changes is None:
         print('\n  baseline: not compared')
         return
     print(f"\n  baseline: {report['baseline']}")
-    for kind in ('regressed', 'lost', 'ambiguous', 'missing', 'improved',
+    for kind in ('regressed', 'noisier', 'lost', 'ambiguous', 'missing', 'improved',
                  'unscorable', 'new'):
         items = [c for c in changes if c['change'] == kind]
         if not items:

@@ -2,6 +2,7 @@
   "schema_version": 1,
   "python_version": "3.10",
   "python_patch": "3.10.20",
+  "diagnostics_recorded": true,
   "entries": {
     "corpus/comprehensive.py": {
       "kind": "source",
@@ -25,6 +26,21 @@
         "def member_decorator": "compiles",
         "def run_test": "syntax_error",
         "def some_decorator": "compiles"
+      },
+      "unit_diagnostics": {
+        "class DataProcessor/def process": {
+          "incomplete_exception_reconstruction": 1
+        },
+        "def member_decorator": {
+          "unsupported_opcode": 1
+        },
+        "def run_test": {
+          "incomplete_exception_reconstruction": 1
+        }
+      },
+      "diagnostics": {
+        "incomplete_exception_reconstruction": 2,
+        "unsupported_opcode": 1
       }
     },
     "corpus/indent2.py": {
@@ -78,6 +94,14 @@
         "Import: import py_compile": "compiles",
         "Import: import pycrefine": "compiles",
         "With: with open(\"temp.py\", \"w\") as f:": "compiles"
+      },
+      "unit_diagnostics": {
+        "With: with open(\"temp.py\", \"w\") as f:": {
+          "incomplete_exception_reconstruction": 1
+        }
+      },
+      "diagnostics": {
+        "incomplete_exception_reconstruction": 1
       }
     },
     "corpus/simple_runner.py": {
@@ -120,6 +144,29 @@
         "def issue_3": "compiles",
         "def issue_4": "compiles",
         "def issue_5": "syntax_error"
+      },
+      "unit_diagnostics": {
+        "def api_12": {
+          "incomplete_exception_reconstruction": 1
+        },
+        "def api_26": {
+          "incomplete_exception_reconstruction": 1
+        },
+        "def api_30": {
+          "incomplete_exception_reconstruction": 1
+        },
+        "def api_4": {
+          "incomplete_exception_reconstruction": 1
+        },
+        "def issue_3": {
+          "incomplete_exception_reconstruction": 1
+        },
+        "def issue_5": {
+          "incomplete_exception_reconstruction": 1
+        }
+      },
+      "diagnostics": {
+        "incomplete_exception_reconstruction": 6
       }
     },
     "tests/fixtures/foreign_pyc/comprehensive.cpython-312.pyc": {
@@ -132,7 +179,10 @@
     },
     "tests/fixtures/foreign_pyc/comprehensive.cpython-39.pyc": {
       "kind": "pyc",
-      "status": "compiles"
+      "status": "compiles",
+      "diagnostics": {
+        "unsupported_opcode": 1
+      }
     },
     "tests/fixtures/foreign_pyc/simple.cpython-313.pyc": {
       "kind": "pyc",
