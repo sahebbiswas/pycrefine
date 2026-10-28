@@ -33,9 +33,10 @@ from .._constants import (
 )
 from ..codeobj import _is_code
 from .base import DecompilerBase
-from ..expr import StackNULL, _BoolExpr, _CollectionAccumSentinel, _UnpackAccessor, _unary_operand
-from ..diagnostics import (AMBIGUOUS_EXPRESSION, INTERNAL_ERROR, UNKNOWN_CONTROL_FLOW, UNSUPPORTED_OPCODE,
-                           UNSUPPORTED_VERSION_CONSTRUCT, DecompilationError)
+from ..expr import (StackNULL, UnknownExpression, _BoolExpr, _CollectionAccumSentinel, _UnpackAccessor, _unary_operand,
+                    is_unknown)
+from ..diagnostics import (AMBIGUOUS_EXPRESSION, INTERNAL_ERROR, STACK_UNDERFLOW, UNKNOWN_CONTROL_FLOW,
+                           UNSUPPORTED_OPCODE, UNSUPPORTED_VERSION_CONSTRUCT, DecompilationError)
 from ..instructions import (BytecodeInstruction, _const_repr, _copy_signature, _is_anonymous_func_body,
                             _match_finally_copy, _render_func_tuple)
 from ..postprocess import _string_continuation_rows, collapse_chained_comparisons, post_process_source
@@ -1427,7 +1428,7 @@ class DecompilerGeneric(DecompilerBase):
             for _, jinstr, expr_instrs, _ in group:
                 for xi in expr_instrs:
                     sub._handle_instruction(xi)
-                raw_expr = str(sub.stack.pop()) if sub.stack else "?"
+                raw_expr = str(sub.stack.pop()) if sub.stack else str(sub._unknown("condition left no value on the stack"))
 
                 t = get_logical_t(self._get_jump_target(jinstr))
                 op = jinstr.opname
@@ -1932,7 +1933,7 @@ class DecompilerGeneric(DecompilerBase):
 
     def _op_inlined_comprehension(self, instr: BytecodeInstruction):
         open_, element, clauses, close, target = instr.argval
-        iterable = str(self._pop("?"))
+        iterable = str(self._pop())
         self.stack.append(f"{open_}{element} for {target} in {iterable}{clauses}{close}")
 
     def _eval_cond_expr(self, instrs: list) -> str:
@@ -1945,7 +1946,7 @@ class DecompilerGeneric(DecompilerBase):
             instrs (list): Sequence of instruction objects (bytecode slice) that comprise the boolean sub-expression.
 
         Returns:
-            str: The reconstructed boolean expression, or "?" if the expression cannot be determined.
+            str: The reconstructed boolean expression, or an UnknownExpression if it cannot be determined.
         """
         return self._eval_ternary_branch(instrs)
 
@@ -2059,6 +2060,33 @@ class DecompilerGeneric(DecompilerBase):
                 return True
         return False
 
+    def _missing_operand(self, reason: str, instr: BytecodeInstruction):
+        """
+        An operand a branch evaluator needed that its stack does not have: record a stack
+        underflow (an error in strict mode) and carry on with an UnknownExpression.
+        """
+        self._report(STACK_UNDERFLOW, reason, instr)
+        return self._unknown(reason)
+
+    def _has_operands(self, mini_stack: list, needed: int, instr: BytecodeInstruction) -> bool:
+        """
+        True if a branch evaluator's stack holds *needed* operands for *instr*. If not, record
+        a stack underflow (an error in strict mode); the caller then leaves the stack as it is.
+        """
+        if len(mini_stack) >= needed:
+            return True
+        self._report(STACK_UNDERFLOW,
+                     f"{instr.opname} needs {needed} operand(s) but the branch has {len(mini_stack)}", instr)
+        return False
+
+    def _unmapped_operator(self, reason: str, instr: BytecodeInstruction) -> str:
+        """
+        The text for an operator the tables do not know: record it (an error in strict
+        mode) and render it as the placeholder text, because it ends up inside source text.
+        """
+        self._report(AMBIGUOUS_EXPRESSION, reason, instr)
+        return str(self._unknown(reason))
+
     def _eval_ternary_branch(self, instrs: list) -> str:
         mini_stack: list = []
         idx = 0
@@ -2129,7 +2157,7 @@ class DecompilerGeneric(DecompilerBase):
                         if mini_stack: mini_stack.pop()
                     mini_stack.append("{}") # Placeholder for dict
             elif op in ("GET_ATTR", "LOAD_ATTR", "LOAD_METHOD"):
-                if mini_stack:
+                if self._has_operands(mini_stack, 1, ins):
                     obj = mini_stack.pop()
                     obj_str = str(obj)
                     if obj_str.startswith("-"):
@@ -2139,13 +2167,13 @@ class DecompilerGeneric(DecompilerBase):
                 num = int(ins.arg) if ins.arg is not None else 0
                 args = []
                 for _ in range(num):
-                    args.insert(0, mini_stack.pop() if mini_stack else "?")
-                func = mini_stack.pop() if mini_stack else "?"
+                    args.insert(0, mini_stack.pop() if mini_stack else self._missing_operand("call argument missing", ins))
+                func = mini_stack.pop() if mini_stack else self._missing_operand("callee missing", ins)
                 if " + NULL" in str(func) or "|NULL" in str(func):
                     func = str(func).split(" + ")[0].split("|")[0]
                 mini_stack.append(f"{func}({', '.join(args)})")
             elif op == "COMPARE_OP":
-                if len(mini_stack) >= 2:
+                if self._has_operands(mini_stack, 2, ins):
                     right, left = mini_stack.pop(), mini_stack.pop()
                     op_sym = str(ins.argval)
                     m = re.search(r"\(([^)]+)\)", op_sym)
@@ -2153,29 +2181,31 @@ class DecompilerGeneric(DecompilerBase):
                         op_sym = m.group(1)
                     mini_stack.append(f"{left} {op_sym} {right}")
             elif op == "BINARY_OP":
-                if len(mini_stack) >= 2:
+                if self._has_operands(mini_stack, 2, ins):
                     right, left = mini_stack.pop(), mini_stack.pop()
                     op_map = {0: "+", 1: "&", 2: "//", 3: "<<", 4: "@", 5: "*",
                               6: "%", 7: "|", 8: "**", 9: ">>", 10: "-", 11: "/", 12: "^",
                               26: "[]"}
-                    sym = op_map.get(int(ins.arg) if ins.arg is not None else -1, "?")
+                    sym = op_map.get(int(ins.arg) if ins.arg is not None else -1)
+                    if sym is None:
+                        sym = self._unmapped_operator(f"unknown binary operator ({ins.arg})", ins)
                     if sym == "[]":
                         mini_stack.append(f"{left}[{right}]")
                     else:
                         mini_stack.append(f"({left} {sym} {right})")
             elif op in ("IS_OP",):
-                if len(mini_stack) >= 2:
+                if self._has_operands(mini_stack, 2, ins):
                     right, left = mini_stack.pop(), mini_stack.pop()
                     sym = "is not" if bool(ins.arg) else "is"
                     mini_stack.append(f"{left} {sym} {right}")
             elif op in ("CONTAINS_OP",):
-                if len(mini_stack) >= 2:
+                if self._has_operands(mini_stack, 2, ins):
                     container, item = mini_stack.pop(), mini_stack.pop()
                     sym = "not in" if bool(ins.arg) else "in"
                     mini_stack.append(f"{item} {sym} {container}")
             elif op in _UNARY_SYMBOLS or (
                     op == "CALL_INTRINSIC_1" and "UNARY_POSITIVE" in str(ins.argrepr)):
-                if mini_stack:
+                if self._has_operands(mini_stack, 1, ins):
                     symbol = _UNARY_SYMBOLS.get(op, "+")
                     mini_stack.append(f"({symbol}{_unary_operand(mini_stack.pop())})")
             elif op == "BUILD_SLICE":
@@ -2192,13 +2222,13 @@ class DecompilerGeneric(DecompilerBase):
                     mini_stack.append(f'{s}:{e}:{step}')
             elif op == "BINARY_SLICE":
                 # Python 3.11+: pops stop, start, container
-                if len(mini_stack) >= 3:
+                if self._has_operands(mini_stack, 3, ins):
                     stop, start, container = mini_stack.pop(), mini_stack.pop(), mini_stack.pop()
                     s = "" if str(start) == "None" else str(start)
                     e = "" if str(stop) == "None" else str(stop)
                     mini_stack.append(f"{container}[{s}:{e}]")
             elif op == "BINARY_SUBSCR":
-                if len(mini_stack) >= 2:
+                if self._has_operands(mini_stack, 2, ins):
                     key, obj = mini_stack.pop(), mini_stack.pop()
                     # If key is a slice-notation string (from BUILD_SLICE), keep it as-is
                     if isinstance(key, str) and ':' in key and not key.startswith("'"):
@@ -2221,9 +2251,11 @@ class DecompilerGeneric(DecompilerBase):
                     "BINARY_OR": "|", "BINARY_XOR": "^",
                     "BINARY_MATRIX_MULTIPLY": "@",
                 }
-                if len(mini_stack) >= 2:
+                if self._has_operands(mini_stack, 2, ins):
                     right, left = mini_stack.pop(), mini_stack.pop()
-                    sym = _bin_map.get(op, "?")
+                    sym = _bin_map.get(op)
+                    if sym is None:
+                        sym = self._unmapped_operator(f"unknown binary operator ({op})", ins)
                     l_s = str(left)
                     r_s = str(right)
                     # Add parens only when the left operand is a compound expression
@@ -2236,7 +2268,7 @@ class DecompilerGeneric(DecompilerBase):
                     if _needs_parens(l_s):
                         l_s = f"({l_s})"
                     mini_stack.append(f"{l_s} {sym} {r_s}")
-        return str(mini_stack[-1]) if mini_stack else "?"
+        return str(mini_stack[-1]) if mini_stack else self._unknown("expression left no value on the stack")
 
     def _has_conditional_jump(self) -> bool:
         """Return True if any POP_JUMP_IF_FALSE/TRUE exists anywhere."""
@@ -4872,7 +4904,7 @@ class DecompilerGeneric(DecompilerBase):
                     "+", "&", "//", "<<", "@", "*", "%", "|", "**", ">>", "-", "/", "^",
                     "+=", "&=", "//=", "<<=", "@=", "*=", "%=", "|=", "**=", ">>=", "-=", "/=", "^=", "[]"
                 ]
-                op = nb_ops[instr.arg] if instr.arg is not None and instr.arg < len(nb_ops) else "?"
+                op = nb_ops[instr.arg] if instr.arg is not None and instr.arg < len(nb_ops) else None
                 if op == "[]":
                     self.stack.append(f"{left}[{right}]")
                     return
@@ -4886,17 +4918,29 @@ class DecompilerGeneric(DecompilerBase):
                     "BINARY_OR": "|", "BINARY_XOR": "^",
                     "BINARY_MATRIX_MULTIPLY": "@",
                 }
-                op = op_map.get(opname, "?")
+                op = op_map.get(opname)
 
-            if op == "?":
-                self._report(AMBIGUOUS_EXPRESSION, f"unknown binary operator ({instr.arg})", instr)
+            unknown_reason = None
+            if op is None:
+                unknown_reason = f"unknown binary operator ({instr.arg})"
+                self._report(AMBIGUOUS_EXPRESSION, unknown_reason, instr)
+                op = self._unknown(unknown_reason)
             l_str = str(left)
             r_str = str(right)
             if " " in l_str and not (l_str.startswith("(") and l_str.endswith(")")):
                 l_str = f"({l_str})"
             if " " in r_str and not (r_str.startswith("(") and r_str.endswith(")")):
                 r_str = f"({r_str})"
-            self.stack.append(f"{l_str} {op} {r_str}")
+            text = f"{l_str} {op} {r_str}"
+            # An expression with an unknown operator, or an unknown operand, is unknown itself,
+            # so it stays typed: it keeps the reason and where it came from for whoever reads
+            # the stack next, however many operators are applied to it.
+            if unknown_reason is not None:
+                self.stack.append(self._unknown(unknown_reason, text=text))
+            else:
+                origin = next((v for v in (left, right) if is_unknown(v)), None)
+                self.stack.append(text if origin is None
+                                  else UnknownExpression(origin.reason, origin.opcode, origin.offset, text))
 
     def _op_binary_slice(self, instr: BytecodeInstruction):
         # Python 3.11+ BINARY_SLICE pops: stop, start, container
@@ -5775,7 +5819,7 @@ class DecompilerGeneric(DecompilerBase):
         if instr.offset in getattr(self, "_ternary_jumps", {}):
             store_name, then_instrs, else_instrs, is_true, aug_op = \
                 self._ternary_jumps[instr.offset]
-            cond_expr = str(self._pop("?"))
+            cond_expr = str(self._pop())
             # For POP_JUMP_IF_NONE / POP_JUMP_IF_NOT_NONE the raw condition
             # on the stack is the *value* being tested (not a bool expression).
             # Rewrite it to the appropriate 'is None' / 'is not None' form
@@ -6257,8 +6301,8 @@ class DecompilerGeneric(DecompilerBase):
         num = int(instr.arg) if instr.arg is not None else 0
         pairs = []
         for _ in range(num):
-            val = str(self._pop("?"))
-            key = str(self._pop("?"))
+            val = str(self._pop())
+            key = str(self._pop())
             pairs.insert(0, f"{key}: {val}")
         self.stack.append("{" + ", ".join(pairs) + "}")
 

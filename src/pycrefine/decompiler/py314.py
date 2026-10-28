@@ -217,10 +217,10 @@ class Decompiler314(Decompiler311Plus):
                 return
             if isinstance(instr.argval, (tuple, list)) and len(instr.argval) >= 2:
                 names = ", ".join(str(x) for x in instr.argval)
-                expr = str(self._pop("?"))
+                expr = str(self._pop())
                 self._append_reconstructed(f"{names} = {expr}")
             else:
-                expr = str(self._pop("?"))
+                expr = str(self._pop())
                 # Use argrepr which contains the original target text like "(foo, bar)"
                 targets = instr.argrepr if instr.argrepr else "var1, var2"
                 self._append_reconstructed(f"{targets} = {expr}")

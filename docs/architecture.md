@@ -32,7 +32,7 @@ source. For the development workflow, see [CONTRIBUTING.md](../CONTRIBUTING.md).
 | `decompiler/py314.py` | `Decompiler314`: 3.13 and 3.14 (fused superinstructions, 3.14's `LOAD_SPECIAL` `with` blocks); a subclass of `Decompiler311Plus` |
 | `opcodes/py39.py` | the 3.9 opcode table, used to read 3.9 bytecode on any host |
 | `instructions.py` | `BytecodeInstruction`, constant formatting, finally-copy matching, comprehension rendering |
-| `expr.py` | expression helpers and stack sentinels (`StackNULL`, `_BoolExpr`) |
+| `expr.py` | expression helpers and stack sentinels (`StackNULL`, `_BoolExpr`, `UnknownExpression`) |
 | `postprocess.py` | text clean-ups after decompiling (`elif` flattening, chained comparisons, placeholders) |
 | `_constants.py` | shared opcode sets and limits |
 
@@ -81,6 +81,21 @@ reads what the earlier ones recorded or removed.
 | 8 | `_prescan_ternaries` | conditional expressions, so their branches become one expression |
 | 9 | `_prescan_compound_conds` | `a and b` / `a or b` / chained comparisons used as a condition |
 | 10 | `_prescan_value_boolops` | `and` / `or` used as a value |
+
+### The expression stack
+
+`self.stack` holds source text for the values the bytecode has pushed, plus a few typed
+markers (`StackNULL`, `_BoolExpr`, tuples for code objects). Its states are distinct:
+
+| State | How it shows |
+|---|---|
+| a known expression | the text itself |
+| an intentionally empty stack | `self.stack == []`; nothing to report until an instruction needs an operand |
+| an expression that cannot be determined | an `UnknownExpression` (a `str` that renders as `?`, with `reason`, `opcode`, `offset`); test it with `is_unknown(value)`, never by comparing with `"?"` |
+| an invalid stack transition | `self._pop()` on an empty stack records a `stack_underflow` [diagnostic](usage.md#diagnostics) (an error in strict mode) and returns an `UnknownExpression` |
+
+Pass an explicit fallback to `_pop` only for text that is a deliberate default, not as a
+way to stay quiet.
 
 ### Decompiler state
 

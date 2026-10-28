@@ -5,7 +5,11 @@ import sys
 import types
 from typing import Any, List, Optional, Set, Tuple
 from ..diagnostics import INTERNAL_ERROR, STACK_UNDERFLOW, DecompilationError, Diagnostic
+from ..expr import UnknownExpression
 from ..instructions import BytecodeInstruction
+
+# Marks "no fallback given" for _pop(), since None is a fallback callers use.
+_UNSET: Any = object()
 
 # Stem of the name used for a for-loop item that a later unpacking stores.
 _LOOP_PLACEHOLDER = "_item"
@@ -60,15 +64,22 @@ class DecompilerBase:
         sub.diagnostics = self.diagnostics
         sub.strict = self.strict
 
-    def _pop(self, fallback: Any, reason: str = "an operand is missing from the stack") -> Any:
+    def _unknown(self, reason: str, text: str = "?") -> UnknownExpression:
+        """A placeholder for an expression that cannot be determined here, tagged with where it came from."""
+        instr = self._current_instr
+        return UnknownExpression(reason, instr.opname if instr is not None else None,
+                                 instr.offset if instr is not None else None, text)
+
+    def _pop(self, fallback: Any = _UNSET, reason: str = "an operand is missing from the stack") -> Any:
         """
-        Pop the top of the expression stack. If it is empty, record a stack underflow
-        (an error in strict mode) and return *fallback*, the text to carry on with.
+        Pop the top of the expression stack. If it is empty, that is an invalid stack
+        transition: record a stack underflow (an error in strict mode) and carry on with
+        *fallback*, or with an :class:`UnknownExpression` when none is given.
         """
         if self.stack:
             return self.stack.pop()
         self._report(STACK_UNDERFLOW, reason)
-        return fallback
+        return self._unknown(reason) if fallback is _UNSET else fallback
 
     def _disassemble(self):
         """Convert code object bytecode into a list of BytecodeInstruction."""
