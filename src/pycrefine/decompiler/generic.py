@@ -5942,7 +5942,7 @@ class DecompilerGeneric(DecompilerBase):
         they look different from an `if` condition:
           * 3.9/3.10: `JUMP_IF_FALSE_OR_POP` / `JUMP_IF_TRUE_OR_POP` to the join.
           * 3.12+: `COPY 1; [TO_BOOL]; POP_JUMP_IF_FALSE/TRUE join; [NOT_TAKEN]; POP_TOP`.
-        Mixed chains (`a and b or c`) on 3.9/3.10 also use plain `POP_JUMP_IF_*` to the
+        Mixed chains (`a and b or c`) on 3.9 to 3.11 also use plain `POP_JUMP_*IF_*` to the
         start of the next alternative; those are recorded as groups that the next
         `*_OR_POP` closes. A chained comparison (`a < b < c`) uses the same opcodes but
         jumps to a `SWAP/ROT_TWO; POP_TOP` cleanup and is left alone.
@@ -5999,10 +5999,11 @@ class DecompilerGeneric(DecompilerBase):
                 resume = instrs[m + 1].offset if m + 1 < len(instrs) else instrs[m].offset + 2
                 self.prescan.boolop_copy[ins.offset] = (op, target, resume)
 
-        # 3.9/3.10 mixed chains: a plain POP_JUMP whose target lies inside the expression
-        # that a later *_OR_POP closes.
+        # 3.9/3.10/3.11 mixed chains: a plain POP_JUMP whose target lies inside the expression
+        # that a later *_OR_POP closes. 3.11 spells the forward jumps POP_JUMP_FORWARD_IF_*.
         for ins in instrs:
-            if ins.opname not in ("POP_JUMP_IF_FALSE", "POP_JUMP_IF_TRUE"):
+            if ins.opname not in ("POP_JUMP_IF_FALSE", "POP_JUMP_IF_TRUE",
+                                  "POP_JUMP_FORWARD_IF_FALSE", "POP_JUMP_FORWARD_IF_TRUE"):
                 continue
             target = self._get_jump_target(ins)
             if not isinstance(target, int) or target <= ins.offset:
@@ -6016,7 +6017,7 @@ class DecompilerGeneric(DecompilerBase):
                            and x.opname in ("RETURN_VALUE", "RETURN_CONST", "RAISE_VARARGS")
                            for x in instrs):
                         break
-                    self.prescan.boolop_groups[ins.offset] = ("and" if ins.opname == "POP_JUMP_IF_FALSE" else "or", target)
+                    self.prescan.boolop_groups[ins.offset] = ("and" if ins.opname.endswith("IF_FALSE") else "or", target)
                     break
 
     def _boolop_step(self, instr: BytecodeInstruction) -> bool:

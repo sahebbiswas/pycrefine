@@ -291,16 +291,7 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 194,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 (a and b) or c as a value loses the and"
-        }
-      ]
+      "support": "supported"
     },
     {
       "id": "features/expr_comparisons",

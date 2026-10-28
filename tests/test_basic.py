@@ -407,6 +407,11 @@ class TestValueBoolOps(unittest.TestCase):
         "in_function_default": "def f(x, y=0 or 3):\n    return x or y\nprint(f(0), f(1))\n",
         "attribute_and_subscript": "a, b = 0, [1, 2]\nprint((a or b)[0], (a or b).count(1))\n",
         "not_operand": "a, b = 0, 5\nprint(not (a or b), (not a) and b)\n",
+        "mixed_chain_long": "a, b, c, d, e = 0, 1, 0, 2, 3\nr = a and b or c and d or e\nprint(r)\n",
+        "mixed_chain_long_first_arm": "a, b, c, d, e = 1, 2, 0, 0, 3\nr = a and b or c and d or e\nprint(r)\n",
+        "mixed_chain_long_second_arm": "a, b, c, d, e = 0, 1, 1, 4, 3\nr = a and b or c and d or e\nprint(r)\n",
+        "mixed_chain_returned": "def f(a, b, c):\n    return a and b or c\nprint(f(0, 1, 2), f(1, 0, 2), f(1, 3, 2))\n",
+        "mixed_chain_argument": "a, b, c = 0, 5, 7\nprint((a and b) or c, a or (b and c))\n",
     }
 
     def _run(self, code):
