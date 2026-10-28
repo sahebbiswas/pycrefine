@@ -61,6 +61,7 @@ import atexit
 import json
 import multiprocessing
 import os
+import platform
 import py_compile
 import re
 import sys
@@ -484,6 +485,11 @@ def python_tag() -> str:
     return f'{sys.version_info[0]}.{sys.version_info[1]}'
 
 
+def python_patch() -> str:
+    """The full version of the running interpreter, e.g. ``3.12.3``."""
+    return platform.python_version()
+
+
 def default_baseline_path() -> Path:
     return BASELINE_DIR / f'py{python_tag()}.json'
 
@@ -496,7 +502,7 @@ def to_baseline(results: List[EntryResult]) -> dict:
             e['units'] = {uid: u['status'] for uid, u in sorted(r.units.items())}
         entries[r.path] = e
     return {'schema_version': SCHEMA_VERSION, 'python_version': python_tag(),
-            'entries': entries}
+            'python_patch': python_patch(), 'entries': entries}
 
 
 def _label_counts(unit_ids) -> Dict[str, int]:
@@ -590,11 +596,13 @@ def summarize(results: List[EntryResult], changes: Optional[List[dict]]) -> dict
     return s
 
 
-def build_report(results, changes, baseline_path) -> dict:
+def build_report(results, changes, baseline_path, baseline_patch=None) -> dict:
     failures = [c for c in changes or [] if c['change'] in FAILING_CHANGES]
     return {
         'schema_version': SCHEMA_VERSION,
         'python_version': python_tag(),
+        'python_patch': python_patch(),
+        'baseline_python_patch': baseline_patch,
         'levels': LEVELS,
         'baseline': _rel(baseline_path) if baseline_path else None,
         'result': 'fail' if failures else 'pass',
@@ -651,6 +659,10 @@ def print_text(report: dict, verbose: bool = False) -> None:
             print(f'    ... {len(items) - len(shown)} more (use --verbose)')
     print()
     print('RESULT: ' + report['result'].upper())
+    recorded = report.get('baseline_python_patch')
+    if report['result'] == 'fail' and recorded and recorded != python_patch():
+        print(f'The baseline was recorded on Python {recorded} and this run is on {python_patch()}; '
+              'check that a patch release of the interpreter is not the cause.')
     if any(c['change'] != 'regressed' for c in changes):
         print('Results differ from the baseline; once the changes are intended, '
               'run with --update-baseline on every CI Python version to record them.')
@@ -730,7 +742,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 2
         changes = compare(results, baseline)
 
-    report = build_report(results, changes, baseline_path)
+    report = build_report(results, changes, baseline_path,
+                          baseline.get('python_patch') if baseline_path is not None else None)
     if args.report:
         args.report.write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
     if args.json:

@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "python_version": "3.12",
+  "python_patch": "3.12.3",
   "entries": {
     "corpus/comprehensive.py": {
       "kind": "source",
