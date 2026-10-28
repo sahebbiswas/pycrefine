@@ -25,14 +25,14 @@ class Decompiler314(Decompiler311Plus):
         """Close blocks as usual, then drop the stack sentinel of every `with` body that ended."""
         super()._close_blocks(offset)
         still_open = []
-        for end, with_id in getattr(self, "_open_with_sentinels", []):
+        for end, with_id in self.emit.open_with_sentinels:
             if offset >= end:
                 # A body that only raises or returns never runs its __exit__ call inline,
                 # so nothing else removes the sentinel it left on the stack.
                 self._remove_with_sentinel(with_id)
             else:
                 still_open.append((end, with_id))
-        self._open_with_sentinels = still_open
+        self.emit.open_with_sentinels = still_open
 
     def _handle_instruction(self, instr: BytecodeInstruction):
         """
@@ -51,13 +51,13 @@ class Decompiler314(Decompiler311Plus):
             instr (BytecodeInstruction): The disassembled instruction to process; its opname, opcode, arg, argval, and offset are used to match patterns and drive stack/block changes.
 
         Side effects:
-            May mutate self.pc, self.stack, self.blocks, self.indent_level, self.reconstructed, and may create or update self._with_exit_suppress. Delegates further emission and handling to super()._handle_instruction when appropriate.
+            May mutate self.pc, self.stack, self.blocks, self.indent_level, self.reconstructed, and may create or update self.prescan.with_exit_suppress. Delegates further emission and handling to super()._handle_instruction when appropriate.
         """
         # Suppress then-branch instructions of detected ternary expressions
-        if instr.offset in getattr(self, "_ternary_suppress", ()):
+        if instr.offset in self.prescan.ternary_suppress:
             return
         # Suppress intermediate instructions belonging to a compound boolean
-        if instr.offset in getattr(self, "_compound_suppress", ()):
+        if instr.offset in self.prescan.compound_suppress:
             if self.stack:
                 self.stack.pop()
             return
@@ -65,19 +65,19 @@ class Decompiler314(Decompiler311Plus):
         opname = instr.opname
 
         # Inlined __exit__ calls at the exits of a with body (see _prescan_with_exits)
-        if instr.offset in getattr(self, "_with_exit_suppress_offsets", ()):
-            owner = self._with_exit_owner.get(instr.offset)
+        if instr.offset in self.prescan.with_exit_suppress_offsets:
+            owner = self.prescan.with_exit_owner.get(instr.offset)
             if owner is not None:
                 self._remove_with_sentinel(owner)  # this exit left the with body
-            if (instr.offset in getattr(self, "_finally_merge_offsets", ())
-                    or instr.offset in getattr(self, "_except_only_merge_offsets", ())):
+            if (instr.offset in self.prescan.finally_merge_offsets
+                    or instr.offset in self.prescan.except_only_merge_offsets):
                 # A try statement that ends the with body merges at its exit call: the
                 # generic handler emits the deferred handlers/finally there, then hides
                 # the call itself.
                 super()._handle_instruction(instr)
             return
         # Suppress normal-path __exit__ body calls (identified by range scan)
-        if getattr(self, "_with_exit_suppress", set()) and instr.offset in getattr(self, "_with_exit_suppress"):
+        if self.prescan.with_exit_suppress and instr.offset in self.prescan.with_exit_suppress:
             return
 
         # Handle Python 3.14 LOAD_SPECIAL (opcode 95)
@@ -104,7 +104,7 @@ class Decompiler314(Decompiler311Plus):
 
                     self.pc += 5
                     next_instr = self.instructions[self.pc] if self.pc < len(self.instructions) else None
-                    body_end = self._with_body_end.get(next_instr.offset) if next_instr is not None else None
+                    body_end = self.prescan.with_body_end.get(next_instr.offset) if next_instr is not None else None
                     as_name = ""
                     if next_instr and next_instr.opname in ("STORE_NAME", "STORE_FAST", "STORE_GLOBAL", "STORE_ATTR"):
                         as_name = f" as {next_instr.argval}"
@@ -147,17 +147,15 @@ class Decompiler314(Decompiler311Plus):
                         try_end, exit_body_start = body_end, None
                     if try_end is not None:
                         self.blocks.append((try_end, "with_body"))
-                        self._open_with_sentinels.append((try_end, body_start))
+                        self.emit.open_with_sentinels.append((try_end, body_start))
                     if exit_body_start is not None:
-                        if not hasattr(self, "_with_exit_suppress"):
-                            self._with_exit_suppress = set()
                         idx = next((i for i, x in enumerate(self.instructions) if x.offset == exit_body_start), None)
                         if idx is not None:
                             # Suppress up to the end of the cleanup sequence
                             for j in range(idx, len(self.instructions)):
                                 instr_j = self.instructions[j]
                                 op_j = instr_j.opname
-                                self._with_exit_suppress.add(instr_j.offset)
+                                self.prescan.with_exit_suppress.add(instr_j.offset)
                                 # ONLY suppress until the end of the __exit__ cleanup call (POP_TOP).
                                 # Do NOT include RETURN_VALUE or any following instructions.
                                 if op_j == "POP_TOP":

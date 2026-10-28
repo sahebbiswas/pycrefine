@@ -4,6 +4,7 @@ import dis
 import sys
 import types
 from typing import Any, List, Optional, Set, Tuple
+from .state import PrescanState
 from ..diagnostics import INTERNAL_ERROR, STACK_UNDERFLOW, DecompilationError, Diagnostic
 from ..expr import UnknownExpression
 from ..instructions import BytecodeInstruction
@@ -16,6 +17,9 @@ _LOOP_PLACEHOLDER = "_item"
 
 
 class DecompilerBase:
+    # Created by DecompilerGeneric.__init__; declared here for the shared helpers.
+    prescan: PrescanState
+
     def __init__(self, code_obj: types.CodeType, indent_level: int = 0, beautification_level: str = 'core', target_version: Optional[Tuple[int, int]] = None, strict: bool = False):
         self.code_obj = code_obj
         # Where reconstruction was uncertain (see diagnostics.py). Decompilers of nested
@@ -322,7 +326,7 @@ class DecompilerBase:
             `true` if the RETURN is likely the compiler-inserted implicit `return None`, `false` otherwise.
         """
         instr = self.instructions[instr_index]
-        if instr.offset in getattr(self, "_explicit_returns", ()):
+        if instr.offset in self.prescan.explicit_returns:
             return False
         # Save current state for lookahead
         old_pc = self.pc

@@ -85,9 +85,9 @@ def _run39_full_impl(instructions):
 
     dec.pc = 0
     dec.blocks = []
-    dec._while_header_targets = {}
-    dec._while_body_offsets = set()
-    dec._while_true_ends = set()
+    dec.prescan.while_header_targets = {}
+    dec.prescan.while_body_offsets = set()
+    dec.prescan.while_true_ends = set()
     dec._prescan_while_loops()
     dec._prescan_try_structure()
     dec._prescan_ternaries()

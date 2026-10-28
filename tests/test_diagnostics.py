@@ -40,6 +40,20 @@ class TestDiagnosticValue(unittest.TestCase):
         self.assertTrue(block.startswith("# pycrefine: 1 place could not"))
         self.assertTrue(all(line.startswith("#") for line in block.splitlines()))
 
+    def test_comment_block_keeps_every_line_a_comment(self):
+        """A line break inside a reason or code name must not leave source outside a comment."""
+        for brk in ("\n", "\r\n", "\r", "\x0c", "\x85", "\u2028"):
+            with self.subTest(brk=repr(brk)):
+                d = Diagnostic(dg.UNSUPPORTED_OPCODE, f"first{brk}import os; os.system('x')", (3, 9),
+                               code_name=f"f{brk}g")
+                block = dg.comment_block([d])
+                self.assertTrue(all(line.startswith("#") for line in block.splitlines()), block)
+                compile(block, "<block>", "exec")  # nothing but comments: no statements
+                import ast
+                self.assertEqual(ast.parse(block).body, [])
+        single = dg.comment_block([Diagnostic(dg.STACK_UNDERFLOW, "empty", (3, 9))])
+        self.assertEqual(single.splitlines()[1], "#   - " + str(Diagnostic(dg.STACK_UNDERFLOW, "empty", (3, 9))))
+
     def test_kinds_are_unique_and_listed(self):
         self.assertEqual(len(set(dg.KINDS)), len(dg.KINDS))
 

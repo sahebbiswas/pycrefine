@@ -69,5 +69,10 @@ def comment_block(diagnostics) -> str:
     count = len(diagnostics)
     lines = [f"# pycrefine: {count} place{'s' if count != 1 else ''} could not be reconstructed "
              "reliably; treat the source below as unverified there:"]
-    lines.extend(f"#   - {d}" for d in diagnostics)
+    for d in diagnostics:
+        # A reason or code name can hold a line break (a name read from the bytecode, say). Every
+        # physical line gets its own marker, or the rest would be written out as source.
+        first, *rest = str(d).splitlines() or [""]
+        lines.append(f"#   - {first}")
+        lines.extend(f"#     {line}" for line in rest)
     return "\n".join(lines) + "\n"

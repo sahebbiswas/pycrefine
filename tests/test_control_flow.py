@@ -569,7 +569,7 @@ class TestTernarySuppressionAllSubclasses(unittest.TestCase):
             Instr(83, "RETURN_VALUE",      None, None,  22, None,  False),
         ]
         dec._prescan_ternaries()
-        suppress = getattr(dec, "_ternary_suppress", set())
+        suppress = dec.prescan.ternary_suppress
         self.assertIn(18, suppress)
 
     def test_ternary_suppression_does_not_leak_into_next_statement(self):
@@ -588,7 +588,7 @@ class TestTernarySuppressionAllSubclasses(unittest.TestCase):
             Instr(83, "RETURN_VALUE",      None, None, 14, None,  False),
         ]
         dec._prescan_ternaries()
-        suppress = getattr(dec, "_ternary_suppress", set())
+        suppress = dec.prescan.ternary_suppress
         self.assertIn(4, suppress)
         self.assertIn(6, suppress)
         self.assertIn(8, suppress)
@@ -648,7 +648,7 @@ class TestAugAssignTernary(unittest.TestCase):
             Instr(83, "RETURN_VALUE",  None, None,  16, None,  False),
         ]
         dec._prescan_ternaries()
-        suppress = getattr(dec, "_ternary_suppress", set())
+        suppress = dec.prescan.ternary_suppress
         self.assertIn(6, suppress)
         self.assertIn(10, suppress)
 
@@ -669,7 +669,7 @@ class TestWhilePrescan(unittest.TestCase):
     def test_simple_while_guard_detected(self):
         dec = self._get_dec("n = 0\nwhile n < 5:\n    n += 1\n")
         if dec._has_jump_backward():
-            self.assertGreaterEqual(len(dec._while_header_targets), 1)
+            self.assertGreaterEqual(len(dec.prescan.while_header_targets), 1)
 
     def test_nested_while_two_guards(self):
         src = (
@@ -677,21 +677,21 @@ class TestWhilePrescan(unittest.TestCase):
             "    while j < 2:\n        j += 1\n    i += 1\n"
         )
         dec = self._get_dec(src)
-        detected = len(dec._while_header_targets)
+        detected = len(dec.prescan.while_header_targets)
         self.assertGreaterEqual(detected, 1)
 
     def test_dup_offsets_populated(self):
         dec = self._get_dec("n = 0\nwhile n < 5:\n    n += 1\n")
         if (3, 12) <= sys.version_info[:2] < (3, 14):
             # 3.12/3.13 copy the condition to the bottom of the loop body.
-            self.assertGreater(len(dec._while_body_offsets), 0)
+            self.assertGreater(len(dec.prescan.while_body_offsets), 0)
         else:
             # No duplicated condition: nothing may be suppressed.
-            self.assertEqual(len(dec._while_body_offsets), 0)
+            self.assertEqual(len(dec.prescan.while_body_offsets), 0)
 
     def test_no_while_in_if_only(self):
         dec = self._get_dec("x = 1\nif x > 0:\n    x = 2\n")
-        self.assertEqual(len(dec._while_header_targets), 0)
+        self.assertEqual(len(dec.prescan.while_header_targets), 0)
 
     def test_while_loop_output_quality(self):
         out = decompile("n = 0\nwhile n < 10:\n    n += 1\n")
@@ -1181,7 +1181,7 @@ class TestCodeAfterTryExceptInLoop(unittest.TestCase):
             "    print('c', item)\n    try:\n        print('b', item)\n"
             "    finally:\n        print('c', item)\n"
         )
-        self.assertEqual(len(dec._deferred_finally_lines), 1)
+        self.assertEqual(len(dec.emit.deferred_finally_lines), 1)
 
     @unittest.skipIf(sys.version_info[:2] < (3, 12), "needs exception-table based try blocks")
     def test_finally_with_branch_is_still_detected(self):
@@ -1191,5 +1191,5 @@ class TestCodeAfterTryExceptInLoop(unittest.TestCase):
             "    except KeyError:\n        pass\n    finally:\n        if flag:\n"
             "            print('yes', item)\n        else:\n            print('no', item)\n"
         )
-        self.assertEqual(len(dec._deferred_finally_lines), 1)
+        self.assertEqual(len(dec.emit.deferred_finally_lines), 1)
 
