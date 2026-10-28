@@ -13,16 +13,7 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 202,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 method calls among call arguments"
-        }
-      ]
+      "support": "supported"
     },
     {
       "id": "features/class_special_methods",
@@ -153,16 +144,7 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 226,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 nested calls leave the stack short (exposed by #191)"
-        }
-      ]
+      "support": "supported"
     },
     {
       "id": "features/decorators_properties",
@@ -176,16 +158,7 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 202,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 method calls among call arguments"
-        }
-      ]
+      "support": "supported"
     },
     {
       "id": "features/exc_finally",
@@ -519,13 +492,6 @@
           "summary": "conditional expression with a list/dict display or call arguments"
         },
         {
-          "issue": 226,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 nested calls leave the stack short (exposed by #191)"
-        },
-        {
           "issue": 157,
           "versions": [
             "3.13",
@@ -769,13 +735,6 @@
           "issue": 199,
           "versions": "all",
           "summary": "import a.b as c"
-        },
-        {
-          "issue": 226,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 nested calls leave the stack short (exposed by #191)"
         }
       ]
     },
@@ -1665,11 +1624,11 @@
       "support": "partial",
       "limitations": [
         {
-          "issue": 226,
+          "issue": 192,
           "versions": [
             "3.11"
           ],
-          "summary": "3.11 nested calls leave the stack short (exposed by #191)"
+          "summary": "3.11 comprehension filters are dropped"
         }
       ]
     },
@@ -1695,11 +1654,18 @@
           "summary": "3.10 block-based exception handlers are not decompiled"
         },
         {
-          "issue": 226,
+          "issue": 192,
           "versions": [
             "3.11"
           ],
-          "summary": "3.11 nested calls leave the stack short (exposed by #191)"
+          "summary": "3.11 comprehension filters are dropped"
+        },
+        {
+          "issue": 193,
+          "versions": [
+            "3.11"
+          ],
+          "summary": "3.11 except E as e keeps the cleanup and loses the name"
         }
       ]
     },
@@ -1743,11 +1709,11 @@
       "support": "partial",
       "limitations": [
         {
-          "issue": 226,
+          "issue": 192,
           "versions": [
             "3.11"
           ],
-          "summary": "3.11 nested calls leave the stack short (exposed by #191)"
+          "summary": "3.11 comprehension filters are dropped"
         }
       ]
     },

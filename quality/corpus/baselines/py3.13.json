@@ -33,7 +33,7 @@
     "features/modern_fstring_nested": "syntax_error",
     "features/modern_generics": "syntax_error",
     "features/modern_match": "syntax_error",
-    "features/modern_walrus": "mismatch",
+    "features/modern_walrus": "syntax_error",
     "features/module_globals": "mismatch",
     "features/opt_asserts_debug": "equivalent",
     "features/unpack_assign": "mismatch",

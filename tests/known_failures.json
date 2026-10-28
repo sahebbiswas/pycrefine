@@ -46,17 +46,9 @@
       "reason": "(a and b) or c as a value loses the and",
       "cases": {
         "tests/test_basic.py::TestValueBoolOps::test_behavior_is_preserved": [
-          "and_or_mixed",
-          "attribute_and_subscript"
+          "and_or_mixed"
         ]
       }
-    },
-    {
-      "issue": 195,
-      "reason": "f-string field calling a function on a generator expression is mangled",
-      "tests": [
-        "tests/test_instruction_regressions.py::TestRegressionsApril::test_complex_fstring"
-      ]
     }
   ],
   "3.10": [

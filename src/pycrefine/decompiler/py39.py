@@ -1126,7 +1126,7 @@ class Decompiler39(DecompilerGeneric):
         # If it arrives here, it means the DUP_TOP pattern didn't fire
         # (shouldn't happen in well-formed 3.9 bytecode, but handle gracefully).
         elif opname == "JUMP_IF_NOT_EXC_MATCH":
-            exc_type = str(self._pop("Exception"))
+            exc_type = str(self._pop())
             if self.stack:
                 self.stack.pop()  # exc_instance
             if self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup") and self.blocks[-1][0] == instr.offset:

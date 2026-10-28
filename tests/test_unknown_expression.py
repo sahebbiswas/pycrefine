@@ -211,6 +211,65 @@ class TestNoMagicStrings(unittest.TestCase):
                     offenders.append(f"{path.relative_to(SRC_DIR)}:{node.lineno}")
         self.assertEqual(offenders, [])
 
+    def test_only_the_documented_pops_name_a_fallback(self):
+        """An underflow must not invent source text (#217): a fallback is None, a flag the caller tests."""
+        offenders = []
+        for path in sorted(SRC_DIR.rglob("*.py")):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "_pop"
+                        and any(isinstance(a, ast.Constant) and isinstance(a.value, str) for a in node.args)):
+                    offenders.append(f"{path.relative_to(SRC_DIR)}:{node.lineno}")
+        self.assertEqual(offenders, [])
+
+
+class TestUnderflowDoesNotInventSource(unittest.TestCase):
+    """Sites that used to fall back to func, ctx, Exception, {expr}, () and {} now yield the unknown marker."""
+
+    def run_op(self, handler, name, arg=0, stack=()):
+        dec = _dec()
+        dec.stack.extend(stack)
+        getattr(dec, handler)(_instr(name, arg))
+        return dec
+
+    def test_call_target(self):
+        dec = self.run_op("_op_call", "CALL_FUNCTION", 0)
+        self.assertEqual(dec.stack, ["?()"])
+        self.assertNotIn("func", dec.stack[0])
+        self.assertIn(dg.STACK_UNDERFLOW, [d.kind for d in dec.diagnostics])
+
+    def test_except_type(self):
+        dec = self.run_op("_op_check_exc_match", "JUMP_IF_NOT_EXC_MATCH")
+        self.assertNotIn("Exception", "".join(map(str, dec.stack)))
+        self.assertIn(dg.STACK_UNDERFLOW, [d.kind for d in dec.diagnostics])
+
+    def test_with_item(self):
+        dec = self.run_op("_op_setup_with", "SETUP_WITH", 0)
+        self.assertNotIn("ctx", "".join(map(str, dec.stack)))
+        self.assertIn(dg.STACK_UNDERFLOW, [d.kind for d in dec.diagnostics])
+
+    def test_fstring_field(self):
+        dec = self.run_op("_op_fstring", "FORMAT_VALUE", 0)
+        self.assertEqual(dec.stack, ["{?}"])
+        self.assertIn(dg.STACK_UNDERFLOW, [d.kind for d in dec.diagnostics])
+
+    def test_const_key_map_keys(self):
+        dec = self.run_op("_op_build_const_key_map", "BUILD_CONST_KEY_MAP", 0)
+        self.assertEqual(dec.stack, ["{?}"])
+        self.assertTrue(is_unknown(dec.stack[0]))
+        self.assertNotIn("'?'", dec.stack[0])
+        self.assertIn(dg.STACK_UNDERFLOW, [d.kind for d in dec.diagnostics])
+
+    def test_const_key_map_with_unknown_keys_keeps_the_stack_aligned(self):
+        """Values below an unknown key tuple are consumed, so the next operand is not shifted."""
+        keys = UnknownExpression("the key tuple was never built")
+        dec = self.run_op("_op_build_const_key_map", "BUILD_CONST_KEY_MAP", 2, stack=("kept", "1", "2", keys))
+        self.assertEqual(dec.stack, ["kept", "{?}"])
+        self.assertTrue(is_unknown(dec.stack[-1]))
+
+    def test_const_key_map_with_known_keys_is_unchanged(self):
+        dec = self.run_op("_op_build_const_key_map", "BUILD_CONST_KEY_MAP", 2, stack=("1", "2", "('a', 'b')"))
+        self.assertEqual(dec.stack, ["{'a': 1, 'b': 2}"])
+
 
 if __name__ == "__main__":
     unittest.main()
