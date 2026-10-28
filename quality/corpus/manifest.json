@@ -78,13 +78,6 @@
       "support": "partial",
       "limitations": [
         {
-          "issue": 191,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 calls with keyword arguments crash"
-        },
-        {
           "issue": 185,
           "versions": [
             "3.14"
@@ -163,11 +156,11 @@
       "support": "partial",
       "limitations": [
         {
-          "issue": 191,
+          "issue": 226,
           "versions": [
             "3.11"
           ],
-          "summary": "3.11 calls with keyword arguments crash"
+          "summary": "3.11 nested calls leave the stack short (exposed by #191)"
         }
       ]
     },
@@ -526,11 +519,11 @@
           "summary": "conditional expression with a list/dict display or call arguments"
         },
         {
-          "issue": 191,
+          "issue": 226,
           "versions": [
             "3.11"
           ],
-          "summary": "3.11 calls with keyword arguments crash"
+          "summary": "3.11 nested calls leave the stack short (exposed by #191)"
         },
         {
           "issue": 157,
@@ -554,16 +547,7 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 191,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 calls with keyword arguments crash"
-        }
-      ]
+      "support": "supported"
     },
     {
       "id": "features/func_recursion",
@@ -604,16 +588,7 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 191,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 calls with keyword arguments crash"
-        }
-      ]
+      "support": "supported"
     },
     {
       "id": "features/modern_async",
@@ -796,11 +771,11 @@
           "summary": "import a.b as c"
         },
         {
-          "issue": 191,
+          "issue": 226,
           "versions": [
             "3.11"
           ],
-          "summary": "3.11 calls with keyword arguments crash"
+          "summary": "3.11 nested calls leave the stack short (exposed by #191)"
         }
       ]
     },
@@ -1690,11 +1665,11 @@
       "support": "partial",
       "limitations": [
         {
-          "issue": 191,
+          "issue": 226,
           "versions": [
             "3.11"
           ],
-          "summary": "3.11 calls with keyword arguments crash"
+          "summary": "3.11 nested calls leave the stack short (exposed by #191)"
         }
       ]
     },
@@ -1720,11 +1695,11 @@
           "summary": "3.10 block-based exception handlers are not decompiled"
         },
         {
-          "issue": 191,
+          "issue": 226,
           "versions": [
             "3.11"
           ],
-          "summary": "3.11 calls with keyword arguments crash"
+          "summary": "3.11 nested calls leave the stack short (exposed by #191)"
         }
       ]
     },
@@ -1768,11 +1743,11 @@
       "support": "partial",
       "limitations": [
         {
-          "issue": 191,
+          "issue": 226,
           "versions": [
             "3.11"
           ],
-          "summary": "3.11 calls with keyword arguments crash"
+          "summary": "3.11 nested calls leave the stack short (exposed by #191)"
         }
       ]
     },
@@ -1811,13 +1786,6 @@
       "equivalence": "compile_only",
       "support": "partial",
       "limitations": [
-        {
-          "issue": 191,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 calls with keyword arguments crash"
-        },
         {
           "issue": 157,
           "versions": [
@@ -1894,13 +1862,6 @@
             "3.10"
           ],
           "summary": "3.10 block-based exception handlers are not decompiled"
-        },
-        {
-          "issue": 191,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 calls with keyword arguments crash"
         }
       ]
     },
@@ -1947,13 +1908,6 @@
             "3.10"
           ],
           "summary": "3.10 block-based exception handlers are not decompiled"
-        },
-        {
-          "issue": 191,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 calls with keyword arguments crash"
         }
       ]
     },
@@ -1969,16 +1923,7 @@
         "optimize": 0
       },
       "equivalence": "compile_only",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 191,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 calls with keyword arguments crash"
-        }
-      ]
+      "support": "supported"
     },
     {
       "id": "stdlib/textwrap",

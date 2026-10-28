@@ -9,15 +9,6 @@
       ]
     },
     {
-      "issue": 191,
-      "reason": "calls with keyword arguments crash",
-      "tests": [
-        "tests/test_integration.py::TestFindingsRefinement::test_keyword_call_reconstruction",
-        "tests/test_subroutines.py::TestCallFunctionKw::test_call_function_kw_mixing_positional_and_kwargs",
-        "tests/test_exceptions.py::TestForLoopNestedTrySpuriousElse::test_for_try_no_spurious_else"
-      ]
-    },
-    {
       "issue": 192,
       "reason": "comprehension filters and conditional expressions are dropped",
       "tests": [

@@ -4902,7 +4902,18 @@ class DecompilerGeneric(DecompilerBase):
 
     def _op_kw_names(self, instr: BytecodeInstruction):
         """Consume a keyword-names tuple (Python 3.11+ KW_NAMES opcode)."""
-        self.emit.kw_names = instr.argval
+        names = instr.argval
+        if not isinstance(names, tuple):
+            # 3.11's dis does not resolve the constant index of KW_NAMES (it gives an
+            # opaque placeholder), so read the tuple from the constants directly.
+            consts = getattr(self.code_obj, "co_consts", ())
+            index = instr.arg
+            if isinstance(index, int) and 0 <= index < len(consts) and isinstance(consts[index], tuple):
+                names = consts[index]
+            else:
+                self._report(AMBIGUOUS_EXPRESSION, "keyword names of a call could not be read", instr)
+                names = ()
+        self.emit.kw_names = names
 
     def _op_push_null(self, instr: BytecodeInstruction):
         self.stack.append(StackNULL(is_method=False))
@@ -5097,7 +5108,9 @@ class DecompilerGeneric(DecompilerBase):
                 body_text = str(body_val)
 
             cls_name = str(self._normalize_val(raw_args[1])).strip("'\"")
-            bases = [self._normalize_val(b) for b in raw_args[2:]]
+            # Everything after the body and the name is the class's arguments, bases and
+            # keywords alike (`metaclass=Meta`): `final_args` has the keyword names.
+            bases = list(final_args[2:])
             bases_str = f"({', '.join(bases)})" if bases else ""
             lines = body_text.split("\n")
             real_body = "\n".join(lines[1:])
