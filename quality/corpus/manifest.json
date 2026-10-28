@@ -121,16 +121,7 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 192,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 comprehension filters and conditionals are dropped"
-        }
-      ]
+      "support": "supported"
     },
     {
       "id": "features/data_structures",
@@ -1621,16 +1612,7 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 192,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 comprehension filters are dropped"
-        }
-      ]
+      "support": "supported"
     },
     {
       "id": "realworld/lru_cache",
@@ -1652,13 +1634,6 @@
             "3.10"
           ],
           "summary": "3.10 block-based exception handlers are not decompiled"
-        },
-        {
-          "issue": 192,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 comprehension filters are dropped"
         },
         {
           "issue": 193,
@@ -1706,16 +1681,7 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 192,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 comprehension filters are dropped"
-        }
-      ]
+      "support": "supported"
     },
     {
       "id": "realworld/tokenizer",

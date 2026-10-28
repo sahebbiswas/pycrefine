@@ -65,6 +65,14 @@ OPCODES_OF_OTHER_VERSIONS = frozenset((
     "MAKE_CELL",
     "NOT_TAKEN",
     "POP_ITER",
+    "POP_JUMP_BACKWARD_IF_FALSE",
+    "POP_JUMP_BACKWARD_IF_NONE",
+    "POP_JUMP_BACKWARD_IF_NOT_NONE",
+    "POP_JUMP_BACKWARD_IF_TRUE",
+    "POP_JUMP_FORWARD_IF_FALSE",
+    "POP_JUMP_FORWARD_IF_NONE",
+    "POP_JUMP_FORWARD_IF_NOT_NONE",
+    "POP_JUMP_FORWARD_IF_TRUE",
     "POP_JUMP_IF_FALSE",
     "POP_JUMP_IF_NONE",
     "POP_JUMP_IF_NOT_NONE",
@@ -253,6 +261,24 @@ class TestDocumentationNamesRealCode(unittest.TestCase):
         for name in ("architecture.md", "extending.md"):
             self.assertIn(name, index)
             self.assertIn(name, readme)
+
+
+class TestConditionalJumpsAreRegistered(unittest.TestCase):
+    """A conditional jump must reach the conditional-jump handler, not the name-guessing fallback.
+
+    3.11 renamed them with the direction in the name; a backward one that fell to the
+    fallback was treated as a plain ``continue`` and its condition was lost (#192).
+    """
+
+    def test_every_conditional_jump_of_this_python_is_registered(self):
+        # INSTRUMENTED_* forms exist only for sys.monitoring at run time, never in a .pyc.
+        import dis
+        names = [n for n in dis.opmap if "POP_JUMP" in n and "_IF_" in n and not n.startswith("INSTRUMENTED")]
+        self.assertTrue(names)
+        for backend in BACKENDS:
+            for name in names:
+                with self.subTest(backend=backend.__name__, opname=name):
+                    self.assertEqual(backend._DISPATCH.get(name), "_op_conditional_jump")
 
 
 if __name__ == "__main__":

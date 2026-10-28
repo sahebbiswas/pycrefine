@@ -10,20 +10,9 @@
     },
     {
       "issue": 192,
-      "reason": "comprehension filters and conditional expressions are dropped",
-      "tests": [
-        "tests/test_basic.py::TestComprehensions::test_list_comprehension_yield"
-      ]
-    },
-    {
-      "issue": 192,
-      "reason": "comprehension filters and conditional expressions are dropped",
+      "reason": "conditional expression inside a call argument of a comprehension is dropped",
       "cases": {
         "tests/test_basic.py::TestComprehensions::test_inlined_comprehension_shapes": [
-          "two_loops_with_filter",
-          "chained_filters",
-          "is_not_none_filter",
-          "dict_with_filter",
           "get_with_conditional"
         ]
       }
