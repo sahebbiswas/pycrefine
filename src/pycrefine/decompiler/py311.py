@@ -23,12 +23,11 @@ class Decompiler311Plus(DecompilerGeneric):
                     "try, except, finally and with are not decompiled on Python 3.10 "
                     "(block-based exception handlers, issue #179)", first)
 
-    def _handle_instruction(self, instr: BytecodeInstruction):
-        # Suppress then-branch instructions of detected ternary expressions
+    def _dispatch_instruction(self, instr: BytecodeInstruction):
         """
         Handle a single bytecode instruction, reconstructing binary and in-place operations and delegating other opcodes.
 
-        If the instruction offset is recorded in ternary or compound-suppression sets it is ignored. For BINARY_OP instructions this method:
+        Ternary and compound-condition suppression has already happened in the shared `_handle_instruction`, which calls this method. For BINARY_OP instructions this method:
         - Emits subscript expressions when the op index maps to subscript semantics.
         - Builds binary-expression strings for known binary operator indices and pushes them onto the expression stack.
         - Detects in-place operator indices and, when the following instruction stores back to the same target, emits an augmented-assignment statement and advances the program counter past the store; otherwise it pushes a parenthesized in-place expression onto the stack.
@@ -39,13 +38,6 @@ class Decompiler311Plus(DecompilerGeneric):
         Parameters:
                 instr (BytecodeInstruction): The disassembled instruction to process. This method may mutate the decompiler's `stack`, `pc`, and reconstructed output.
         """
-        if instr.offset in self.prescan.ternary_suppress:
-            return
-        # Suppress intermediate instructions belonging to a compound boolean
-        if instr.offset in self.prescan.compound_suppress:
-            if self.stack:
-                self.stack.pop()
-            return
 
         if instr.opname == "RESUME":
             pass
@@ -121,7 +113,7 @@ class Decompiler311Plus(DecompilerGeneric):
                     self._report(AMBIGUOUS_EXPRESSION, f"unknown binary operator ({instr.arg})", instr)
                     self.stack.append(f"({left} ? {right})")
         else:
-            super()._handle_instruction(instr)
+            super()._dispatch_instruction(instr)
 
     def _get_jump_target(self, instr: BytecodeInstruction) -> int:
         if isinstance(instr.argval, int):

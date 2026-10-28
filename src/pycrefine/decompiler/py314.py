@@ -34,12 +34,12 @@ class Decompiler314(Decompiler311Plus):
                 still_open.append((end, with_id))
         self.emit.open_with_sentinels = still_open
 
-    def _handle_instruction(self, instr: BytecodeInstruction):
+    def _dispatch_instruction(self, instr: BytecodeInstruction):
         """
         Dispatch a single bytecode instruction to the decompiler, handling Python 3.14-specific with-statement preambles and cleanup suppression before delegating to the generic handler.
 
         This method:
-        - Recognizes and suppresses instruction offsets reserved by prescans (ternary/compound-condition suppression and recorded with-exit cleanup offsets).
+        - Recognizes and suppresses the with-exit cleanup offsets recorded by the prescans. (Ternary and compound-condition suppression has already happened in the shared `_handle_instruction`, which calls this method.)
         - Detects Python 3.14 with-statement preambles (COPY 1 + LOAD_SPECIAL/CALL sequence), emits a corresponding `with <ctx>[ as name]:` header, increases indentation, pushes an internal with sentinel on the expression stack, and records/opens a with-body block based on exception-table-derived boundaries.
         - Records and suppresses normal-path __exit__ cleanup sequences by populating an internal _with_exit_suppress set so those instructions are ignored later.
         - Suppresses a common three-None cleanup pattern (LOAD_CONST None x2/3 + CALL 3 + POP_TOP) and removes any internal "_with_info" sentinel left on the stack.
@@ -51,16 +51,8 @@ class Decompiler314(Decompiler311Plus):
             instr (BytecodeInstruction): The disassembled instruction to process; its opname, opcode, arg, argval, and offset are used to match patterns and drive stack/block changes.
 
         Side effects:
-            May mutate self.pc, self.stack, self.blocks, self.indent_level, self.reconstructed, and may create or update self.prescan.with_exit_suppress. Delegates further emission and handling to super()._handle_instruction when appropriate.
+            May mutate self.pc, self.stack, self.blocks, self.indent_level, self.reconstructed, and may create or update self.prescan.with_exit_suppress. Delegates further emission and handling to super()._dispatch_instruction when appropriate.
         """
-        # Suppress then-branch instructions of detected ternary expressions
-        if instr.offset in self.prescan.ternary_suppress:
-            return
-        # Suppress intermediate instructions belonging to a compound boolean
-        if instr.offset in self.prescan.compound_suppress:
-            if self.stack:
-                self.stack.pop()
-            return
 
         opname = instr.opname
 
@@ -74,7 +66,7 @@ class Decompiler314(Decompiler311Plus):
                 # A try statement that ends the with body merges at its exit call: the
                 # generic handler emits the deferred handlers/finally there, then hides
                 # the call itself.
-                super()._handle_instruction(instr)
+                super()._dispatch_instruction(instr)
             return
         # Suppress normal-path __exit__ body calls (identified by range scan)
         if self.prescan.with_exit_suppress and instr.offset in self.prescan.with_exit_suppress:
@@ -224,4 +216,4 @@ class Decompiler314(Decompiler311Plus):
                 self._append_reconstructed(f"{targets} = {expr}")
             return
 
-        super()._handle_instruction(instr)
+        super()._dispatch_instruction(instr)

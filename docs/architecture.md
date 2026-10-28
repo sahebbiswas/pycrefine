@@ -55,14 +55,26 @@ source. For the development workflow, see [CONTRIBUTING.md](../CONTRIBUTING.md).
    conditions (`_prescan_compound_conds`) and value-context `and`/`or`
    (`_prescan_value_boolops`). Prescans record offsets to suppress, block ends and
    pre-rendered fragments.
-4. **Replay** the instructions in order. Each opcode has an `_op_*` handler in a dispatch
-   table (`_build_dispatch`), and version backends override `_handle_instruction` for
-   their own opcodes. Handlers push expressions on a symbolic stack, emit lines, and
+4. **Replay** the instructions in order. `_handle_instruction` is one template: it applies
+   the suppression every backend shares (`_suppressed_by_prescan`) and then calls
+   `_dispatch_instruction`, which version backends override for their own opcodes. Each
+   opcode has an `_op_*` handler named in a table (`_BASE_DISPATCH`; how it is merged per
+   backend is below). Handlers push expressions on a symbolic stack, emit lines, and
    open blocks that close at a known offset (`_close_blocks`). Nested code objects
    (functions, classes, lambdas, comprehensions) are decompiled by sub-decompilers.
 5. **Post-process** (`postprocess.post_process_source`) the text: compiler-generated
    returns, `elif` flattening at the `core` beautification level, and placeholders for
    constructs that could not be rebuilt.
+
+**How the dispatch table is built.** `_BASE_DISPATCH` maps opcode names to handler method
+names (strings). `DecompilerGeneric.__init_subclass__` runs once for each backend class, when
+the class is created, and sets `cls._DISPATCH` to the parent class's `_DISPATCH` with that
+class's own `DISPATCH_OVERRIDES` laid over it (only the dict declared in that class body is
+read, since the parent's overrides are already in the parent's `_DISPATCH`). A backend is
+therefore looked up along its inheritance chain, and where two classes name the same opcode
+the most derived class wins. An override must supply a replacement handler name; there is
+no way to remove an inherited entry, so to turn an opcode off, map it to `_op_no_op` (or
+`_op_unknown` to have it reported). Instances do not build a table; they share the class's.
 
 ### The order of the passes
 
@@ -122,7 +134,7 @@ What the analysis passes found before emission starts.
 |---|---|---|
 | `while_body_offsets` | where a while body starts, to drop the repeated condition | `_prescan_while_loops` |
 | `while_header_targets` | body start -> guard POP_JUMP offset | `_prescan_while_loops`, `decompile` |
-| `while_true_ends` | end offsets of while-True loops | `_handle_instruction`, `_op_jump`, `_op_nop`, `_prescan_while_loops` |
+| `while_true_ends` | end offsets of while-True loops | `_dispatch_instruction`, `_op_jump`, `_op_nop`, `_prescan_while_loops` |
 | `inner_back_jumps` | inner back-jump -> the back-edge that closes the loop | `_prescan_while_loops` |
 | `dup_guard_exits` | exit targets of suppressed bottom-of-loop condition copies | `_prescan_while_loops` |
 | `for_iter_targets` | jump targets of FOR_ITER (3.9 break detection) | `_prescan_try_structure` |
@@ -138,9 +150,9 @@ What the analysis passes found before emission starts.
 | `nop_to_finally_merge` | try NOP -> finally start, for try/finally without except | `_prescan_try_structure` |
 | `suppress_push_exc_offsets` | PUSH_EXC_INFO that opens a handler rendered elsewhere | `_prescan_try_structure` |
 | `push_exc_to_finally_merge` | merge offset -> the handler entry points (sorted) that rejoin there, for a `try` inside a loop whose handlers merge after the loop | `_prescan_try_structure` |
-| `finally_merge_offsets` | merge labels where deferred finally/except text is emitted | `_close_blocks`, `_handle_instruction`, `_prescan_try_structure` |
-| `except_only_merge_offsets` | merge offsets that have handlers but no `finally`, so only the handler text is placed there | `_handle_instruction`, `_prescan_try_structure` |
-| `finally_body_suppress` | instructions of an inlined copy of a `finally` body, left out of the normal flow because the text is emitted once at the merge label | `_elide_early_finally_copies`, `_handle_instruction`, `_op_jump`, `_op_setup_with`, `_prescan_try_structure`, `_suppress_copies` |
+| `finally_merge_offsets` | merge labels where deferred finally/except text is emitted | `_close_blocks`, `_dispatch_instruction`, `_prescan_try_structure` |
+| `except_only_merge_offsets` | merge offsets that have handlers but no `finally`, so only the handler text is placed there | `_dispatch_instruction`, `_prescan_try_structure` |
+| `finally_body_suppress` | instructions of an inlined copy of a `finally` body, left out of the normal flow because the text is emitted once at the merge label | `_elide_early_finally_copies`, `_dispatch_instruction`, `_op_jump`, `_op_setup_with`, `_prescan_try_structure`, `_suppress_copies` |
 | `finally_targets` | 3.9: targets of the `SETUP_FINALLY`s that belong to a user `finally:` rather than to a handler | `_prescan_try_structure` |
 | `finally_from_handler` | 3.9: handler offset -> its RERAISE | `_elide_early_finally_copies`, `_open_finally_from_handler`, `_prescan_try_structure` |
 | `handler_section_suppress` | instructions of an except handler that is decompiled ahead of time as a section, so the main pass skips them | `_prescan_try_structure` |
@@ -155,7 +167,7 @@ What the analysis passes found before emission starts.
 | `empty_try_skip` | NOPs of such a statement | `_drop_unreachable_handlers` |
 | `else_starts` | else start offset -> else end offset | `_prescan_try_structure` |
 | `with_exit_suppress_offsets` | with-exit epilogue instructions | `_prescan_try_structure`, `_prescan_with_exits` |
-| `with_exit_suppress` | 3.14: the inlined `__exit__` clean-up instructions of a with statement, up to and including its `POP_TOP` | `_handle_instruction` |
+| `with_exit_suppress` | 3.14: the inlined `__exit__` clean-up instructions of a with statement, up to and including its `POP_TOP` | `_dispatch_instruction` |
 | `with_body_end` | first protected offset of a with body -> where it ends | `_prescan_with_exits` |
 | `with_exit_owner` | POP_TOP of an inlined __exit__ call -> its with's body start | `_prescan_with_exits` |
 
@@ -165,18 +177,18 @@ Bookkeeping that changes while instructions are replayed.
 
 | Field | Meaning | Written by |
 |---|---|---|
-| `except_header_indents` | indent levels of the except headers being emitted | `_close_except_clause`, `_handle_instruction`, `_op_before_with`, `_op_check_exc_match`, `_op_push_exc_info` |
-| `except_end_offsets` | end offsets of exception regions | `_handle_instruction` |
-| `exc_as_store_offset` | the `as e` STORE to skip | `_handle_instruction`, `_op_check_exc_match`, `_op_store` |
-| `exc_bound_names` | every name bound by `except ... as` | `_handle_instruction`, `_op_check_exc_match` |
+| `except_header_indents` | indent levels of the except headers being emitted | `_close_except_clause`, `_dispatch_instruction`, `_op_before_with`, `_op_check_exc_match`, `_op_push_exc_info` |
+| `except_end_offsets` | end offsets of exception regions | `_dispatch_instruction` |
+| `exc_as_store_offset` | the `as e` STORE to skip | `_dispatch_instruction`, `_op_check_exc_match`, `_op_store` |
+| `exc_bound_names` | every name bound by `except ... as` | `_dispatch_instruction`, `_op_check_exc_match` |
 | `deferred_finally_lines` | merge offset -> rendered finally body | `_prescan_try_structure` |
 | `deferred_except_lines` | merge offset -> rendered handler | `_prescan_try_structure` |
-| `pending_finally_merge` | merge offset awaiting emission | `_handle_instruction`, `_prescan_try_structure` |
+| `pending_finally_merge` | merge offset awaiting emission | `_dispatch_instruction`, `_prescan_try_structure` |
 | `boolop_pending` | operators opened but not yet joined | `_prescan_value_boolops` |
 | `else_stack_snapshots` | second arm's offset -> stack to restore | `_decompile_step`, `_op_conditional_jump` |
-| `open_with_sentinels` | 3.14: (body end, body start) of open with bodies | `_close_blocks`, `_handle_instruction` |
+| `open_with_sentinels` | 3.14: (body end, body start) of open with bodies | `_close_blocks`, `_dispatch_instruction` |
 | `pei_indents` | `PUSH_EXC_INFO` offset -> indent of the `try:` that precedes it, which its `except` headers use | `_op_nop` |
-| `finally_wrapper_indent` | 3.9: wrapper jump target -> indent at which `finally:` is written when its `POP_BLOCK` is reached | `_handle_instruction` |
+| `finally_wrapper_indent` | 3.9: wrapper jump target -> indent at which `finally:` is written when its `POP_BLOCK` is reached | `_dispatch_instruction` |
 | `kw_names` | keyword names of the call being built | `_op_call`, `_op_kw_names` |
 
 #### `DocState` (`self.doc`)

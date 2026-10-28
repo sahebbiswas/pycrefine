@@ -701,9 +701,10 @@ class TestStoreDerefDispatch(unittest.TestCase):
         self.assertIn("myvar", out)
 
     def test_store_deref_in_dispatch_map(self):
-        code = compile("pass", "<test>", "exec")
-        dec = Decompiler39(code)
-        self.assertIn("STORE_DEREF", dec._dispatch)
+        handler = Decompiler39._DISPATCH.get("STORE_DEREF")
+        self.assertIsInstance(handler, str)
+        self.assertTrue(handler.startswith("_op_"), handler)
+        self.assertTrue(callable(getattr(Decompiler39, handler, None)), handler)
 
 
 class TestChainedComparisons(unittest.TestCase):
