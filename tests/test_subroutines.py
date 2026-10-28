@@ -439,6 +439,12 @@ class TestCallFunctionKw(unittest.TestCase):
         out = decompile("def f(d):\n    return dict(a=1, b=d)\n")
         self.assertIn("dict(a=1, b=d)", out)
 
+    def test_method_calls_nested_in_call_arguments(self):
+        # 3.11's LOAD_METHOD leaves a NULL slot; without it the inner call took the outer callable (#226).
+        for src in ("print(a.pop(), b.pop())", "x = f(a.pop(0), b)", "print(a, b.pop())"):
+            with self.subTest(src=src):
+                self.assertIn(src, decompile(src + "\n"))
+
     def test_keyword_only_and_attribute_calls(self):
         out = decompile("def f(o, d):\n    return o.run(d, retries=3)\n")
         self.assertIn("o.run(d, retries=3)", out)

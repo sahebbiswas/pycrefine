@@ -4158,7 +4158,7 @@ class DecompilerGeneric(DecompilerBase):
 
     def _op_check_exc_match(self, instr: BytecodeInstruction):
         opname = instr.opname
-        exc_type = self._pop("Exception")
+        exc_type = self._pop()
         if self.stack and str(self.stack[-1]) == "_exc_info":
             self.stack.pop()
         # Reset indent to the except-header level (handles multi-except chains
@@ -4404,7 +4404,7 @@ class DecompilerGeneric(DecompilerBase):
 
     def _op_setup_with(self, instr: BytecodeInstruction):
         opname = instr.opname
-        ctx = self._pop("ctx")
+        ctx = self._pop()
         # Peek ahead for the STORE that binds the 'as' variable (3.9/3.10).
         # In 3.9 the instruction immediately after SETUP_WITH is always
         # STORE_FAST / STORE_NAME binding the __enter__() return value.
@@ -4509,7 +4509,7 @@ class DecompilerGeneric(DecompilerBase):
         # leaves the __enter__ return value on top of the stack.
         # The STORE_FAST / STORE_NAME that immediately follows binds the
         # 'as' variable.
-        ctx = self._pop("ctx")
+        ctx = self._pop()
         # Peek ahead for the STORE that binds the 'as' variable name.
         as_var = None
         look = self.pc
@@ -4953,12 +4953,12 @@ class DecompilerGeneric(DecompilerBase):
             flags = num_args
             kwargs_dict = None
             if flags & 1:
-                item = self._pop("{}")
+                item = self._pop()
                 while self._is_null_sentinel(item) and self.stack:
                     item = self.stack.pop()
                 kwargs_dict = item
             
-            item = self._pop("()")
+            item = self._pop()
             while self._is_null_sentinel(item) and self.stack:
                 item = self.stack.pop()
             args_tuple = item
@@ -5025,7 +5025,7 @@ class DecompilerGeneric(DecompilerBase):
                     raw_args = raw_args
 
         # Standard functional name is the first pop (or Pattern 2 sentinel).
-        func_val = self._pop("func")
+        func_val = self._pop()
 
         # Handle NULL sentinels (e.g. from PUSH_NULL in Python 3.11+).
         # Pattern 1 (3.11-3.12): Sentinel is BELOW functional name: [obj/NULL, func, args]
@@ -5040,7 +5040,7 @@ class DecompilerGeneric(DecompilerBase):
         sentinel = _get_sentinel(func_val)
         if sentinel:
             # Pattern 2: Popped sentinel as callable. Real callable is on stack.
-            func_val = self._pop("func")
+            func_val = self._pop()
             if sentinel.is_method and self.stack:
                 obj = self.stack.pop()
                 func_val = f"{self._wrap_negative_literal(obj)}.{func_val}"
@@ -5250,11 +5250,11 @@ class DecompilerGeneric(DecompilerBase):
         format_spec = ""
         if (arg & 0x04):
             # The format spec follows the value on the stack
-            spec = self._pop("")
+            spec = self._pop()
             spec_str = str(spec).strip("'\"")
             format_spec = f":{spec_str}"
             
-        val = self._pop("{expr}")
+        val = self._pop()
         
         self.stack.append(f"{{{val}{conversion}{format_spec}}}")
 
@@ -6255,9 +6255,19 @@ class DecompilerGeneric(DecompilerBase):
         self.stack.append(slice_str)
 
     def _op_build_const_key_map(self, instr: BytecodeInstruction):
-        keys_val = self._pop("()")
+        keys_val = self._pop()
         count = int(instr.arg) if instr.arg is not None else 0
-        
+
+        if is_unknown(keys_val):
+            # The key tuple is missing (a stack underflow was reported when it was popped) or
+            # was already unknown. Parsing its "?" as a key would invent `{'?': None}`; leave
+            # the display unknown and drop the values it would have been built from.
+            for _ in range(count):
+                if self.stack:
+                    self.stack.pop()
+            self.stack.append(self._unknown("the keys of a dict display are not known", text="{?}"))
+            return
+
         # keys_val is e.g. "('a', 'b')" or "(0, 1)"
         try:
             import ast
@@ -6290,10 +6300,10 @@ class DecompilerGeneric(DecompilerBase):
 
     def _collection_mutator(self, instr: BytecodeInstruction, kind: str):
         if kind == "map":
-            val = str(self._pop("None"))
-            key = str(self._pop("None"))
+            val = str(self._pop())
+            key = str(self._pop())
         else:
-            val = str(self._pop("None"))
+            val = str(self._pop())
             key = None
 
         i = int(instr.arg) if instr.arg is not None else 1
@@ -6424,6 +6434,14 @@ class DecompilerGeneric(DecompilerBase):
             self.stack.append(StackNULL(is_method=True))
             self.stack.append(str(instr.argval))
         else:
+            if instr.opname == "LOAD_METHOD" and self.target_version >= (3, 11):
+                # 3.11's LOAD_METHOD leaves [NULL, method] under the call's arguments. Without
+                # the NULL slot a call nested in another call's arguments would take the
+                # outer callable for its own (see #226). `is_method=False` is deliberate: the
+                # receiver is already part of the pushed text (`obj.name`), so `_op_call` must
+                # drop the NULL without taking another object off the stack. (3.12's LOAD_ATTR
+                # leaves the receiver on the stack instead, hence its `is_method=True`.)
+                self.stack.append(StackNULL(is_method=False))
             self.stack.append(f"{self._wrap_negative_literal(obj)}.{instr.argval}")
 
     def _op_load_super_attr(self, instr: BytecodeInstruction):
@@ -6449,7 +6467,7 @@ class DecompilerGeneric(DecompilerBase):
 
     def _op_yield_value(self, instr: BytecodeInstruction):
         opname = instr.opname
-        val = self._pop("None")
+        val = self._pop()
         self._append_reconstructed(f"yield {val}")
 
     def _op_delete(self, instr: BytecodeInstruction):

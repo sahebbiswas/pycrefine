@@ -89,7 +89,7 @@ class Decompiler314(Decompiler311Plus):
                     seq[3].opcode == 95 and seq[3].arg == 0 and
                         seq[4].opname == "CALL" and seq[4].arg == 0):
 
-                    ctx_mgr = str(self._pop("unknown_ctx"))
+                    ctx_mgr = str(self._pop())
                     # Push internal sentinel representing EX and CM that stay on stack
                     body_start = self.instructions[self.pc + 5].offset if self.pc + 5 < len(self.instructions) else instr.offset
                     self.stack.append(("_with_info", ctx_mgr, body_start))

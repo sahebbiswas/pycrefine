@@ -3,14 +3,14 @@
   "python_version": "3.11",
   "python_patch": "3.11.17",
   "entries": {
-    "features/class_basic": "mismatch",
+    "features/class_basic": "equivalent",
     "features/class_special_methods": "equivalent",
     "features/closure_counter": "equivalent",
     "features/closure_decorator": "equivalent",
     "features/comp_generators": "mismatch",
     "features/comp_list_dict_set": "mismatch",
-    "features/data_structures": "mismatch",
-    "features/decorators_properties": "mismatch",
+    "features/data_structures": "equivalent",
+    "features/decorators_properties": "equivalent",
     "features/exc_finally": "mismatch",
     "features/exc_raise_chain": "mismatch",
     "features/exc_try_except": "mismatch",
@@ -81,18 +81,6 @@
     "stdlib/textwrap": "compiles"
   },
   "diagnostics": {
-    "features/class_basic": {
-      "stack_underflow": 1
-    },
-    "features/data_structures": {
-      "stack_underflow": 1
-    },
-    "features/decorators_properties": {
-      "stack_underflow": 1
-    },
-    "features/expr_strings": {
-      "stack_underflow": 3
-    },
     "features/flow_while": {
       "ambiguous_expression": 1
     },
@@ -102,21 +90,6 @@
     "features/modern_match": {
       "unsupported_version_construct": 6
     },
-    "features/unpack_assign": {
-      "stack_underflow": 1
-    },
-    "realworld/inventory_report": {
-      "stack_underflow": 2
-    },
-    "realworld/lru_cache": {
-      "stack_underflow": 2
-    },
-    "realworld/text_stats": {
-      "stack_underflow": 1
-    },
-    "realworld/tokenizer": {
-      "stack_underflow": 2
-    },
     "stdlib/bisect": {
       "unsupported_opcode": 1
     },
@@ -124,14 +97,9 @@
       "unsupported_opcode": 2
     },
     "stdlib/fnmatch": {
-      "stack_underflow": 1,
       "unsupported_opcode": 1
     },
-    "stdlib/shlex": {
-      "stack_underflow": 3
-    },
     "stdlib/textwrap": {
-      "stack_underflow": 5,
       "unsupported_opcode": 3
     }
   }

@@ -28,15 +28,11 @@
         "def some_decorator": "compiles"
       },
       "unit_diagnostics": {
-        "class DataProcessor/def process": {
-          "stack_underflow": 1
-        },
         "def member_decorator": {
           "unsupported_opcode": 1
         }
       },
       "diagnostics": {
-        "stack_underflow": 1,
         "unsupported_opcode": 1
       }
     },
@@ -51,14 +47,6 @@
         "Expr: print(repr(src))": "compiles",
         "Import: import re": "compiles",
         "def post_process_source": "compiles"
-      },
-      "unit_diagnostics": {
-        "def post_process_source": {
-          "stack_underflow": 4
-        }
-      },
-      "diagnostics": {
-        "stack_underflow": 4
       }
     },
     "corpus/post_process.py": {
@@ -70,14 +58,6 @@
         "Expr: print(post_process_source(test_case))": "compiles",
         "Import: import re": "compiles",
         "def post_process_source": "compiles"
-      },
-      "unit_diagnostics": {
-        "def post_process_source": {
-          "stack_underflow": 4
-        }
-      },
-      "diagnostics": {
-        "stack_underflow": 4
       }
     },
     "corpus/simple.py": {
