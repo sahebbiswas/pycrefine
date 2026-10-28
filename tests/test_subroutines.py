@@ -434,6 +434,35 @@ class TestCallFunctionKw(unittest.TestCase):
         out = decompile(src)
         self.assertIn("f(30, c=1, b=2)", out)
 
+    def test_keyword_names_are_read_from_the_constants(self):
+        # 3.11's dis leaves the KW_NAMES operand unresolved; the names come from co_consts.
+        out = decompile("def f(d):\n    return dict(a=1, b=d)\n")
+        self.assertIn("dict(a=1, b=d)", out)
+
+    def test_keyword_only_and_attribute_calls(self):
+        out = decompile("def f(o, d):\n    return o.run(d, retries=3)\n")
+        self.assertIn("o.run(d, retries=3)", out)
+
+    def test_class_header_keeps_its_keywords(self):
+        """`metaclass=Meta` and other class keywords are not turned into base classes."""
+        import ast
+
+        def header(source, name):
+            node = next(n for n in ast.walk(ast.parse(source)) if isinstance(n, ast.ClassDef) and n.name == name)
+            return ([ast.dump(b) for b in node.bases], [ast.dump(k) for k in node.keywords])
+
+        shapes = [
+            "class Meta(type): pass\nclass C(metaclass=Meta):\n    x = 1\n",
+            "class B: pass\nclass C(B, metaclass=type):\n    x = 1\n",
+            "class B: pass\nclass A: pass\nclass C(B, A, flag=1, other='x'):\n    x = 1\n",
+            "class B: pass\nclass C(B):\n    x = 1\n",
+            "class B: pass\ndef f(M):\n    class C(B, metaclass=M):\n        y = 2\n    return C\n",
+        ]
+        for source in shapes:
+            with self.subTest(source=source):
+                out = decompile(source)
+                self.assertEqual(header(out, "C"), header(source, "C"), out)
+
 
 if __name__ == "__main__":
     unittest.main()

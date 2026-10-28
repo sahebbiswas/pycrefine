@@ -6,10 +6,10 @@
     "features/class_basic": "mismatch",
     "features/class_special_methods": "equivalent",
     "features/closure_counter": "equivalent",
-    "features/closure_decorator": "decompile_error",
+    "features/closure_decorator": "equivalent",
     "features/comp_generators": "mismatch",
     "features/comp_list_dict_set": "mismatch",
-    "features/data_structures": "decompile_error",
+    "features/data_structures": "mismatch",
     "features/decorators_properties": "mismatch",
     "features/exc_finally": "mismatch",
     "features/exc_raise_chain": "mismatch",
@@ -24,15 +24,15 @@
     "features/flow_nested_loops": "equivalent",
     "features/flow_try_in_loops": "syntax_error",
     "features/flow_while": "syntax_error",
-    "features/func_defaults_kwargs": "decompile_error",
-    "features/func_lambda_sorted": "decompile_error",
+    "features/func_defaults_kwargs": "syntax_error",
+    "features/func_lambda_sorted": "equivalent",
     "features/func_recursion": "equivalent",
-    "features/io_streams": "decompile_error",
+    "features/io_streams": "equivalent",
     "features/modern_async": "syntax_error",
     "features/modern_except_star": "mismatch",
     "features/modern_match": "mismatch",
     "features/modern_walrus": "mismatch",
-    "features/module_globals": "decompile_error",
+    "features/module_globals": "mismatch",
     "features/opt_asserts_debug": "equivalent",
     "features/unpack_assign": "mismatch",
     "features/with_context": "syntax_error",
@@ -66,22 +66,25 @@
     "generated/cf_while_with_break": "mismatch",
     "generated/cf_while_with_continue": "mismatch",
     "generated/cf_while_with_return": "mismatch",
-    "realworld/inventory_report": "decompile_error",
-    "realworld/lru_cache": "decompile_error",
+    "realworld/inventory_report": "mismatch",
+    "realworld/lru_cache": "mismatch",
     "realworld/state_machine": "equivalent",
-    "realworld/text_stats": "decompile_error",
+    "realworld/text_stats": "mismatch",
     "realworld/tokenizer": "syntax_error",
-    "stdlib/bisect": "decompile_error",
+    "stdlib/bisect": "compiles",
     "stdlib/colorsys": "compiles",
     "stdlib/copy": "compiles",
-    "stdlib/fnmatch": "decompile_error",
+    "stdlib/fnmatch": "compiles",
     "stdlib/getopt": "compiles",
-    "stdlib/queue": "decompile_error",
-    "stdlib/shlex": "decompile_error",
+    "stdlib/queue": "compiles",
+    "stdlib/shlex": "compiles",
     "stdlib/textwrap": "compiles"
   },
   "diagnostics": {
     "features/class_basic": {
+      "stack_underflow": 1
+    },
+    "features/data_structures": {
       "stack_underflow": 1
     },
     "features/decorators_properties": {
@@ -102,11 +105,30 @@
     "features/unpack_assign": {
       "stack_underflow": 1
     },
+    "realworld/inventory_report": {
+      "stack_underflow": 2
+    },
+    "realworld/lru_cache": {
+      "stack_underflow": 2
+    },
+    "realworld/text_stats": {
+      "stack_underflow": 1
+    },
     "realworld/tokenizer": {
       "stack_underflow": 2
     },
+    "stdlib/bisect": {
+      "unsupported_opcode": 1
+    },
     "stdlib/copy": {
       "unsupported_opcode": 2
+    },
+    "stdlib/fnmatch": {
+      "stack_underflow": 1,
+      "unsupported_opcode": 1
+    },
+    "stdlib/shlex": {
+      "stack_underflow": 3
     },
     "stdlib/textwrap": {
       "stack_underflow": 5,
