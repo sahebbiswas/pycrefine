@@ -1,3 +1,4 @@
+import ast
 import os
 import sys
 import unittest
@@ -1297,3 +1298,34 @@ class TestCodeAfterTryExceptInLoop(unittest.TestCase):
         )
         self.assertEqual(len(dec.emit.deferred_finally_lines), 1)
 
+
+
+class TestWithEndingThenBranch(unittest.TestCase):
+    """An else after an if-branch that ends in a with statement stays in the else."""
+
+    SRC = (
+        "def f(c, m):\n"
+        "    if c:\n"
+        "        with m:\n"
+        "            a = 1\n"
+        "    else:\n"
+        "        a = 2\n"
+        "    return a\n"
+    )
+
+    @unittest.skipIf(sys.version_info[:2] == (3, 10) or sys.version_info >= (3, 12),
+                     "these versions repeat the code after the with in the branch (same behavior)")
+    def test_else_stays_in_else(self):
+        out = decompile(self.SRC)
+        tree = ast.parse(out)
+        node = next(n for n in ast.walk(tree) if isinstance(n, ast.If))
+        self.assertTrue(node.orelse, out)
+        self.assertTrue(any(isinstance(n, ast.With) for n in node.body), out)
+
+    def test_behavior_is_preserved(self):
+        class M:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        ns = {}
+        exec(decompile(self.SRC), ns)
+        self.assertEqual([ns["f"](c, M()) for c in (0, 1)], [2, 1])
