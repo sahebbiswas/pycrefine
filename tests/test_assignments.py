@@ -124,6 +124,16 @@ class TestStarredAssignment(unittest.TestCase):
             "    except ValueError:\n        return 'caught'\n    return 'not caught'\n"
             "print(f(None))\n")
 
+    def test_fallback_temporaries_are_not_left_in_scope(self):
+        """Test the temporaries of a fallback unpacking are deleted, so locals() and a class namespace match."""
+        self.assert_same_behavior(
+            "class O:\n    b = []\n    x = 0\n"
+            "def f(v):\n    o = O()\n    a, *o.b = v\n    c, o.x = [7, 8]\n"
+            "    return a, o.b, sorted(k for k in locals() if k.startswith('_'))\n"
+            "print(f(iter((1, 2, 3))))\n"
+            "class C:\n    o = O()\n    p, o.x = 1, 2\n"
+            "print([k for k in vars(C) if k.startswith('_')  and k != '__module__' and k != '__qualname__'])\n")
+
     def test_fallback_lone_star_target(self):
         """Test a lone starred attribute target, which needs a trailing comma: *o.b, = x."""
         self.assert_same_behavior(
