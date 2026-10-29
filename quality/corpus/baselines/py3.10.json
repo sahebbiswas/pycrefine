@@ -173,9 +173,6 @@
       "incomplete_exception_reconstruction": 3,
       "unsupported_opcode": 2
     },
-    "stdlib/fnmatch": {
-      "unsupported_opcode": 1
-    },
     "stdlib/getopt": {
       "incomplete_exception_reconstruction": 2
     },
@@ -184,9 +181,6 @@
     },
     "stdlib/shlex": {
       "incomplete_exception_reconstruction": 1
-    },
-    "stdlib/textwrap": {
-      "unsupported_opcode": 3
     }
   }
 }

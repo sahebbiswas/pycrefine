@@ -251,6 +251,68 @@ class TestOneItemTuple(unittest.TestCase):
         self.assertEqual(ns["out"], ref["out"])
 
 
+class TestDeleteSubscriptAndAttribute(unittest.TestCase):
+    """`del x[i]`, `del x[a:b]` and `del o.attr` are kept (#180)."""
+
+    SRC = (
+        "class O:\n    pass\n"
+        "o = O()\no.p = O()\no.p.q = 1\no.p.r = 2\n"
+        "del o.p.q\n"
+        "xs = [1, 2, 3, 4, 5, 6]\n"
+        "d = {'a': 1, 'b': 2, (1, 2): 3}\n"
+        "del xs[0]\ndel d['b']\ndel d[1, 2]\n"
+        "del xs[0:1]\ndel xs[:1]\ndel xs[1:]\ndel xs[::2]\n"
+        "grid = [[1, 2, 3], [4, 5, 6]]\n"
+        "del grid[0][1]\n"
+        "def f(seq, key, i, j):\n"
+        "    del seq[key]\n"
+        "    del seq[i:j]\n"
+        "    del seq[i], seq[0]\n"
+        "    return seq\n"
+        "out = (vars(o.p), xs, d, grid, f([0, 1, 2, 3, 4, 5, 6, 7], 1, 1, 2))\n"
+    )
+
+    @unittest.skipIf(sys.version_info[:2] == (3, 10), "3.10 try/except is not decompiled (#179)")
+    def test_delete_in_exception_handler(self):
+        src = (
+            "def f(seq):\n"
+            "    try:\n"
+            "        del seq[10]\n"
+            "    except IndexError:\n"
+            "        del seq[-1:]\n"
+            "    return seq\n"
+            "out = f([1, 2, 3])\n"
+        )
+        ns = {}
+        exec(decompile(src), ns)
+        self.assertEqual(ns["out"], [1, 2])
+
+    def test_loosely_binding_target_is_parenthesized(self):
+        src = (
+            "def f(a, b, k):\n"
+            "    del (a < b).x\n"
+            "    del (a < b)[k]\n"
+            "    del (-1).x\n"
+            "    del (-1)[k]\n"
+            "    return (a < b).real\n"
+        )
+        out = decompile(src)
+        assert_contains(out, "del (a < b).x", "del (a < b)[k]", "(a < b).real", "del (-1).x", "del (-1)[k]")
+        compile(out, "<decompiled>", "exec")
+
+    def test_statements_are_kept(self):
+        out = decompile(self.SRC)
+        assert_contains(out, "del o.p.q", "del xs[0]", "del d['b']", "del seq[key]", "del grid[0][1]")
+        self.assertIn("del xs[0:1]", out)
+
+    def test_behavior_is_preserved(self):
+        ns = {}
+        exec(decompile(self.SRC), ns)
+        ref = {}
+        exec(self.SRC, ref)
+        self.assertEqual(ns["out"], ref["out"])
+
+
 if __name__ == "__main__":
     unittest.main()
 

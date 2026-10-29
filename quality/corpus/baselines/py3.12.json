@@ -97,12 +97,6 @@
     },
     "features/modern_walrus": {
       "stack_underflow": 1
-    },
-    "stdlib/fnmatch": {
-      "unsupported_opcode": 1
-    },
-    "stdlib/textwrap": {
-      "unsupported_opcode": 3
     }
   }
 }

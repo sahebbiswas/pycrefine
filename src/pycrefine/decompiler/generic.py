@@ -230,6 +230,7 @@ _BASE_DISPATCH: Dict[str, str] = {
     # Deletes
     "DELETE_NAME": "_op_delete", "DELETE_FAST": "_op_delete", "DELETE_GLOBAL": "_op_delete",
     "DELETE_DEREF": "_op_delete",
+    "DELETE_ATTR": "_op_delete_attr", "DELETE_SUBSCR": "_op_delete_subscr",
 
     # Error
     "LOAD_ASSERTION_ERROR": "_op_load_assertion_error",
@@ -4502,7 +4503,7 @@ class DecompilerGeneric(DecompilerBase):
         if len(self.stack) >= 2:
             sub = self.stack.pop()
             container = self.stack.pop()
-            self.stack.append(f"{container}[{sub}]")
+            self.stack.append(f"{self._receiver(container)}[{sub}]")
 
         # ── exceptions ─────────────────────────────────────────────────
 
@@ -7003,7 +7004,7 @@ class DecompilerGeneric(DecompilerBase):
                 # drop the NULL without taking another object off the stack. (3.12's LOAD_ATTR
                 # leaves the receiver on the stack instead, hence its `is_method=True`.)
                 self.stack.append(StackNULL(is_method=False))
-            self.stack.append(f"{self._wrap_negative_literal(obj)}.{instr.argval}")
+            self.stack.append(f"{self._receiver(obj)}.{instr.argval}")
 
     def _op_load_super_attr(self, instr: BytecodeInstruction):
         # LOAD_SUPER_ATTR pops 3: [global_super, class, self/class]
@@ -7030,6 +7031,15 @@ class DecompilerGeneric(DecompilerBase):
         opname = instr.opname
         val = self._pop()
         self._append_reconstructed(f"yield {val}")
+
+    def _op_delete_attr(self, instr: BytecodeInstruction):
+        obj = self._pop()
+        self._append_reconstructed(f"del {self._receiver(obj)}.{instr.argval}")
+
+    def _op_delete_subscr(self, _instr: BytecodeInstruction):
+        key = self._pop()
+        container = self._pop()
+        self._append_reconstructed(f"del {self._receiver(container)}[{key}]")
 
     def _op_delete(self, instr: BytecodeInstruction):
         opname = instr.opname
