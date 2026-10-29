@@ -1329,3 +1329,51 @@ class TestWithEndingThenBranch(unittest.TestCase):
         ns = {}
         exec(decompile(self.SRC), ns)
         self.assertEqual([ns["f"](c, M()) for c in (0, 1)], [2, 1])
+
+
+@unittest.skipIf(sys.version_info[:2] == (3, 10), "3.10 block-based exception handlers: #179")
+class TestCodeAfterTryInLoopBody(unittest.TestCase):
+    """Statements after a try/except in a for-loop body stay in the body."""
+
+    def _check(self, src, entry, args):
+        out = decompile(src)
+        ast.parse(out)
+        ns, ref = {}, {}
+        exec(out, ns)
+        exec(src, ref)
+        self.assertEqual(ns[entry](*args), ref[entry](*args), out)
+        return out
+
+    def test_code_after_try_then_after_loop(self):
+        src = (
+            "def f(n):\n"
+            "    r = []\n"
+            "    for i in range(n):\n"
+            "        try:\n"
+            "            r.append(10 // (i - 1))\n"
+            "        except ZeroDivisionError:\n"
+            "            r.append(-1)\n"
+            "        r.append(i)\n"
+            "    return r\n"
+        )
+        out = self._check(src, "f", (4,))
+        self.assertIn("\n    return r", out)
+
+    def test_two_try_statements_in_one_body(self):
+        src = (
+            "def f(n):\n"
+            "    r = []\n"
+            "    for i in range(n):\n"
+            "        try:\n"
+            "            r.append(10 // i)\n"
+            "        except ZeroDivisionError:\n"
+            "            pass\n"
+            "        try:\n"
+            "            r.append(10 // (i - 1))\n"
+            "        except ZeroDivisionError:\n"
+            "            pass\n"
+            "        r.append('end')\n"
+            "    return r\n"
+        )
+        out = self._check(src, "f", (3,))
+        self.assertEqual(out.count("try:"), 2)

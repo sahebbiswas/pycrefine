@@ -1014,13 +1014,6 @@
             "3.10"
           ],
           "summary": "3.10 block-based exception handlers are not decompiled"
-        },
-        {
-          "issue": 193,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 try/except/finally loses its finally block"
         }
       ]
     },
@@ -1044,13 +1037,6 @@
             "3.10"
           ],
           "summary": "3.10 block-based exception handlers are not decompiled"
-        },
-        {
-          "issue": 193,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 try/except/finally loses its finally block"
         }
       ]
     },

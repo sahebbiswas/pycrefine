@@ -19,26 +19,11 @@
         "tests/test_exceptions.py::TestExceptions::test_try_except_as_no_cleanup_leak",
         "tests/test_exceptions.py::TestExceptions::test_try_except_finally",
         "tests/test_exceptions.py::TestExceptions::test_with_try_except_finally",
-        "tests/test_control_flow.py::TestNestedTryInLoop::test_multiple_break_paths_in_loop_try",
         "tests/test_basic.py::TestWithBlockExits::test_try_statement_that_ends_the_with_body"
       ],
       "cases": {
         "tests/test_control_flow.py::TestCodeAfterTryExceptInLoop::test_behavior_is_preserved": [
           "for_try_finally_after"
-        ]
-      }
-    },
-    {
-      "issue": 239,
-      "reason": "statements after a try/except in a for-loop body are misplaced",
-      "cases": {
-        "tests/test_control_flow.py::TestCodeAfterTryExceptInLoop::test_behavior_is_preserved": [
-          "func_try_after",
-          "for_two_try"
-        ],
-        "tests/test_control_flow.py::TestCodeAfterTryExceptInLoop::test_no_bogus_finally": [
-          "func_try_after",
-          "for_two_try"
         ]
       }
     }
