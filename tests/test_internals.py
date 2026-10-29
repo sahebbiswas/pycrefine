@@ -83,7 +83,7 @@ class TestDecompilerDispatch(unittest.TestCase):
 
     def test_version_dispatch_39(self):
         """Python 3.9 magic range -> Decompiler39."""
-        self._check_version_dispatch(3415, "Decompiler39")
+        self._check_version_dispatch(3425, "Decompiler39")
 
     def test_version_dispatch_311(self):
         """Python 3.10/3.11 magic range -> Decompiler311Plus."""
