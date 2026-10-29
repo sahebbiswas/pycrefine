@@ -228,7 +228,6 @@ if __name__ == "__main__":
     unittest.main()
 
 
-@unittest.skipIf(sys.version_info[:2] == (3, 11), "3.11 bytecode is not supported yet (#4)")
 class TestGeneratorExpressionFilters(unittest.TestCase):
     """The `if` filters of a generator expression must keep their polarity (#127).
 
@@ -320,7 +319,6 @@ class TestGeneratorExpressionFilters(unittest.TestCase):
         self.assertIn("if x > 1)", out)
 
 
-@unittest.skipIf(sys.version_info[:2] == (3, 11), "3.11 bytecode is not supported yet (#4)")
 class TestUnaryOperators(unittest.TestCase):
     """Unary `-`, `+`, `~` and `not` must survive decompilation."""
 
@@ -444,7 +442,6 @@ class TestValueBoolOps(unittest.TestCase):
         assert_contains(out, "x = a or b", "y = a and b")
 
 
-@unittest.skipIf(sys.version_info[:2] == (3, 11), "3.11 bytecode is not supported yet (#4)")
 class TestDeterministicConstants(unittest.TestCase):
     """Set and frozenset constants render in a fixed order (#128).
 
@@ -941,7 +938,6 @@ class TestTernaryWithBooleanBranches(unittest.TestCase):
         self.assertEqual(out.count("foo(1, "), 1 if "if f else" in out else 2)
 
 
-@unittest.skipIf(sys.version_info[:2] == (3, 11), "3.11 bytecode is not supported yet (#4)")
 class TestInlinedBuiltinCalls(unittest.TestCase):
     """`any`/`all`/`tuple` over a generator, which 3.14 inlines behind a guard (#139)."""
 
@@ -1009,7 +1005,7 @@ def _run_code(code):
     return buf.getvalue()
 
 
-@unittest.skipIf(sys.version_info[:2] in ((3, 10), (3, 11)), "3.10/3.11 have known control-flow failures")
+@unittest.skipIf(sys.version_info[:2] == (3, 10), "3.10 has known control-flow failures")
 class TestWithBlockExits(unittest.TestCase):
     """return/break/continue inside a with block, and nested with blocks (#142).
 
@@ -1123,7 +1119,7 @@ class TestWithBlockExits(unittest.TestCase):
         self.assertGreater(indent(lines[ret_line]), indent(lines[with_line]))
 
 
-@unittest.skipIf(sys.version_info[:2] in ((3, 10), (3, 11)), "3.10/3.11 have known control-flow failures")
+@unittest.skipIf(sys.version_info[:2] == (3, 10), "3.10 has known control-flow failures")
 class TestSequentialWithBlocksInLoop(unittest.TestCase):
     """Two `with` blocks and an `if` in a loop body keep their nesting (#97)."""
 

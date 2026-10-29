@@ -766,7 +766,6 @@
         {
           "issue": 177,
           "versions": [
-            "3.11",
             "3.12",
             "3.13",
             "3.14"
@@ -1067,16 +1066,7 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 209,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 code after a with block containing break/continue is lost"
-        }
-      ]
+      "support": "supported"
     },
     {
       "id": "generated/cf_for_with_continue",
@@ -1090,16 +1080,7 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 209,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 code after a with block containing break/continue is lost"
-        }
-      ]
+      "support": "supported"
     },
     {
       "id": "generated/cf_for_with_return",
@@ -1113,16 +1094,7 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 209,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 code after a with block containing break/continue is lost"
-        }
-      ]
+      "support": "supported"
     },
     {
       "id": "generated/cf_while_finally_break",
@@ -1438,16 +1410,7 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 209,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 code after a with block containing break/continue is lost"
-        }
-      ]
+      "support": "supported"
     },
     {
       "id": "generated/cf_while_with_continue",
@@ -1461,16 +1424,7 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 209,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 code after a with block containing break/continue is lost"
-        }
-      ]
+      "support": "supported"
     },
     {
       "id": "generated/cf_while_with_return",
@@ -1484,16 +1438,7 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 209,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 code after a with block containing break/continue is lost"
-        }
-      ]
+      "support": "supported"
     },
     {
       "id": "realworld/inventory_report",
