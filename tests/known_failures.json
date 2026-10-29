@@ -141,16 +141,5 @@
         ]
       }
     }
-  ],
-  "3.9": [
-    {
-      "issue": 240,
-      "reason": "the else branch of an if/else whose then-branch is a with statement is moved out of the else",
-      "cases": {
-        "tests/test_control_flow.py::TestCodeAfterWith::test_behavior_is_preserved": [
-          "in_if_else"
-        ]
-      }
-    }
   ]
 }

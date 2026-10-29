@@ -4699,7 +4699,9 @@ class DecompilerGeneric(DecompilerBase):
                     break
             if suppress_start is not None:
                 _fb = self.prescan.finally_body_suppress
-                for k in range(j, t_idx):  # j is POP_BLOCK index now
+                # (the `then` branch's jump over its `else` is source structure: keep it)
+                stop = t_idx - 1 if self._jumps_over_else_39(t_idx - 1, t_idx) else t_idx
+                for k in range(j, stop):  # j is POP_BLOCK index now
                     op = self.instructions[k].opname
                     if op not in ("LOAD_CONST", "DUP_TOP", "CALL_FUNCTION",
                                   "POP_TOP", "JUMP_FORWARD", "JUMP_ABSOLUTE", "POP_BLOCK"):
@@ -4707,6 +4709,28 @@ class DecompilerGeneric(DecompilerBase):
                     _fb.add(self.instructions[k].offset)
                 self.prescan.finally_body_suppress = _fb
             self._suppress_with_exits_39(instr.offset, t_idx)
+
+    def _jumps_over_else_39(self, jump_idx: int, handler_idx: int) -> bool:
+        """
+        3.9/3.10: whether the jump closing a `with` body skips code that sits between
+        the block's exit handler and its target: the `else` of an `if` whose `then`
+        branch ends in the `with`. A plain `with` jumps to the code right after its
+        handler.
+        """
+        instrs = self.instructions
+        jump = instrs[jump_idx]
+        target = self._get_jump_target(jump) if "JUMP" in jump.opname else None
+        if not isinstance(target, int) or target <= jump.offset:
+            return False
+        end = next((n for n in range(handler_idx, len(instrs)) if instrs[n].opname == "POP_EXCEPT"), None)
+        if end is None:
+            return False
+        end += 1
+        if end < len(instrs) and instrs[end].opname == "POP_TOP":
+            end += 1
+        if end < len(instrs) and instrs[end].opname in ("JUMP_ABSOLUTE", "JUMP_FORWARD"):
+            end += 1
+        return end < len(instrs) and target > instrs[end].offset
 
     def _suppress_with_exits_39(self, setup_offset: int, handler_idx: int) -> None:
         """
@@ -5583,8 +5607,13 @@ class DecompilerGeneric(DecompilerBase):
             # (Exception-handler jumps are always excluded.)
             if instr.offset not in self.prescan.exc_handler_jump_offsets:
                 next_offset = -1
-                if self.pc < len(self.instructions):
-                    next_offset = self.instructions[self.pc].offset
+                nxt = self.pc
+                # (a `with` block's exception handler, hidden, may sit between the jump and the else)
+                while (nxt < len(self.instructions)
+                       and self.instructions[nxt].offset in self.prescan.finally_body_suppress):
+                    nxt += 1
+                if nxt < len(self.instructions):
+                    next_offset = self.instructions[nxt].offset
 
                 matched_bi = None
                 for bi in range(len(self.blocks)-1, -1, -1):
@@ -5599,7 +5628,10 @@ class DecompilerGeneric(DecompilerBase):
                     while len(self.blocks) - 1 > matched_bi:
                         _, cb_type = self.blocks[-1]
                         # Stop if we hit a block that is not an inner if/else branch
-                        if cb_type not in ("if", "else"):
+                        # (a `with` whose exit handler is hidden ends at this jump too)
+                        if cb_type not in ("if", "else") and not (
+                                cb_type == "with" and self.blocks[-1][0] < next_offset
+                                and self.target_version < (3, 11)):
                             break
                         self.blocks.pop()
                         if cb_type not in _NO_PASS_TYPES:
