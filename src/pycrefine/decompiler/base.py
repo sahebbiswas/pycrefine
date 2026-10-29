@@ -85,6 +85,29 @@ class DecompilerBase:
         self._report(STACK_UNDERFLOW, reason)
         return self._unknown(reason) if fallback is _UNSET else fallback
 
+    def _receiver(self, value: Any) -> str:
+        """
+        Text of *value* as the object of an attribute, subscript or ``del`` target.
+
+        A negative number, comparison, conditional, lambda and the like binds more loosely than ``.`` and
+        ``[]``, so ``(a < b).x`` would otherwise come out as ``a < b.x``. Text that does not
+        parse, or is already parenthesized, is returned unchanged.
+        """
+        text = self._wrap_negative_literal(value)
+        if " " not in text:
+            return text
+        try:
+            node = ast.parse(text.strip(), mode="eval").body
+        except SyntaxError:
+            return text
+        if isinstance(node, (ast.Compare, ast.IfExp, ast.Lambda, ast.NamedExpr, ast.BoolOp,
+                             ast.BinOp, ast.UnaryOp, ast.Await, ast.Yield, ast.YieldFrom)):
+            # ast drops redundant parentheses, but keeps the node's offsets: a node that
+            # starts after column 0 is already wrapped.
+            if node.col_offset == 0:
+                return f"({text})"
+        return text
+
     def _disassemble(self):
         """Convert code object bytecode into a list of BytecodeInstruction."""
         for instr in dis.get_instructions(self.code_obj):

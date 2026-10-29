@@ -114,14 +114,10 @@
     "realworld/state_machine": {
       "unsupported_version_construct": 4
     },
-    "stdlib/fnmatch": {
-      "unsupported_opcode": 1
-    },
     "stdlib/shlex": {
       "unsupported_version_construct": 5
     },
     "stdlib/textwrap": {
-      "unsupported_opcode": 3,
       "unsupported_version_construct": 1
     }
   }

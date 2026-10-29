@@ -87,9 +87,6 @@
     },
     "stdlib/copy": {
       "unsupported_opcode": 2
-    },
-    "stdlib/textwrap": {
-      "unsupported_opcode": 3
     }
   }
 }
