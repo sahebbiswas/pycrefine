@@ -13,7 +13,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "supported"
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "features/class_special_methods",
@@ -113,7 +114,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "supported"
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "features/data_structures",
@@ -127,7 +129,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "supported"
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "features/decorators_properties",
@@ -141,7 +144,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "supported"
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "features/exc_finally",
@@ -163,13 +167,6 @@
             "3.10"
           ],
           "summary": "3.10 block-based exception handlers are not decompiled"
-        },
-        {
-          "issue": 193,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 try/except/finally loses its finally block"
         }
       ]
     },
@@ -193,13 +190,6 @@
             "3.10"
           ],
           "summary": "3.10 block-based exception handlers are not decompiled"
-        },
-        {
-          "issue": 193,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 try/except/finally loses its finally block"
         },
         {
           "issue": 157,
@@ -231,13 +221,6 @@
             "3.10"
           ],
           "summary": "3.10 block-based exception handlers are not decompiled"
-        },
-        {
-          "issue": 193,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 try/except/finally loses its finally block"
         }
       ]
     },
@@ -283,7 +266,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "supported"
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "features/expr_comparisons",
@@ -396,13 +380,6 @@
           "summary": "3.10 block-based exception handlers are not decompiled"
         },
         {
-          "issue": 193,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 try/except/finally loses its finally block"
-        },
-        {
           "issue": 210,
           "versions": [
             "3.13",
@@ -479,7 +456,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "supported"
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "features/func_recursion",
@@ -521,7 +499,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "supported"
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "features/modern_async",
@@ -794,13 +773,6 @@
             "3.10"
           ],
           "summary": "3.10 block-based exception handlers are not decompiled"
-        },
-        {
-          "issue": 193,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 try/except/finally loses its finally block"
         }
       ]
     },
@@ -824,13 +796,6 @@
             "3.10"
           ],
           "summary": "3.10 block-based exception handlers are not decompiled"
-        },
-        {
-          "issue": 193,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 try/except/finally loses its finally block"
         }
       ]
     },
@@ -854,13 +819,6 @@
             "3.10"
           ],
           "summary": "3.10 block-based exception handlers are not decompiled"
-        },
-        {
-          "issue": 193,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 try/except/finally loses its finally block"
         }
       ]
     },
@@ -980,7 +938,7 @@
           "versions": [
             "3.11"
           ],
-          "summary": "3.11 try/except/finally loses its finally block"
+          "summary": "3.11 break or continue in an except clause inside a loop is lost"
         },
         {
           "issue": 207,
@@ -1052,7 +1010,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "supported"
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "generated/cf_for_with_continue",
@@ -1066,7 +1025,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "supported"
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "generated/cf_for_with_return",
@@ -1080,7 +1040,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "supported"
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "generated/cf_while_finally_break",
@@ -1102,13 +1063,6 @@
             "3.10"
           ],
           "summary": "3.10 block-based exception handlers are not decompiled"
-        },
-        {
-          "issue": 193,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 try/except/finally loses its finally block"
         }
       ]
     },
@@ -1132,13 +1086,6 @@
             "3.10"
           ],
           "summary": "3.10 block-based exception handlers are not decompiled"
-        },
-        {
-          "issue": 193,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 try/except/finally loses its finally block"
         }
       ]
     },
@@ -1162,13 +1109,6 @@
             "3.10"
           ],
           "summary": "3.10 block-based exception handlers are not decompiled"
-        },
-        {
-          "issue": 193,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 try/except/finally loses its finally block"
         }
       ]
     },
@@ -1184,7 +1124,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "supported"
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "generated/cf_while_if_continue",
@@ -1198,7 +1139,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "supported"
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "generated/cf_while_if_return",
@@ -1212,7 +1154,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "supported"
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "generated/cf_while_nested_break",
@@ -1247,7 +1190,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "supported"
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "generated/cf_while_nested_return",
@@ -1261,7 +1205,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "supported"
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "generated/cf_while_try_break",
@@ -1289,7 +1234,7 @@
           "versions": [
             "3.11"
           ],
-          "summary": "3.11 try/except/finally loses its finally block"
+          "summary": "3.11 break or continue in an except clause inside a loop is lost"
         },
         {
           "issue": 207,
@@ -1338,7 +1283,7 @@
           "versions": [
             "3.11"
           ],
-          "summary": "3.11 try/except/finally loses its finally block"
+          "summary": "3.11 break or continue in an except clause inside a loop is lost"
         },
         {
           "issue": 170,
@@ -1396,7 +1341,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "supported"
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "generated/cf_while_with_continue",
@@ -1410,7 +1356,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "supported"
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "generated/cf_while_with_return",
@@ -1424,7 +1371,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "supported"
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "realworld/inventory_report",
@@ -1438,7 +1386,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "supported"
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "realworld/lru_cache",
@@ -1460,13 +1409,6 @@
             "3.10"
           ],
           "summary": "3.10 block-based exception handlers are not decompiled"
-        },
-        {
-          "issue": 193,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 except E as e keeps the cleanup and loses the name"
         }
       ]
     },
@@ -1507,7 +1449,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "supported"
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "realworld/tokenizer",
@@ -1681,7 +1624,8 @@
         "optimize": 0
       },
       "equivalence": "compile_only",
-      "support": "supported"
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "stdlib/textwrap",

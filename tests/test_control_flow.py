@@ -1377,3 +1377,50 @@ class TestCodeAfterTryInLoopBody(unittest.TestCase):
         )
         out = self._check(src, "f", (3,))
         self.assertEqual(out.count("try:"), 2)
+
+
+@unittest.skipIf(sys.version_info[:2] == (3, 10), "3.10 block-based exception handlers: #179")
+class TestTryExceptFinallyShapes(unittest.TestCase):
+    """try/except/finally with `as` names, and code after the statement inside a loop."""
+
+    def _roundtrip(self, src, entry, make_args):
+        # Each run gets its own arguments: a list shared by both would be compared with itself.
+        out = decompile(src)
+        ast.parse(out)
+        ns, ref = {}, {}
+        exec(out, ns)
+        exec(src, ref)
+        self.assertEqual(ns[entry](*make_args()), ref[entry](*make_args()), out)
+        return out
+
+    def test_except_as_with_finally(self):
+        src = (
+            "def f(a, log):\n"
+            "    try:\n"
+            "        a()\n"
+            "    except ValueError as e:\n"
+            "        log.append(str(e))\n"
+            "    finally:\n"
+            "        log.append('fin')\n"
+            "    return log\n"
+        )
+        out = self._roundtrip(src, "f", lambda: (lambda: (_ for _ in ()).throw(ValueError("x")), []))
+        assert_contains(out, "except ValueError as e:", "finally:")
+        self.assertNotIn("del e", out)
+
+    def test_finally_then_code_in_loop_body(self):
+        src = (
+            "def f(n):\n"
+            "    log = []\n"
+            "    for i in range(n):\n"
+            "        try:\n"
+            "            log.append(10 // (i - 1))\n"
+            "        except ZeroDivisionError:\n"
+            "            log.append(-1)\n"
+            "        finally:\n"
+            "            log.append('f')\n"
+            "        log.append('after')\n"
+            "    return log\n"
+        )
+        out = self._roundtrip(src, "f", lambda: (4,))
+        self.assertEqual(out.count("finally:"), 1)

@@ -6,7 +6,7 @@
   "entries": {
     "corpus/comprehensive.py": {
       "kind": "source",
-      "status": "syntax_error",
+      "status": "compiles",
       "units": {
         "Assign: VERSION = \"1.0.0\"": "compiles",
         "Expr: \"\"\"": "compiles",
@@ -24,7 +24,7 @@
         "class DataProcessor/def process": "compiles",
         "def complex_logic": "compiles",
         "def member_decorator": "compiles",
-        "def run_test": "syntax_error",
+        "def run_test": "compiles",
         "def some_decorator": "compiles"
       },
       "unit_diagnostics": {
