@@ -1157,3 +1157,62 @@ class TestSequentialWithBlocksInLoop(unittest.TestCase):
         )
         out = decompile(src)
         self.assertEqual(ast.dump(ast.parse(out)), ast.dump(ast.parse(src)))
+
+
+class TestCollectionDisplays(unittest.TestCase):
+    """List, set and dict displays built from constants and starred parts."""
+
+    SRC = (
+        "def f(x, ys, d):\n"
+        "    a = [1, 2, 3]\n"
+        "    b = [x, 1, 2, 3]\n"
+        "    c = [1, 2, 3, x]\n"
+        "    e = [*ys, 1, 2, 3]\n"
+        "    g = [1, 2, 3, *ys]\n"
+        "    m = [*ys, 1, *ys]\n"
+        "    h = {1, 2, 3}\n"
+        "    i = {x, 1, 2, 3}\n"
+        "    j = {'a': 1, 'b': 2, **d}\n"
+        "    k = {**d, 'a': 1}\n"
+        "    return a, b, c, e, g, h, i, j, k, m\n"
+    )
+
+    def test_displays_are_not_expanded(self):
+        out = decompile(self.SRC)
+        assert_contains(
+            out,
+            "a = [1, 2, 3]", "b = [x, 1, 2, 3]", "c = [1, 2, 3, x]",
+            "e = [*ys, 1, 2, 3]", "g = [1, 2, 3, *ys]", "h = {1, 2, 3}",
+            "i = {x, 1, 2, 3}", "j = {'a': 1, 'b': 2, **d}", "k = {**d, 'a': 1}",
+        )
+        self.assertNotIn("**{", out)
+        self.assertNotIn("*{", out)
+        self.assertNotIn("*[", out)
+
+    def test_behavior_is_preserved(self):
+        ns = {}
+        exec(decompile(self.SRC), ns)
+        ref = {}
+        exec(self.SRC, ref)
+        args = (7, [8, 9], {"z": 1})
+        self.assertEqual(ns["f"](*args), ref["f"](*args))
+
+    def test_parenthesized_items_keep_their_parentheses(self):
+        # The source of a parenthesized item leaves its parentheses out; folding an
+        # item into a display must not change what the item means.
+        src = (
+            "def f(a, b, d):\n"
+            "    p = {**(d or {'q': 1}), 'k': 1}\n"
+            "    q = {'k': (y := 1), 'j': 2}\n"
+            "    r = [(a or b), 1, 2, *(a, b)]\n"
+            "    s = [*(d and 'xy'), 1]\n"
+            "    t = [1, 2, *(d or 'z')]\n"
+            "    return p, q, r, s, t, y\n"
+        )
+        ns = {}
+        exec(decompile(src), ns)
+        ref = {}
+        exec(src, ref)
+        for args in ((0, 3, {}), (1, 2, {"z": 1})):
+            with self.subTest(args=args):
+                self.assertEqual(ns["f"](*args), ref["f"](*args))
