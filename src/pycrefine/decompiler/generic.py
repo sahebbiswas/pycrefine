@@ -2437,9 +2437,7 @@ class DecompilerGeneric(DecompilerBase):
             elif op in ("GET_ATTR", "LOAD_ATTR", "LOAD_METHOD"):
                 if self._has_operands(mini_stack, 1, ins):
                     obj = mini_stack.pop()
-                    obj_str = str(obj)
-                    if obj_str.startswith("-"):
-                        obj_str = self._wrap_negative_literal(obj_str)
+                    obj_str = self._wrap_negative_literal(obj)
                     mini_stack.append(f"{obj_str}.{ins.argval}")
             elif op in ("CALL", "CALL_FUNCTION", "CALL_METHOD"):
                 num = int(ins.arg) if ins.arg is not None else 0
