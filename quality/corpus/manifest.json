@@ -378,14 +378,6 @@
             "3.10"
           ],
           "summary": "3.10 block-based exception handlers are not decompiled"
-        },
-        {
-          "issue": 210,
-          "versions": [
-            "3.13",
-            "3.14"
-          ],
-          "summary": "3.13/3.14 kept, errors = [], 0 is reconstructed as errors, kept = 0"
         }
       ]
     },
@@ -471,21 +463,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "unsupported",
-      "limitations": [
-        {
-          "issue": 168,
-          "versions": [
-            "3.9",
-            "3.10",
-            "3.11",
-            "3.12",
-            "3.13",
-            "3.14"
-          ],
-          "summary": "swap by tuple assignment becomes sequential assignments"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "features/io_streams",
@@ -719,14 +698,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "unsupported",
-      "limitations": [
-        {
-          "issue": 168,
-          "versions": "all",
-          "summary": "swap by tuple assignment becomes sequential assignments"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "features/with_context",
@@ -1555,16 +1528,8 @@
         "optimize": 0
       },
       "equivalence": "compile_only",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 179,
-          "versions": [
-            "3.10"
-          ],
-          "summary": "3.10 block-based exception handlers are not decompiled"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "stdlib/getopt",

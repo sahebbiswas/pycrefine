@@ -205,6 +205,17 @@ class Decompiler314(Decompiler311Plus):
                 for name in instr.argval:
                     self._append_reconstructed(f"{name} = {self.stack.pop()}")
                 return
+            names_in_store = instr.argval if isinstance(instr.argval, (tuple, list)) else ()
+            idx = self.pc - 1
+            if (len(names_in_store) >= 2 and len(self.stack) >= len(names_in_store)
+                    and all(type(v) is str for v in self.stack[-len(names_in_store):])  # pylint: disable=unidiomatic-typecheck
+                    and not (idx > 0 and self.instructions[idx - 1].opname.startswith("UNPACK"))):
+                # `a, b = b, a`: the values are waiting side by side. The fused store takes
+                # the first name from the top of the stack and the next from below it.
+                self._begin_name_batch()
+                for name in names_in_store:
+                    self._append_reconstructed(f"{name} = {self.stack.pop()}")
+                return
             if isinstance(instr.argval, (tuple, list)) and len(instr.argval) >= 2:
                 names = ", ".join(str(x) for x in instr.argval)
                 expr = str(self._pop())

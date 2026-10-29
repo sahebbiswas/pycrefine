@@ -1216,3 +1216,40 @@ class TestCollectionDisplays(unittest.TestCase):
         for args in ((0, 3, {}), (1, 2, {"z": 1})):
             with self.subTest(args=args):
                 self.assertEqual(ns["f"](*args), ref["f"](*args))
+
+
+class TestTupleAssignment(unittest.TestCase):
+    """A swap or rotation by tuple assignment keeps its simultaneity (#168)."""
+
+    SRC = (
+        "class P:\n"
+        "    def __init__(self):\n"
+        "        self.x, self.y = 1, 2\n"
+        "def sw(a, b):\n    a, b = b, a\n    return a, b\n"
+        "def rot3(a, b, c):\n    a, b, c = c, a, b\n    return a, b, c\n"
+        "def rot3b(a, b, c):\n    a, b, c = b, c, a\n    return a, b, c\n"
+        "def idx(x, i, j):\n    x[i], x[j] = x[j], x[i]\n    return x\n"
+        "def attrs(o):\n    o.x, o.y = o.y, o.x\n    return o.x, o.y\n"
+        "def mixed(a, x):\n    a, x[0] = x[0], a\n    return a, x\n"
+        "def fib(n):\n    a, b = 0, 1\n    for _ in range(n):\n        a, b = b, a + b\n    return a\n"
+        "def gcd(a, b):\n    while b:\n        a, b = b, a % b\n    return a\n"
+        "def aug(x, i):\n    x[i] += 1\n    return x\n"
+        "def augattr(o):\n    o.x += 5\n    o.y *= 2\n    return o.x, o.y\n"
+        "def calls(f, g):\n    p, q = f(), g()\n    return p, q\n"
+        "def results():\n"
+        "    o = P()\n"
+        "    return [sw(1, 2), rot3(1, 2, 3), rot3b(1, 2, 3), idx([1, 2, 3], 0, 2), attrs(o),\n"
+        "            mixed(1, [5, 6]), fib(10), gcd(12, 18), aug([1, 2], 1), augattr(o), calls(lambda: 1, lambda: 2)]\n"
+    )
+
+    def test_behavior_is_preserved(self):
+        out = decompile(self.SRC)
+        ns, ref = {}, {}
+        exec(out, ns)
+        exec(self.SRC, ref)
+        self.assertEqual(ns["results"](), ref["results"](), out)
+
+    def test_swaps_are_one_statement(self):
+        out = decompile(self.SRC)
+        assert_contains(out, "a, b = b, a", "x[i], x[j] = x[j], x[i]", "a, b = b, a + b", "a, b = b, a % b")
+        assert_contains(out, "x[i] += 1", "o.x += 5", "o.y *= 2")

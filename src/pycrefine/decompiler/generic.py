@@ -732,6 +732,10 @@ class DecompilerGeneric(DecompilerBase):
                 self._emit_empty_try(instr.offset)
             return
         self._handle_instruction(instr)
+        # `self.pc` is already past `instr`, and tuple_assign[2] is the index of the last store
+        # of the assignment: it is complete once `pc` has moved beyond that store.
+        if self.emit.tuple_assign is not None and self.pc > self.emit.tuple_assign[2]:
+            self._finish_tuple_assign()
         if instr.offset in self.prescan.handler_return_close:
             # The `return` that ends an except clause has been emitted inside it.
             self.prescan.handler_return_close.discard(instr.offset)
@@ -895,6 +899,118 @@ class DecompilerGeneric(DecompilerBase):
                         self.reconstructed.append(l)
         else:
             self.reconstructed.append("    " * self.indent_level + line)
+
+    # ── tuple assignment (`a, b = b, a`) ─────────────────────────────────
+
+    _ROTATION_SIZE = {"ROT_TWO": 2, "ROT_THREE": 3, "ROT_FOUR": 4}
+    _STORE_OPS = ("STORE_FAST", "STORE_NAME", "STORE_GLOBAL", "STORE_DEREF", "STORE_ATTR", "STORE_SUBSCR",
+                  "STORE_FAST_STORE_FAST")
+
+    def _rotation_size(self, ins: BytecodeInstruction) -> int:
+        if ins.opname == "SWAP":
+            return int(ins.arg) if ins.arg is not None else 0
+        return self._ROTATION_SIZE.get(ins.opname, 0)
+
+    def _tuple_assign_size(self, instr: BytecodeInstruction) -> int:
+        """
+        The number of values a rotation arranges for a tuple assignment (0 if it is not one).
+
+        Before 3.13 a tuple assignment rotates the values (`ROT_TWO`, `SWAP`) so that plain
+        stores put each in its target. It is one when the rotations lead through the first
+        target's operands (`x`, `0` of `x[0]`) to a store; a store right after the rotation is
+        an augmented assignment's (`x[0] += 1`) unless it binds a name.
+
+        *instr* is the rotation just handled, so `self.pc` (already past it) indexes the
+        instruction after it, where the scan for further rotations starts.
+        """
+        instrs = self.instructions
+        k = self.pc
+        size = self._rotation_size(instr)
+        while k < len(instrs) and (self._rotation_size(instrs[k]) or instrs[k].opname in ("NOP", "CACHE")):
+            size = max(size, self._rotation_size(instrs[k]))
+            k += 1
+        first = k
+        while k < len(instrs) and (instrs[k].opname.startswith("LOAD_")
+                                   or instrs[k].opname in ("BINARY_SUBSCR", "CACHE", "NOP")
+                                   or (instrs[k].opname == "BINARY_OP" and instrs[k].arg == 26)):
+            k += 1
+        if k >= len(instrs) or instrs[k].opname not in self._STORE_OPS:
+            return 0
+        if k == first and instrs[k].opname in ("STORE_ATTR", "STORE_SUBSCR"):
+            return 0
+        return size
+
+    def _begin_tuple_assign(self, size: int, reverse: bool, start: int) -> None:
+        """
+        Start collecting the *size* stores of a tuple assignment, which begin at or after
+        instruction index *start* (None unless they follow each other, with only the
+        operands of their targets in between).
+        """
+        instrs = self.instructions
+        if self.emit.tuple_assign is not None or size < 2:
+            return
+        done = 0
+        for k in range(start, len(instrs)):
+            op = instrs[k].opname
+            if op in self._STORE_OPS:
+                done += 2 if op == "STORE_FAST_STORE_FAST" else 1
+                if done >= size:
+                    self.emit.tuple_assign = (len(self.reconstructed), reverse, k)
+                    return
+            elif not (op.startswith("LOAD_") or op in ("BINARY_SUBSCR", "CACHE", "NOP") or self._rotation_size(instrs[k])
+                      or (op == "BINARY_OP" and instrs[k].arg == 26)):
+                return
+
+    def _begin_name_batch(self) -> None:
+        """
+        3.11+ stores the values of `a, b = b, a` back to back, last target first, with
+        nothing to rotate when every target is a name. Several name stores that find that
+        many plain values waiting are one tuple assignment.
+        """
+        instrs = self.instructions
+        start = self.pc - 1
+        count = 0
+        for ins in instrs[start:]:
+            if ins.opname not in ("STORE_FAST", "STORE_NAME", "STORE_GLOBAL", "STORE_DEREF", "STORE_FAST_STORE_FAST"):
+                break
+            count += 2 if ins.opname == "STORE_FAST_STORE_FAST" else 1
+        waiting = self.stack[-count:] if count else []
+        plain = len(waiting) == count and all(type(v) is str for v in waiting)  # pylint: disable=unidiomatic-typecheck
+        if count >= 2 and plain and not (start > 0 and instrs[start - 1].opname.startswith("UNPACK")):
+            self._begin_tuple_assign(count, True, start)
+
+    def _finish_tuple_assign(self) -> None:
+        """
+        Join the stores of a tuple assignment into one statement once all have been emitted.
+
+        The stores run one after another, but the values were all computed before the first
+        of them: `a = b` then `b = a` would lose the old `a`.
+        """
+        first, reverse, _ = self.emit.tuple_assign or (0, False, 0)
+        self.emit.tuple_assign = None
+        rows = self.reconstructed[first:]
+        pairs = []
+        for row in rows:
+            text = row.strip()
+            try:
+                body = ast.parse(text).body
+            except SyntaxError:
+                return
+            node = body[0] if len(body) == 1 else None
+            if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
+                return
+            value = ast.get_source_segment(text, node.value) or ""
+            if isinstance(node.value, (ast.Lambda, ast.NamedExpr, ast.Yield, ast.YieldFrom, ast.Starred)):
+                value = f"({value})"
+            pairs.append((ast.get_source_segment(text, node.targets[0]) or "", value))
+        if len(pairs) < 2:
+            return
+        if reverse:
+            pairs.reverse()
+        indent = rows[0][:len(rows[0]) - len(rows[0].lstrip())]
+        targets = ", ".join(t for t, _ in pairs)
+        values = ", ".join(v for _, v in pairs)
+        self.reconstructed[first:] = [f"{indent}{targets} = {values}"]
 
     def _format_val(self, val):
         # Format slice objects as proper Python slice notation (e.g. slice(6, None, None) → '6:')
@@ -4225,6 +4341,8 @@ class DecompilerGeneric(DecompilerBase):
         if instr.offset == self.emit.exc_as_store_offset:
             self.emit.exc_as_store_offset = -1
             return
+        if self.target_version >= (3, 11):
+            self._begin_name_batch()
         if self.stack:
             val = self.stack.pop()
             # Suppress: IMPORT_FROM already emitted `from X import Y`
@@ -5231,8 +5349,32 @@ class DecompilerGeneric(DecompilerBase):
                 "INPLACE_MATRIX_MULTIPLY": "@=",
             }
             op = inplace_map.get(opname, "?=")
+            if self._emit_inplace_to_target(str(left), op, str(right)):
+                return
             # Emit as statement directly; the result will be stored by STORE_*
             self.stack.append(f"({left} {op} {right})")
+
+    def _emit_inplace_to_target(self, left: str, op: str, right: str) -> bool:
+        """
+        `x[i] += v` and `o.a += v` before 3.11: the result is rotated below the duplicated
+        container (and key) and stored back, so the store is `ROT_THREE; STORE_SUBSCR`
+        (`ROT_TWO; STORE_ATTR`). Emit the augmented assignment and consume those.
+        """
+        instrs = self.instructions
+        k = self.pc
+        while k < len(instrs) and (self._rotation_size(instrs[k]) or instrs[k].opname in ("NOP", "CACHE")):
+            k += 1
+        if k == self.pc or k >= len(instrs) or instrs[k].opname not in ("STORE_SUBSCR", "STORE_ATTR"):
+            return False
+        if not self._match_augassign_store(left, instrs[k]):
+            return False
+        held = 2 if instrs[k].opname == "STORE_SUBSCR" else 1  # the container (and key) kept for the store
+        if len(self.stack) < held:
+            return False
+        del self.stack[-held:]
+        self._append_reconstructed(f"{left} {op} {right}")
+        self.pc = k + 1
+        return True
 
     def _normalize_val(self, val: Any) -> str:
         """Convert decompiler-internal tuples ('func', ...) into their source string."""
@@ -5544,6 +5686,9 @@ class DecompilerGeneric(DecompilerBase):
                 # The iterators are not tracked on the stack; leave the value for RETURN_VALUE.
                 self.pc = return_at
                 return
+        prev = self.instructions[self.pc - 2] if self.pc >= 2 else None
+        if prev is None or not self._rotation_size(prev):
+            self._begin_tuple_assign(self._tuple_assign_size(instr), False, self.pc)
         if opname == "ROT_TWO" and len(self.stack) >= 2:
             a, b = self.stack.pop(), self.stack.pop()
             self.stack.extend([a, b])

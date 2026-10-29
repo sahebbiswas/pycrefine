@@ -22,7 +22,7 @@ state and receives exactly what the ``for_handler_section`` methods below hand o
 ``tests/test_state.py`` pins that list.
 """
 from dataclasses import dataclass, field, fields
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 
 # These are deliberate data holders: one field per fact, grouped by who writes it.
@@ -101,6 +101,7 @@ class EmissionState:  # pylint: disable=too-many-instance-attributes
     pei_indents: Dict[int, int] = field(default_factory=dict)
     finally_wrapper_indent: Dict[int, int] = field(default_factory=dict)  # 3.9
     kw_names: Any = ()                                              # keyword names of the call being built
+    tuple_assign: Optional[Tuple[int, bool, int]] = None            # open tuple assignment: (index in `reconstructed` of its first line, whether the stores run in reverse, index in `instructions` of its last store)
 
     def for_handler_section(self) -> "EmissionState":
         """A handler's sub-decompiler starts at indent level 0 with nothing open."""
