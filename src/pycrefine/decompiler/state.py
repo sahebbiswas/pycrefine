@@ -33,7 +33,7 @@ class PrescanState:  # pylint: disable=too-many-instance-attributes
     while_header_targets: Dict[int, int] = field(default_factory=dict)  # body start -> guard POP_JUMP offset
     while_true_ends: Set[int] = field(default_factory=set)          # end offsets of while-True loops
     inner_back_jumps: Dict[int, int] = field(default_factory=dict)  # inner back-jump -> the back-edge that closes the loop
-    dup_guard_exits: Set[int] = field(default_factory=set)          # exit targets of suppressed bottom-of-loop condition copies
+    dup_guard_exits: Set[int] = field(default_factory=set)          # exit targets of suppressed bottom-of-loop condition copies, and (3.10/3.11) the repeated implicit return after one
     for_iter_targets: Set[int] = field(default_factory=set)         # jump targets of FOR_ITER (3.9 break detection)
     # --- `and` / `or` as values (_prescan_value_boolops) -------------------------------
     boolop_or_pop: Dict[int, Any] = field(default_factory=dict)     # 3.9-3.10: offset -> (op, target) for *_OR_POP jumps
@@ -75,12 +75,14 @@ class PrescanState:  # pylint: disable=too-many-instance-attributes
         """
         The analysis a sub-decompiler of an except handler starts from: empty, except for
         what describes the code around the handler (how handlers are left, where while
-        loops start), which it shares with its parent.
+        loops start, which copies of their conditions are suppressed), which it shares with its parent.
         """
         state = PrescanState()
         state.exc_handler_jump_offsets = self.exc_handler_jump_offsets
         state.exc_handler_continue_offsets = self.exc_handler_continue_offsets
         state.while_header_targets = self.while_header_targets
+        state.while_body_offsets = self.while_body_offsets
+        state.dup_guard_exits = self.dup_guard_exits
         return state
 
 

@@ -87,8 +87,8 @@ class TestKnownFailures(unittest.TestCase):
         from .conftest import expected_failing_cases
 
         cases = expected_failing_cases("3.10")
-        self.assertIn("loops_and_asserts",
-                      cases[("test_basic", "TestUnaryOperators", "test_behavior_is_preserved")])
+        self.assertIn("R_for_try_if",
+                      cases[("test_control_flow", "TestLoopContinueAndTailIf", "test_behavior_is_preserved")])
         self.assertEqual(expected_failing_cases("3.99"), {})
 
 

@@ -737,6 +737,39 @@ class DecompilerGeneric(DecompilerBase):
             self.prescan.handler_return_close.discard(instr.offset)
             self._close_except_clause()
 
+    def _while_else_end(self, block_end: int) -> Optional[int]:
+        """
+        Where the `else` clause of the `while` loop that ends at *block_end* ends, or None.
+
+        The loop's condition leaves it at *block_end*; a `break` in the body jumps past
+        whatever follows there, and what follows is the `else` clause. Only jumps of the
+        body count: the condition's own exits (and the copy of it below the body) may land
+        on several copies of the same exit block.
+        """
+        guard = None
+        for go in self.prescan.while_header_targets.values():
+            ins = self._instruction_at(go) if go >= 0 else None
+            if ins is not None and self._get_jump_target(ins) == block_end:
+                guard = go
+                break
+        if guard is None:
+            return None
+        end = None
+        for ins in self.instructions:
+            if ins.offset >= block_end:
+                break
+            if (ins.offset <= guard or ins.offset in self.prescan.while_body_offsets
+                    or "JUMP" not in ins.opname or self._is_backward_instruction(ins)
+                    or ins.offset in self.prescan.compound_suppress):
+                continue
+            target = self._get_jump_target(ins)
+            if isinstance(target, int) and target > block_end and (end is None or target > end):
+                end = target
+        return end
+
+    def _instruction_at(self, offset: int) -> Optional[BytecodeInstruction]:
+        return next((ins for ins in self.instructions if ins.offset == offset), None)
+
     def _close_blocks(self, offset: int):
         """
         Close code blocks whose end offset is at or before the given bytecode offset.
@@ -756,6 +789,8 @@ class DecompilerGeneric(DecompilerBase):
 
             has_else = False
             else_end = None
+            # A `for` or `while` loop has an `else` clause when a jump from inside it (a
+            # `break`) lands beyond the point where its condition or iterator runs out.
             if block_type == "for":
                 for ins in self.instructions:
                     if ins.offset >= block_end:
@@ -766,6 +801,9 @@ class DecompilerGeneric(DecompilerBase):
                             if else_end is None or target > else_end:
                                 else_end = target
                                 has_else = True
+            elif block_type == "while":
+                else_end = self._while_else_end(block_end)
+                has_else = else_end is not None
 
             if block_type not in _NO_PASS_TYPES:
                 last_idx = len(self.reconstructed) - 1
@@ -933,6 +971,49 @@ class DecompilerGeneric(DecompilerBase):
             target = self._get_jump_target(instr)
             return isinstance(target, int) and target <= instr.offset
         return False
+
+    def _is_conditional_back_jump(self, instr: "BytecodeInstruction") -> bool:
+        """True for the conditional jump that closes a `while cond:` loop (3.10 and 3.11).
+
+        Those versions end the loop body with a copy of the condition whose own jump goes
+        back to the body (`POP_JUMP_IF_TRUE` on 3.10, `POP_JUMP_BACKWARD_IF_TRUE` on 3.11);
+        3.12 and later copy the condition and then take an unconditional `JUMP_BACKWARD`.
+
+        Other conditional jumps to an earlier offset (`if c: continue` jumps back to the
+        loop's first test) are not that. The closing jump lands on the body, directly after
+        the loop's guard: a conditional jump of the opposite sense that leaves the loop, and
+        whose condition ends in the same instruction as this copy's does.
+        """
+        if not (3, 10) <= self.target_version < (3, 12):
+            return False
+        if not (instr.opname.startswith("POP_JUMP") and "_IF_" in instr.opname):
+            return False
+        body = self._get_jump_target(instr)
+        return isinstance(body, int) and 0 < body <= instr.offset and self._repeats_loop_guard(instr, body)
+
+    def _repeats_loop_guard(self, instr: "BytecodeInstruction", body: int) -> bool:
+        """
+        True if the conditional jump *instr*, which goes back to *body*, repeats the test of
+        the guard just before *body*: a conditional jump of the opposite sense that leaves
+        the loop, whose condition ends in the same instruction as this copy's does.
+        """
+        position = {ins.offset: n for n, ins in enumerate(self.instructions)}
+        at_body, at_instr = position.get(body), position.get(instr.offset)
+        if at_body is None or at_instr is None or at_body < 2:
+            return False
+        guard = self.instructions[at_body - 1]
+        exit_ = self._get_jump_target(guard)
+        if not (guard.opname.startswith("POP_JUMP") and "_IF_" in guard.opname
+                and isinstance(exit_, int) and exit_ > instr.offset):
+            return False
+
+        def sense(ins):
+            return ins.opname.rsplit("_IF_", 1)[1]
+        opposite = {"FALSE": "TRUE", "TRUE": "FALSE", "NONE": "NOT_NONE", "NOT_NONE": "NONE"}
+        if opposite.get(sense(guard)) != sense(instr):
+            return False
+        last_of_copy, last_of_test = self.instructions[at_instr - 1], self.instructions[at_body - 2]
+        return (last_of_copy.opname, last_of_copy.argval) == (last_of_test.opname, last_of_test.argval)
 
     def _has_jump_backward(self) -> bool:
         """Return True if the code contains any backward jump."""
@@ -1364,6 +1445,21 @@ class DecompilerGeneric(DecompilerBase):
         # Ternary jumps must not be touched here (they are pure expression nodes)
         ternary_offsets = set(self.prescan.ternary_jumps.keys())
 
+        # The compiler copies a small exit block to every jump that reaches it, so the
+        # exits of one condition can sit at different offsets (`while a and b:` ends in
+        # a `return None` per jump). Blocks that are the same return are one target.
+        first_return_block: dict = {}
+        canonical_return: dict = {}
+        for k, ins_k in enumerate(instrs):
+            if ins_k.opname == "RETURN_CONST":
+                key = ("RETURN_CONST", type(ins_k.argval), repr(ins_k.argval))
+            elif (ins_k.opname == "LOAD_CONST" and k + 1 < n
+                    and instrs[k + 1].opname == "RETURN_VALUE"):
+                key = ("LOAD_CONST+RETURN_VALUE", type(ins_k.argval), repr(ins_k.argval))
+            else:
+                continue
+            canonical_return[ins_k.offset] = first_return_block.setdefault(key, ins_k.offset)
+
         i = 0
         while i < n:
             ins = instrs[i]
@@ -1439,6 +1535,8 @@ class DecompilerGeneric(DecompilerBase):
                     if ins.opname in getattr(self, "_GENERIC_SKIP_OPS", ("NOP", "RESUME", "CACHE")):
                         curr = instrs[idx+1].offset
                         continue
+                    if curr in canonical_return:
+                        return canonical_return[curr]
                     if ins.opname == "POP_TOP":
                         look = idx + 1
                         while look < len(instrs) and instrs[look].opname in getattr(self, "_GENERIC_SKIP_OPS", ("NOP", "RESUME", "CACHE")):
@@ -2366,7 +2464,7 @@ class DecompilerGeneric(DecompilerBase):
         self.prescan.dup_guard_exits = set()
 
         for jb_idx, jb in enumerate(self.instructions):
-            if not self._is_backward_instruction(jb):
+            if not (self._is_backward_instruction(jb) or self._is_conditional_back_jump(jb)):
                 continue
             # A handler that ends by jumping back to the code after its `try` (the
             # handler table sits at the end of the function) is not a loop.
@@ -2412,6 +2510,8 @@ class DecompilerGeneric(DecompilerBase):
             guard_offset = -1
             guard_dist = float('inf')   # distance from body_start
             for ins in self.instructions:
+                if ins is jb:
+                    continue
                 if head_is_nop and ins.offset > body_start:
                     continue
                 # A guard after the loop head is the head's own condition only
@@ -2421,10 +2521,10 @@ class DecompilerGeneric(DecompilerBase):
                 if (not head_is_for and ins.offset > body_start
                         and self._has_body_store_between(body_start, ins.offset)):
                     continue
-                if not ("POP_JUMP_IF_FALSE" in ins.opname
-                        or "POP_JUMP_IF_TRUE" in ins.opname
-                        or "JUMP_IF_FALSE" in ins.opname
-                        or "JUMP_IF_TRUE" in ins.opname):
+                # (3.11 spells the conditional jumps POP_JUMP_FORWARD_IF_* / POP_JUMP_BACKWARD_IF_*)
+                if not ("JUMP_IF_FALSE" in ins.opname
+                        or "JUMP_IF_TRUE" in ins.opname
+                        or ins.opname.startswith("POP_JUMP") and "_IF_" in ins.opname):
                     continue
                 # Must be within the loop (not after jb)
                 if ins.offset > jb.offset:
@@ -2467,6 +2567,10 @@ class DecompilerGeneric(DecompilerBase):
                 if dist < guard_dist:
                     guard_dist = dist
                     guard_offset = ins.offset
+            if guard_offset > body_start and (self.target_version < (3, 10) or self.target_version >= (3, 14)):
+                # 3.9 and 3.14 test the condition at the loop head: for `while a and b:`
+                # every clause jumps out, and the last one is the guard that opens the body.
+                guard_offset = self._last_jump_of_condition(guard_offset, jb.offset)
             if guard_offset >= 0:
                 self.prescan.while_header_targets[body_start] = guard_offset
                 # 3.12/3.13 copy the loop condition to the bottom of the body.
@@ -2475,8 +2579,10 @@ class DecompilerGeneric(DecompilerBase):
                 dup_jumps.discard(guard_offset)
                 self.prescan.while_body_offsets.update(dup_jumps)
                 for ins in self.instructions:
-                    if ins.offset in dup_jumps:
+                    if ins.offset in dup_jumps and self._get_jump_target(ins) > jb.offset:
                         self.prescan.dup_guard_exits.add(self._get_jump_target(ins))
+                if self._is_conditional_back_jump(jb):
+                    self._mark_implicit_returns_after_loop(jb, guard_offset, dup_jumps)
             else:
                 # while-True pattern: no conventional guard found, but the
                 # back-edge target is a known jump target (loop start).
@@ -2490,6 +2596,72 @@ class DecompilerGeneric(DecompilerBase):
                 if (body_instr and body_instr.is_jump_target
                         and body_instr.opname not in _TRY_LOOP_HEADS):
                     self.prescan.while_header_targets[body_start] = -1
+
+    def _last_jump_of_condition(self, jump_offset: int, loop_end: int) -> int:
+        """
+        The last conditional jump of the condition that starts with the jump at *jump_offset*.
+
+        A chained condition is a run of expressions and conditional jumps; the jumps that
+        leave the loop all lie ahead of the body, and the last of them is the one that
+        falls through into it.
+        """
+        instrs = self.instructions
+        by_offset = {ins.offset: n for n, ins in enumerate(instrs)}
+        last = jump_offset
+        k = by_offset[jump_offset] + 1
+        while k < len(instrs):
+            ins = instrs[k]
+            if ins.opname.startswith("POP_JUMP") and "_IF_" in ins.opname:
+                target = self._get_jump_target(ins)
+                if not (isinstance(target, int) and target > loop_end):
+                    break
+                last = ins.offset
+            elif ins.opname not in _COMPOUND_EXPR_OPS and ins.opname not in _COMPOUND_SKIP:
+                break
+            k += 1
+        return last
+
+    def _mark_implicit_returns_after_loop(self, jb: BytecodeInstruction, guard_offset: int, dup_jumps: set) -> None:
+        """
+        3.10/3.11: record the copies of the implicit `return None` that end a `while cond:` loop.
+
+        When the loop is the last thing in the code, every way out of the loop condition
+        (the guard, the jumps of the condition copied below the body, and falling through
+        the closing jump) ends in its own `LOAD_CONST None; RETURN_VALUE`. They are the
+        loop's normal end, not a `break` or a `return`.
+        """
+        instrs = self.instructions
+        by_offset = {ins.offset: n for n, ins in enumerate(instrs)}
+
+        def return_at(offset):
+            n = by_offset.get(offset)
+            if n is None or n + 1 >= len(instrs):
+                return None
+            load, ret = instrs[n], instrs[n + 1]
+            if load.opname == "LOAD_CONST" and load.argval is None and ret.opname == "RETURN_VALUE":
+                return ret.offset
+            return None
+
+        # The jumps of the condition ahead of the body: walk back from the guard over
+        # the expressions and conditional jumps that make it up.
+        condition = {guard_offset}
+        k = by_offset[guard_offset] - 1
+        while k >= 0:
+            op = instrs[k].opname
+            if op.startswith("POP_JUMP") and "_IF_" in op:
+                condition.add(instrs[k].offset)
+            elif op not in _COMPOUND_EXPR_OPS and op not in _COMPOUND_SKIP:
+                break
+            k -= 1
+
+        fall_through = return_at(jb.offset + 2)
+        if fall_through is not None:
+            self.prescan.dup_guard_exits.add(fall_through)
+        for offset in condition | dup_jumps:
+            target = self._get_jump_target(instrs[by_offset[offset]])
+            ret = return_at(target) if isinstance(target, int) and target > jb.offset else None
+            if ret is not None:
+                self.prescan.dup_guard_exits.add(ret)
 
     def _has_body_store_between(self, start: int, end: int) -> bool:
         """
@@ -2550,7 +2722,8 @@ class DecompilerGeneric(DecompilerBase):
         """
         cands = [
             (i, ins) for i, ins in enumerate(self.instructions)
-            if self._is_backward_instruction(ins) and not self._is_handler_exit_back_jump(i)
+            if (self._is_backward_instruction(ins) or self._is_conditional_back_jump(ins))
+            and not self._is_handler_exit_back_jump(i)
         ]
         inner = {}
         for _, j in cands:
@@ -2693,41 +2866,59 @@ class DecompilerGeneric(DecompilerBase):
 
     def _dup_guard_jump_offsets(self, jb: BytecodeInstruction) -> set:
         """
-        Offsets of the exit jumps of a loop condition duplicated at the bottom of
-        the loop body (3.12/3.13 layout), or an empty set when there is none.
+        Offsets of the jumps of a loop condition duplicated at the bottom of the loop
+        body, or an empty set when there is none (3.9, and 3.14 and later, test it once).
 
-        The copy sits directly before the closing back-edge `jb` and ends in a
-        conditional jump that leaves the loop. Everything before the copy's first
+        3.12/3.13: the copy sits directly before the closing back-edge `jb` and ends in a
+        conditional jump that leaves the loop. 3.10/3.11: `jb` is itself the last jump of
+        the copy, a conditional jump back to the body, and the copy's earlier jumps either
+        leave the loop or go back to the body too. Everything before the copy's first
         instruction is a body statement; body-level `if` jumps stay out of the set.
         """
+        if self.target_version >= (3, 14):
+            return set()  # 3.14 tests the condition once, at the loop head
         instrs = self.instructions
         idx = next((i for i, ins in enumerate(instrs) if ins is jb), -1)
         if idx < 0:
             return set()
 
+        closing_test = self._is_conditional_back_jump(jb)
+
         def is_cond_jump(ins):
+            if closing_test:
+                return ins.opname.startswith("POP_JUMP") and "_IF_" in ins.opname
             return ins.opname.startswith("POP_JUMP_IF")
 
         def exits_loop(ins):
             t = self._get_jump_target(ins)
             return isinstance(t, int) and t > jb.offset
 
-        k = idx - 1
-        while k >= 0 and instrs[k].opname in _WHILE_TRIVIAL_OPS:
-            k -= 1
-        if k < 0 or not (is_cond_jump(instrs[k]) and exits_loop(instrs[k])):
-            return set()
-        # `jb` itself leaving a nested loop (back to an enclosing head) is that
-        # loop's exit path, not a duplicated condition.
-        jb_target = self._get_jump_target(jb)
-        for fi, f in enumerate(instrs):
-            if (f.offset > jb.offset and self._is_backward_instruction(f)
-                    and not self._is_handler_exit_back_jump(fi)):
-                ft = self._get_jump_target(f)
-                if jb_target < ft <= jb.offset:
-                    return set()
+        body_start = self._get_jump_target(jb)
+
+        def part_of_copy(ins):
+            """A jump of the copied condition: it leaves the loop or (3.10/3.11) repeats the body."""
+            return exits_loop(ins) or (closing_test and self._get_jump_target(ins) == body_start)
 
         out = set()
+        if closing_test:
+            out.add(jb.offset)
+            k = idx - 1
+        else:
+            k = idx - 1
+            while k >= 0 and instrs[k].opname in _WHILE_TRIVIAL_OPS:
+                k -= 1
+            if k < 0 or not (is_cond_jump(instrs[k]) and exits_loop(instrs[k])):
+                return set()
+            # `jb` itself leaving a nested loop (back to an enclosing head) is that
+            # loop's exit path, not a duplicated condition.
+            jb_target = self._get_jump_target(jb)
+            for fi, f in enumerate(instrs):
+                if (f.offset > jb.offset and self._is_backward_instruction(f)
+                        and not self._is_handler_exit_back_jump(fi)):
+                    ft = self._get_jump_target(f)
+                    if jb_target < ft <= jb.offset:
+                        return set()
+
         while k >= 0:
             ins = instrs[k]
             name = ins.opname
@@ -2735,7 +2926,7 @@ class DecompilerGeneric(DecompilerBase):
                 k -= 1
                 continue
             if is_cond_jump(ins):
-                if not exits_loop(ins):
+                if not part_of_copy(ins):
                     break  # a body-level `if`
                 out.add(ins.offset)
             elif name.startswith("STORE_"):
@@ -4750,6 +4941,8 @@ class DecompilerGeneric(DecompilerBase):
         if self.stack:
             val = self.stack.pop()
             val_str = str(val)
+            if val_str == "None" and instr.offset in self.prescan.dup_guard_exits:
+                return  # the repeated implicit return at the end of a `while cond:` loop (3.10/3.11)
             if val_str == "None" and self._module_level_return_none():
                 return
             # Use the new predicate for smarter suppression
@@ -5426,6 +5619,13 @@ class DecompilerGeneric(DecompilerBase):
             # the POP_JUMP_IF_FALSE handler to open a "while" block instead of
             # an "if" block.  Nothing more to do — just return.
             if body_start in self.prescan.while_header_targets:
+                # An `if` that is still open and empty at the loop's last jump back is a
+                # body statement ending in `continue` (`if c: return x` as the last
+                # statement compiles to `if not c: continue`), as for a `for` loop below.
+                last = next((ln.strip() for ln in reversed(self.reconstructed) if ln.strip()), "")
+                if (self.blocks and self.blocks[-1][1] == "if" and self.blocks[-1][0] > instr.offset
+                        and last.startswith("if ") and last.endswith(":")):
+                    self._append_reconstructed("continue")
                 return  # prescan handled it
 
             # Fallback for Python 3.14+ where the prescan could not identify
