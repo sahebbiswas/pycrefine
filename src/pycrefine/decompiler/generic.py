@@ -6543,15 +6543,70 @@ class DecompilerGeneric(DecompilerBase):
             items.append(f"{k_repr}: {v}")
         self.stack.append(f"{{{', '.join(items)}}}")
 
+    @staticmethod
+    def _display_items(text: str, node_type: type) -> Optional[str]:
+        """
+        The comma-separated items of the list, tuple, set or dict display *text* (what sits
+        between its brackets), or None if *text* is not exactly such a display.
+        """
+        try:
+            node = ast.parse(text, mode="eval").body
+        except SyntaxError:
+            return None
+        if not isinstance(node, node_type):
+            return None
+        def item(child: ast.expr, probe: str, pick) -> str:
+            # The source segment of a parenthesized child leaves the parentheses out; keep them
+            # when the bare text would not parse back as the same child in its place.
+            seg = ast.get_source_segment(text, child)
+            if seg is None:
+                return ast.unparse(child)
+            try:
+                same = ast.dump(pick(ast.parse(probe.format(seg), mode="eval").body)) == ast.dump(child)
+            except SyntaxError:
+                same = False
+            return seg if same else f"({seg})"
+
+        if node_type is ast.Dict:
+            parts = [
+                (f"**{item(v, '{{**{}}}', lambda d: d.values[0])}" if k is None
+                 else f"{item(k, '{{{}: 0}}', lambda d: d.keys[0])}: "
+                      f"{item(v, '{{0: {}}}', lambda d: d.values[0])}")
+                for k, v in zip(node.keys, node.values)]
+        else:
+            parts = [item(e, "[{}]", lambda lst: lst.elts[0]) for e in node.elts]
+        return ", ".join(parts)
+
+    @staticmethod
+    def _unpacked(star: str, text: str) -> str:
+        """
+        *star* (`*` or `**`) applied to the expression *text*, with *text* parenthesized when
+        the star would bind to only part of it (`*x if c else y`, `**a or b`).
+        """
+        probe = f"[{star}{text}]" if star == "*" else f"{{{star}{text}}}"
+        try:
+            node = ast.parse(probe, mode="eval").body
+            child = node.elts[0].value if star == "*" else node.values[0]
+            same = ast.dump(child) == ast.dump(ast.parse(text, mode="eval").body)
+        except (SyntaxError, IndexError, AttributeError):
+            same = False
+        return f"{star}{text}" if same else f"{star}({text})"
+
     def _op_list_extend(self, instr: BytecodeInstruction):
         opname = instr.opname
         if len(self.stack) >= 2:
             it = str(self.stack.pop())
             lst = str(self.stack.pop())
-            if lst == "[]":
-                self.stack.append(f"[*{it}]" if it.startswith("(") else f"list({it})")
+            # The compiler builds [a, 1, 2] as BUILD_LIST of the leading items, then
+            # LIST_EXTEND with the constant tuple (1, 2): fold it back into one display.
+            have = self._display_items(lst, ast.List)
+            extra = self._display_items(it, ast.Tuple)
+            if extra is None:
+                extra = self._unpacked("*", it)
+            if have is not None:
+                self.stack.append("[" + ", ".join(part for part in (have, extra) if part) + "]")
             else:
-                self.stack.append(f"[*{lst}, *{it}]")
+                self.stack.append(f"[{self._unpacked('*', lst)}, {extra}]")
 
     def _collection_mutator(self, instr: BytecodeInstruction, kind: str):
         if kind == "map":
@@ -6663,7 +6718,11 @@ class DecompilerGeneric(DecompilerBase):
         if len(self.stack) >= 2:
             src = str(self.stack.pop())
             base = str(self.stack.pop())
-            self.stack.append(f"{{**{base}, **{src}}}")
+            parts = []
+            for text in (base, src):
+                items = self._display_items(text, ast.Dict)
+                parts.append(items if items is not None else self._unpacked("**", text))
+            self.stack.append("{" + ", ".join(part for part in parts if part) + "}")
 
         # ── secondary LOAD paths (dead-code guard — already handled above
         #    for the primary names; this catches any variant not in the top
