@@ -1,14 +1,6 @@
 {
   "3.11": [
     {
-      "issue": 105,
-      "reason": "while cond loops are decompiled as if",
-      "tests": [
-        "tests/test_control_flow.py::TestControlFlow::test_nested_while_no_duplicate_headers",
-        "tests/test_control_flow.py::TestControlFlow::test_while_conditional"
-      ]
-    },
-    {
       "issue": 192,
       "reason": "conditional expression inside a call argument of a comprehension is dropped",
       "cases": {
@@ -32,33 +24,6 @@
     }
   ],
   "3.10": [
-    {
-      "issue": 105,
-      "reason": "while cond loops are decompiled as if",
-      "tests": [
-        "tests/test_control_flow.py::TestControlFlow::test_nested_while_no_duplicate_headers",
-        "tests/test_control_flow.py::TestControlFlow::test_while_conditional",
-        "tests/test_control_flow.py::TestWhilePrescan::test_nested_while_two_guards",
-        "tests/test_control_flow.py::TestWhileTrueConditionalBreak::test_real_while_guard_still_detected"
-      ]
-    },
-    {
-      "issue": 105,
-      "reason": "while cond loops are decompiled as if",
-      "cases": {
-        "tests/test_basic.py::TestUnaryOperators::test_behavior_is_preserved": [
-          "loops_and_asserts"
-        ],
-        "tests/test_control_flow.py::TestLoopContinueAndTailIf::test_behavior_is_preserved": [
-          "while_continue",
-          "while_continue_two",
-          "while_continue_func",
-          "while_nested_continue",
-          "while_continue_break",
-          "R_while_tail_ifelse"
-        ]
-      }
-    },
     {
       "issue": 197,
       "reason": "tail-duplicated if/else and conditional expressions come out as separate ifs (or invalid syntax)",

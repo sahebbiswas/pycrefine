@@ -23,6 +23,8 @@ SHARED_WITH_HANDLER_SECTION = (
     "exc_handler_jump_offsets",
     "exc_handler_continue_offsets",
     "while_header_targets",
+    "while_body_offsets",
+    "dup_guard_exits",
 )
 
 
@@ -51,7 +53,7 @@ class TestFieldOwnership(unittest.TestCase):
 
 
 class TestHandlerSectionTransfer(unittest.TestCase):
-    def test_prescan_shares_exactly_three_fields(self):
+    def test_prescan_shares_exactly_the_listed_fields(self):
         parent = PrescanState()
         parent.while_body_offsets.add(7)
         sub = parent.for_handler_section()

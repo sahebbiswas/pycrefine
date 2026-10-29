@@ -92,14 +92,6 @@
       "support": "partial",
       "limitations": [
         {
-          "issue": 105,
-          "versions": [
-            "3.10",
-            "3.11"
-          ],
-          "summary": "while cond loops are decompiled as if"
-        },
-        {
           "issue": 161,
           "versions": [
             "3.12",
@@ -435,14 +427,6 @@
       "support": "partial",
       "limitations": [
         {
-          "issue": 105,
-          "versions": [
-            "3.10",
-            "3.11"
-          ],
-          "summary": "while cond loops are decompiled as if"
-        },
-        {
           "issue": 201,
           "versions": [
             "3.11",
@@ -509,13 +493,14 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
+      "support": "unsupported",
       "limitations": [
         {
           "issue": 168,
           "versions": [
             "3.9",
             "3.10",
+            "3.11",
             "3.12",
             "3.13",
             "3.14"
@@ -1241,17 +1226,7 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 105,
-          "versions": [
-            "3.10",
-            "3.11"
-          ],
-          "summary": "while cond loops are decompiled as if"
-        }
-      ]
+      "support": "supported"
     },
     {
       "id": "generated/cf_while_if_continue",
@@ -1265,17 +1240,7 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 105,
-          "versions": [
-            "3.10",
-            "3.11"
-          ],
-          "summary": "while cond loops are decompiled as if"
-        }
-      ]
+      "support": "supported"
     },
     {
       "id": "generated/cf_while_if_return",
@@ -1289,17 +1254,7 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 105,
-          "versions": [
-            "3.10",
-            "3.11"
-          ],
-          "summary": "while cond loops are decompiled as if"
-        }
-      ]
+      "support": "supported"
     },
     {
       "id": "generated/cf_while_nested_break",
@@ -1334,17 +1289,7 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 105,
-          "versions": [
-            "3.10",
-            "3.11"
-          ],
-          "summary": "while cond loops are decompiled as if"
-        }
-      ]
+      "support": "supported"
     },
     {
       "id": "generated/cf_while_nested_return",
@@ -1358,17 +1303,7 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 105,
-          "versions": [
-            "3.10",
-            "3.11"
-          ],
-          "summary": "while cond loops are decompiled as if"
-        }
-      ]
+      "support": "supported"
     },
     {
       "id": "generated/cf_while_try_break",
@@ -1481,13 +1416,6 @@
           "summary": "3.10 block-based exception handlers are not decompiled"
         },
         {
-          "issue": 193,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 try/except/finally loses its finally block"
-        },
-        {
           "issue": 170,
           "versions": [
             "3.12",
@@ -1513,14 +1441,6 @@
       "support": "partial",
       "limitations": [
         {
-          "issue": 105,
-          "versions": [
-            "3.10",
-            "3.11"
-          ],
-          "summary": "while cond loops are decompiled as if"
-        },
-        {
           "issue": 209,
           "versions": [
             "3.11"
@@ -1544,14 +1464,6 @@
       "support": "partial",
       "limitations": [
         {
-          "issue": 105,
-          "versions": [
-            "3.10",
-            "3.11"
-          ],
-          "summary": "while cond loops are decompiled as if"
-        },
-        {
           "issue": 209,
           "versions": [
             "3.11"
@@ -1574,14 +1486,6 @@
       "equivalence": "required",
       "support": "partial",
       "limitations": [
-        {
-          "issue": 105,
-          "versions": [
-            "3.10",
-            "3.11"
-          ],
-          "summary": "while cond loops are decompiled as if"
-        },
         {
           "issue": 209,
           "versions": [

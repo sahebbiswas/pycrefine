@@ -682,8 +682,8 @@ class TestWhilePrescan(unittest.TestCase):
 
     def test_dup_offsets_populated(self):
         dec = self._get_dec("n = 0\nwhile n < 5:\n    n += 1\n")
-        if (3, 12) <= sys.version_info[:2] < (3, 14):
-            # 3.12/3.13 copy the condition to the bottom of the loop body.
+        if (3, 10) <= sys.version_info[:2] < (3, 14):
+            # 3.10-3.13 inclusive (3.14 differs) copy the condition to the bottom of the loop body.
             self.assertGreater(len(dec.prescan.while_body_offsets), 0)
         else:
             # No duplicated condition: nothing may be suppressed.
@@ -879,6 +879,10 @@ class TestChainedComparisonSentinel(unittest.TestCase):
             "Failed to preserve chained comparison logic"
         )
 
+# Upper bound on traced events of one decompiled run, so a nonterminating loop fails the test.
+_MAX_STEPS = 200_000
+
+
 class TestWhileTrueConditionalBreak(unittest.TestCase):
     """`while True:` loops that exit through `if ...: break` (issue #96).
 
@@ -905,12 +909,27 @@ class TestWhileTrueConditionalBreak(unittest.TestCase):
             "__builtins__": dict(vars(builtins), input=scripted_input),
         }
         out = io.StringIO()
+        steps = 0
+
+        def tracer(frame, event, arg):
+            nonlocal steps
+            steps += 1
+            if steps > _MAX_STEPS:
+                raise TimeoutError("step limit exceeded")
+            return tracer
+
+        previous = sys.gettrace()
         try:
+            sys.settrace(tracer)
             with contextlib.redirect_stdout(out):
                 exec(code, namespace)
             outcome = "ok"
+        except TimeoutError:
+            outcome = "step limit exceeded (loop never exited)"
         except StopIteration:
             outcome = "input exhausted (loop never exited)"
+        finally:
+            sys.settrace(previous)
         return out.getvalue(), outcome
 
     def _assert_same_behavior(self, src):
@@ -1075,6 +1094,54 @@ class TestLoopContinueAndTailIf(unittest.TestCase):
                 # A `continue` that ends the body is a no-op and is not compiled.
                 if "continue" in src and not name.endswith("_tail"):
                     assert_contains(out, "continue")
+
+
+class TestWhileConditionLoops(unittest.TestCase):
+    """`while cond:` loops (issue #105).
+
+    3.10 and 3.11 test the condition once before the loop and again at the bottom of the body,
+    with a conditional jump back to the body, so there is no unconditional back-edge to find.
+    Each case runs the original and the decompiled code and compares what they print.
+    """
+
+    _SCRIPT = TestWhileTrueConditionalBreak._SCRIPT
+    _run = TestWhileTrueConditionalBreak.__dict__["_run"]
+    _assert_same_behavior = TestWhileTrueConditionalBreak._assert_same_behavior
+
+    CASES = {
+        "truthiness": "x = 3\nwhile x:\n    x = x - 1\n    print('tick', x)\nprint('end')\n",
+        "comparison": "n = 0\nwhile n < 5:\n    n += 1\n    print(n)\nprint('end')\n",
+        "not_condition": "done = False\nn = 0\nwhile not done:\n    n += 1\n    done = n > 3\n    print(n)\n",
+        "and_condition": "i = 0\nj = 0\nwhile i < 5 and j < 3:\n    i += 1\n    j += 2\n    print(i, j)\n",
+        "or_condition": "i = 0\nj = 0\nwhile i < 2 or j < 3:\n    i += 1\n    j += 1\n    print(i, j)\n",
+        "is_not_none": "items = [1, 2, 3]\nnode = items.pop()\nwhile node is not None:\n    print(node)\n    node = items.pop() if items else None\n",
+        "never_entered": "n = 9\nwhile n < 5:\n    n += 1\n    print(n)\nprint('end', n)\n",
+        "else_clause": "n = 0\nwhile n < 3:\n    n += 1\n    print(n)\nelse:\n    print('done')\nprint('end')\n",
+        "break_skips_else": "n = 0\nwhile n < 9:\n    n += 1\n    if n == 3:\n        break\n    print(n)\nelse:\n    print('done')\nprint('end')\n",
+        "in_function": "def count(limit):\n    n = 0\n    out = []\n    while n < limit:\n        n += 1\n        out.append(n)\n    return out\nprint(count(4), count(0))\n",
+        "return_inside": "def first_square_over(limit):\n    n = 0\n    while n < 100:\n        n += 1\n        if n * n > limit:\n            return n\n    return -1\nprint(first_square_over(30), first_square_over(10000))\n",
+        "nested": "i = 0\nwhile i < 3:\n    i += 1\n    j = 0\n    while j < i:\n        j += 1\n        print(i, j)\n",
+        "if_in_body": "n = 0\nwhile n < 6:\n    n += 1\n    if n % 2:\n        print('odd', n)\n    else:\n        print('even', n)\n",
+        "call_in_condition": "xs = [3, 2, 1]\nwhile len(xs) > 1:\n    print(xs.pop())\nprint(xs)\n",
+        "followed_by_loop": "n = 0\nwhile n < 2:\n    n += 1\n    print('a', n)\nm = 0\nwhile m < 2:\n    m += 1\n    print('b', m)\n",
+    }
+
+    def test_equal_returns_of_different_types_stay_distinct(self):
+        # `return True` and `return 1` compare equal but are different exits of the condition.
+        src = "def f(a, b):\n    if a and b:\n        return True\n    return 1\n"
+        ns = {}
+        exec(compile(decompile(src), "<decompiled>", "exec"), ns)  # pylint: disable=exec-used
+        for a, b in ((0, 0), (0, 1), (1, 0), (1, 1)):
+            with self.subTest(a=a, b=b):
+                got = ns["f"](a, b)
+                self.assertEqual((got, type(got)), (True, bool) if a and b else (1, int))
+
+    def test_behavior_is_preserved(self):
+        for name, src in self.CASES.items():
+            with self.subTest(case=name):
+                out = self._assert_same_behavior(src)
+                self.assertIn("while ", out)
+                self.assertNotIn("pass", out)
 
 
 @unittest.skipIf(sys.version_info[:2] == (3, 11), "3.11 bytecode is not supported yet (#4)")
