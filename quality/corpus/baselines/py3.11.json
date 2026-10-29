@@ -16,7 +16,7 @@
     "features/exc_try_except": "mismatch",
     "features/exc_uncaught": "equivalent",
     "features/expr_arithmetic": "equivalent",
-    "features/expr_boolops_ternary": "mismatch",
+    "features/expr_boolops_ternary": "equivalent",
     "features/expr_comparisons": "equivalent",
     "features/expr_strings": "syntax_error",
     "features/flow_for_else": "equivalent",

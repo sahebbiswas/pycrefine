@@ -29,15 +29,6 @@
         "tests/test_exceptions.py::TestExceptions::test_with_try_except_finally",
         "tests/test_control_flow.py::TestNestedTryInLoop::test_multiple_break_paths_in_loop_try"
       ]
-    },
-    {
-      "issue": 194,
-      "reason": "(a and b) or c as a value loses the and",
-      "cases": {
-        "tests/test_basic.py::TestValueBoolOps::test_behavior_is_preserved": [
-          "and_or_mixed"
-        ]
-      }
     }
   ],
   "3.10": [
