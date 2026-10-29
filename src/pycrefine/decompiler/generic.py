@@ -2621,6 +2621,34 @@ class DecompilerGeneric(DecompilerBase):
             k += 1
         return last
 
+    def _with_exit_handler_end(self, push_idx: int) -> Optional[int]:
+        """
+        The offset just past a `with` statement's exit handler, or None if the
+        PUSH_EXC_INFO at *push_idx* does not open one.
+
+        The handler is `PUSH_EXC_INFO; WITH_EXCEPT_START; POP_JUMP_IF_TRUE keep;
+        RERAISE; [COPY; POP_EXCEPT; RERAISE]; keep: POP_TOP; POP_EXCEPT; POP_TOP; POP_TOP`,
+        and ends with the `keep` tail that swallows the exception.
+        """
+        instrs = self.instructions
+        at = push_idx + 1
+        if at >= len(instrs) or instrs[at].opname != "WITH_EXCEPT_START":
+            return None
+        jump = next((ins for ins in instrs[at + 1:at + 4]
+                     if ins.opname.startswith("POP_JUMP") and "IF_TRUE" in ins.opname), None)
+        if jump is None:
+            return None
+        keep = self._get_jump_target(jump)
+        tail = [n for n, ins in enumerate(instrs) if ins.offset == keep]
+        if not tail:
+            return None
+        first = tail[0]
+        shape = ["POP_TOP", "POP_EXCEPT", "POP_TOP", "POP_TOP"]
+        if [ins.opname for ins in instrs[first:first + 4]] != shape:
+            return None
+        last = instrs[first + 3]
+        return last.offset + 2
+
     def _mark_implicit_returns_after_loop(self, jb: BytecodeInstruction, guard_offset: int, dup_jumps: set) -> None:
         """
         3.10/3.11: record the copies of the implicit `return None` that end a `while cond:` loop.
@@ -3119,7 +3147,11 @@ class DecompilerGeneric(DecompilerBase):
 
         def _is_with_cleanup_jump(instrs: list, idx: int) -> bool:
             """Return True when the jump at instrs[idx] is a with-block natural exit (POP_EXCEPT -> POP_TOP -> JUMP), not a user 'continue'."""
-            return idx >= 2 and instrs[idx - 1].opname == "POP_TOP" and instrs[idx - 2].opname == "POP_EXCEPT"
+            if idx >= 2 and instrs[idx - 1].opname == "POP_TOP" and instrs[idx - 2].opname == "POP_EXCEPT":
+                return True
+            # 3.11 ends the exit handler with `POP_TOP; POP_EXCEPT; POP_TOP; POP_TOP`
+            return (self.target_version < (3, 12) and idx >= 4
+                    and [i.opname for i in instrs[idx - 4:idx]] == ["POP_TOP", "POP_EXCEPT", "POP_TOP", "POP_TOP"])
 
         from collections import Counter
         jb_targets: Counter = Counter()
@@ -3258,6 +3290,13 @@ class DecompilerGeneric(DecompilerBase):
                 if ins.offset > pei_off and ins.opname == "PUSH_EXC_INFO":
                     end_off = ins.offset
                     break
+            # 3.11 lays a with-exit handler out inline, right after the normal path, so the
+            # code that follows the `with` statement comes before the next handler: the
+            # wrapper ends with its own cleanup, not with the next one. (3.12 and later move
+            # every handler to the end of the code, where the next handler is the boundary.)
+            cleanup_end = self._with_exit_handler_end(pei_idx) if self.target_version < (3, 12) else None
+            if cleanup_end is not None:
+                end_off = min(end_off, cleanup_end)
             for ins in instrs:
                 if pei_off <= ins.offset < end_off:
                     self.prescan.wrapper_body_suppress.add(ins.offset)
@@ -3491,6 +3530,10 @@ class DecompilerGeneric(DecompilerBase):
                     if e.target in by_offset and by_offset[e.target] + 1 < len(instrs)
                     and instrs[by_offset[e.target]].opname == "PUSH_EXC_INFO"
                     and instrs[by_offset[e.target] + 1].opname == "WITH_EXCEPT_START"}
+        inline_exit_handlers = {
+            h for h in handlers
+            if self.target_version < (3, 12) and self._with_exit_handler_end(by_offset[h]) is not None
+        }
         for handler in handlers:
             ranges = [e for e in entries if e.target == handler]
             if not ranges:
@@ -3500,8 +3543,10 @@ class DecompilerGeneric(DecompilerBase):
             # (an exit before it is an early one: `continue` in `if c: continue`, with
             # more body after). Handler code, which 3.11+ lays out after all ordinary
             # code, can be protected too (an inner try's handlers): it does not count.
-            cold = min((x.offset for x in instrs if x.opname == "PUSH_EXC_INFO" and x.offset > body_start),
-                       default=handler)
+            # (3.11 lays a with statement's own exit handler out inline, between the
+            # statement and the code after it, so those handlers are not that boundary.)
+            cold = min((x.offset for x in instrs if x.opname == "PUSH_EXC_INFO" and x.offset > body_start
+                        and x.offset not in inline_exit_handlers), default=handler)
             # Code in a try nested in the body is protected by that try's handler, whose
             # own code the with's handler protects: those ranges belong to the body too.
             body_ranges = [e for e in entries if e.target in _owned_handlers(handler, entries) and e.start < cold]

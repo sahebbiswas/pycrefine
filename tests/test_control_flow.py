@@ -1044,7 +1044,46 @@ if __name__ == "__main__":
     unittest.main()
 
 
-@unittest.skipIf(sys.version_info[:2] == (3, 11), "3.11 bytecode is not supported yet (#4)")
+class TestCodeAfterWith(unittest.TestCase):
+    """Code after a `with` statement is kept (#209).
+
+    3.11 lays the exit handler of a `with` out inline, between the statement and the code
+    that follows it; the decompiler used to treat everything up to the next handler (or the
+    end of the code) as that handler, so the rest of the function disappeared. Each case
+    runs the original and the decompiled code and compares what they print.
+    """
+
+    _SCRIPT = TestWhileTrueConditionalBreak._SCRIPT
+    _run = TestWhileTrueConditionalBreak.__dict__["_run"]
+    _assert_same_behavior = TestWhileTrueConditionalBreak._assert_same_behavior
+
+    GUARD = "class Guard:\n    def __init__(self, tag):\n        self.tag = tag\n    def __enter__(self):\n        print('enter', self.tag)\n        return self.tag\n    def __exit__(self, *exc):\n        print('exit', self.tag)\n        return False\n"
+
+    CASES = {
+        "module_level": "with Guard('a'):\n    print('body')\nprint('after')\n",
+        "as_target": "with Guard('a') as tag:\n    print('body', tag)\nprint('after', tag)\n",
+        "function_return": "def f():\n    with Guard('a'):\n        x = 1\n    y = 2\n    return x + y\nprint(f())\n",
+        "two_in_a_row": "def f():\n    with Guard('a'):\n        x = 1\n    with Guard('b'):\n        y = 2\n    return x + y\nprint(f())\n",
+        "statement_between": "def f():\n    with Guard('a'):\n        x = 1\n    print('between')\n    with Guard('b'):\n        y = 2\n    print('end')\n    return x + y\nprint(f())\n",
+        "nested": "def f():\n    with Guard('a'):\n        with Guard('b'):\n            x = 1\n        print('inner done')\n    return x\nprint(f())\n",
+        "in_if_else": "def f(c):\n    if c:\n        with Guard('a'):\n            print('then')\n    else:\n        with Guard('b'):\n            print('else')\n    return c\nprint(f(0), f(1))\n",
+        "break_in_for": "def f(xs):\n    out = []\n    for x in xs:\n        with Guard(x):\n            if x == 2:\n                break\n            out.append(x)\n    out.append('end')\n    return out\nprint(f([1, 2, 3]), f([1]))\n",
+        "continue_in_for": "def f(xs):\n    out = []\n    for x in xs:\n        with Guard(x):\n            if x == 2:\n                continue\n            out.append(x)\n        out.append('after')\n    return out\nprint(f([1, 2, 3]))\n",
+        "return_in_for": "def f(xs):\n    for x in xs:\n        with Guard(x):\n            if x == 2:\n                return 'found'\n    return 'none'\nprint(f([1, 2, 3]), f([1]))\n",
+        "break_in_while": "def f(n):\n    out = []\n    i = 0\n    while i < n:\n        i += 1\n        with Guard(i):\n            if i == 3:\n                break\n            out.append(i)\n    out.append('end')\n    return out\nprint(f(5), f(2))\n",
+        "statement_after_with_in_loop": "def f(xs):\n    out = []\n    for x in xs:\n        with Guard(x):\n            out.append(x)\n        out.append('after')\n    return out\nprint(f([1, 2]))\n",
+    }
+
+    def test_behavior_is_preserved(self):
+        for name, src in self.CASES.items():
+            with self.subTest(case=name):
+                self._assert_same_behavior(self.GUARD + src)
+
+    def test_the_code_after_the_with_is_in_the_output(self):
+        out = decompile(self.GUARD + self.CASES["two_in_a_row"])
+        assert_contains(out, "with Guard('b'):", "return x + y")
+
+
 class TestLoopContinueAndTailIf(unittest.TestCase):
     """`continue` and trailing `if`/`else` chains inside loops (issue #103).
 
@@ -1144,7 +1183,6 @@ class TestWhileConditionLoops(unittest.TestCase):
                 self.assertNotIn("pass", out)
 
 
-@unittest.skipIf(sys.version_info[:2] == (3, 11), "3.11 bytecode is not supported yet (#4)")
 class TestLoopContinueInTry(unittest.TestCase):
     """`continue` and `break` inside `try` bodies and handlers in loops (issue #106)."""
 
@@ -1177,7 +1215,6 @@ class TestLoopContinueInTry(unittest.TestCase):
         assert_contains(out, "continue")
 
 
-@unittest.skipIf(sys.version_info[:2] == (3, 11), "3.11 bytecode is not supported yet (#4)")
 class TestCodeAfterTryExceptInLoop(unittest.TestCase):
     """Statements after a `try`/`except` inside a loop body (issue #108).
 
