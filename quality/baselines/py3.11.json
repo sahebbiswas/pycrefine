@@ -100,7 +100,7 @@
     },
     "corpus/verify_scenes.py": {
       "kind": "source",
-      "status": "syntax_error",
+      "status": "compiles",
       "units": {
         "Assign: my_map = {": "compiles",
         "def api_1": "compiles",
@@ -113,7 +113,7 @@
         "def api_23": "compiles",
         "def api_24": "compiles",
         "def api_25": "compiles",
-        "def api_26": "syntax_error",
+        "def api_26": "compiles",
         "def api_3": "compiles",
         "def api_30": "compiles",
         "def api_31": "compiles",

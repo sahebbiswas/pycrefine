@@ -3269,6 +3269,11 @@ class DecompilerGeneric(DecompilerBase):
                         if isinstance(t, int) and t > e.start:
                             if merge is None or t < merge:
                                 merge = t
+                    # Code after the try inside the loop body: the body's normal path
+                    # jumps over the handler to it, before the loop's end.
+                    rejoin = self._try_rejoin_offset(body_end, e.target)
+                    if merge is not None and rejoin is not None and rejoin < merge:
+                        merge = rejoin
                 if merge is not None:
                     target = e.target
                     if merge not in self.prescan.push_exc_to_finally_merge:
@@ -3312,6 +3317,9 @@ class DecompilerGeneric(DecompilerBase):
                     if ins.offset > push_off and ins.opname == "PUSH_EXC_INFO":
                         handler_end = ins.offset
                         break
+                # The code where the try's paths rejoin is not part of its handlers.
+                if push_off < merge_off < handler_end:
+                    handler_end = merge_off
 
                 # Collect handler instructions (not already suppressed as finally body)
                 handler_instrs = [
@@ -3487,6 +3495,20 @@ class DecompilerGeneric(DecompilerBase):
                                     self.prescan.with_exit_suppress_offsets.add(off)
                                 break
                     break
+
+    def _try_rejoin_offset(self, body_end: int, handler: int) -> Optional[int]:
+        """
+        Where a try body's normal path continues: the target of the forward jump over
+        the handler that ends the body (None when the body does not end with one).
+        """
+        k = next((i for i, x in enumerate(self.instructions) if x.offset >= body_end), None)
+        if k is None:
+            return None
+        k = self._skip_nops(k)
+        if k >= len(self.instructions) or self.instructions[k].opname != "JUMP_FORWARD":
+            return None
+        target = self._get_jump_target(self.instructions[k])
+        return target if isinstance(target, int) and target > handler else None
 
     def _try_body_limit(self, handler: int, entries: list) -> int:
         """
