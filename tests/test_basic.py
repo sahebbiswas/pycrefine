@@ -224,6 +224,33 @@ class TestComprehensions(unittest.TestCase):
         )
 
 
+class TestOneItemTuple(unittest.TestCase):
+    """A tuple of one item keeps its comma (#234)."""
+
+    SRC = (
+        "class B:\n    pass\n"
+        "def f(B):\n    return (B,)\n"
+        "def g(x, A):\n"
+        "    seen = []\n"
+        "    for y in (A,):\n        seen.append(y)\n"
+        "    return isinstance(x, (A,)), seen\n"
+        "bases = (B,)\n"
+        "nested = ((B,),)\n"
+        "out = (f(1), g(2, int), [c.__name__ for c in bases], [[c.__name__ for c in t] for t in nested])\n"
+    )
+
+    def test_comma_is_kept(self):
+        out = decompile(self.SRC)
+        assert_contains(out, "return (B,)", "for y in (A,):", "isinstance(x, (A,))", "bases = (B,)")
+
+    def test_behavior_is_preserved(self):
+        ns = {}
+        exec(decompile(self.SRC), ns)
+        ref = {}
+        exec(self.SRC, ref)
+        self.assertEqual(ns["out"], ref["out"])
+
+
 if __name__ == "__main__":
     unittest.main()
 

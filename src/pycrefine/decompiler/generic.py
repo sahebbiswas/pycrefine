@@ -6717,7 +6717,8 @@ class DecompilerGeneric(DecompilerBase):
                 items.insert(0, str(self.stack.pop()))
 
         if opname == "BUILD_TUPLE":
-            self.stack.append(f"({', '.join(items)})")
+            # A one-item tuple needs its comma, or it is the item itself.
+            self.stack.append(f"({items[0]},)" if len(items) == 1 else f"({', '.join(items)})")
         elif opname == "BUILD_LIST":
             self.stack.append("[" + ", ".join(items) + "]")
         elif opname == "BUILD_SET":
