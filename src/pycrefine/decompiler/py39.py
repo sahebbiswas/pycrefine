@@ -532,7 +532,7 @@ class Decompiler39(DecompilerGeneric):
                 next_pc = self.pc
                 while (next_pc < len(self.instructions)
                        and self.instructions[next_pc].opname in (
-                           "CACHE", "RESUME", "NOP", "NOT_TAKEN", "ROT_TWO"
+                           "CACHE", "RESUME", "NOP", "NOT_TAKEN", "ROT_TWO", "ROT_THREE"
                 )):
                     next_pc += 1
                 
