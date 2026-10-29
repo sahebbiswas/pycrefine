@@ -187,6 +187,15 @@ _BASE_DISPATCH: Dict[str, str] = {
     "JUMP_IF_TRUE_OR_POP": "_op_jump_if_true_or_pop",
     "POP_JUMP_IF_NONE": "_op_conditional_jump",
     "POP_JUMP_IF_NOT_NONE": "_op_conditional_jump",
+    # 3.11 spells the direction in the name of each conditional jump.
+    "POP_JUMP_FORWARD_IF_FALSE": "_op_conditional_jump",
+    "POP_JUMP_FORWARD_IF_TRUE": "_op_conditional_jump",
+    "POP_JUMP_FORWARD_IF_NONE": "_op_conditional_jump",
+    "POP_JUMP_FORWARD_IF_NOT_NONE": "_op_conditional_jump",
+    "POP_JUMP_BACKWARD_IF_FALSE": "_op_conditional_jump",
+    "POP_JUMP_BACKWARD_IF_TRUE": "_op_conditional_jump",
+    "POP_JUMP_BACKWARD_IF_NONE": "_op_conditional_jump",
+    "POP_JUMP_BACKWARD_IF_NOT_NONE": "_op_conditional_jump",
     "JUMP_IF_NOT_EXC_MATCH": "_op_jump_if_not_exc_match",
 
     # Unary operators

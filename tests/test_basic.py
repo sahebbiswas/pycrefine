@@ -154,6 +154,20 @@ class TestComprehensions(unittest.TestCase):
         self.assertIn(ast.dump(ast.parse(out)), expected, out)
         self.assertNotRegex(out, r"\byield\b|_res\b")
 
+    def test_filters_of_every_polarity_keep_their_condition(self):
+        # 3.11 compiles each of these filters to a conditional jump back to the loop head (#192).
+        for src in (
+            "def f(xs):\n    return [x for x in xs if x > 1]\n",
+            "def f(xs):\n    return [x for x in xs if not x]\n",
+            "def f(xs):\n    return [x for x in xs if x is not None]\n",
+            "def f(xs):\n    return [x for x in xs if x is None]\n",
+            "def f(xs):\n    return {x for x in xs if x}\n",
+            "def f(xs):\n    return {x: 1 for x in xs if x > 1}\n",
+            "def f(xs):\n    return (x for x in xs if x > 1)\n",
+        ):
+            with self.subTest(src=src):
+                self._assert_roundtrip(src)
+
     def test_list_comprehension_yield(self):
         self._assert_roundtrip("def f(items):\n    return [x * 2 for x in items if x > 0]\n")
 
