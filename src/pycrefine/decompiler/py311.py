@@ -77,22 +77,23 @@ class Decompiler311Plus(DecompilerGeneric):
                     while (next_pc < len(self.instructions) and
                            self.instructions[next_pc].opname in ("CACHE", "RESUME", "NOT_TAKEN", "SWAP")):
                         # Allow SWAP between BINARY_OP and STORE_* (e.g. for STORE_SUBSCR)
-                        if self.instructions[next_pc].opname == "SWAP" and self.instructions[next_pc].arg not in (2, 3):
+                        if self.instructions[next_pc].opname == "SWAP" and self.instructions[next_pc].arg not in (2, 3, 4):
                             break
                         next_pc += 1
 
                     if (next_pc < len(self.instructions) and
                             self.instructions[next_pc].opname in (
-                                "STORE_NAME", "STORE_FAST", "STORE_GLOBAL", "STORE_ATTR", "STORE_DEREF", "STORE_SUBSCR"
+                                "STORE_NAME", "STORE_FAST", "STORE_GLOBAL", "STORE_ATTR", "STORE_DEREF", "STORE_SUBSCR",
+                                "STORE_SLICE"
                     )):
                         instr_store = self.instructions[next_pc]
                         if self._match_augassign_store(str(left), instr_store):
                             # Emit augmented assignment, skip the STORE
                             if instr_store.opname == "STORE_ATTR" and self.stack:
                                 self.stack.pop()  # pop defensive receiver
-                            if instr_store.opname == "STORE_SUBSCR" and len(self.stack) >= 2:
-                                self.stack.pop()
-                                self.stack.pop()
+                            held = {"STORE_SUBSCR": 2, "STORE_SLICE": 3}.get(instr_store.opname, 0)
+                            if held and len(self.stack) >= held:
+                                del self.stack[-held:]
                             self._append_reconstructed(f"{left} {inplace_op} {right}")
                             self.pc = next_pc + 1  # consume the STORE
                             return

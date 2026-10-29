@@ -230,6 +230,7 @@ _BASE_DISPATCH: Dict[str, str] = {
     # Deletes
     "DELETE_NAME": "_op_delete", "DELETE_FAST": "_op_delete", "DELETE_GLOBAL": "_op_delete",
     "DELETE_DEREF": "_op_delete",
+    "STORE_SLICE": "_op_store_slice",
     "DELETE_ATTR": "_op_delete_attr", "DELETE_SUBSCR": "_op_delete_subscr",
 
     # Error
@@ -905,7 +906,7 @@ class DecompilerGeneric(DecompilerBase):
 
     _ROTATION_SIZE = {"ROT_TWO": 2, "ROT_THREE": 3, "ROT_FOUR": 4}
     _STORE_OPS = ("STORE_FAST", "STORE_NAME", "STORE_GLOBAL", "STORE_DEREF", "STORE_ATTR", "STORE_SUBSCR",
-                  "STORE_FAST_STORE_FAST")
+                  "STORE_SLICE", "STORE_FAST_STORE_FAST")
 
     def _rotation_size(self, ins: BytecodeInstruction) -> int:
         if ins.opname == "SWAP":
@@ -932,7 +933,7 @@ class DecompilerGeneric(DecompilerBase):
             k += 1
         first = k
         while k < len(instrs) and (instrs[k].opname.startswith("LOAD_")
-                                   or instrs[k].opname in ("BINARY_SUBSCR", "CACHE", "NOP")
+                                   or instrs[k].opname in ("BINARY_SUBSCR", "BUILD_SLICE", "BINARY_SLICE", "CACHE", "NOP")
                                    or (instrs[k].opname == "BINARY_OP" and instrs[k].arg == 26)):
             k += 1
         if k >= len(instrs) or instrs[k].opname not in self._STORE_OPS:
@@ -958,7 +959,7 @@ class DecompilerGeneric(DecompilerBase):
                 if done >= size:
                     self.emit.tuple_assign = (len(self.reconstructed), reverse, k)
                     return
-            elif not (op.startswith("LOAD_") or op in ("BINARY_SUBSCR", "CACHE", "NOP") or self._rotation_size(instrs[k])
+            elif not (op.startswith("LOAD_") or op in ("BINARY_SUBSCR", "BUILD_SLICE", "BINARY_SLICE", "CACHE", "NOP") or self._rotation_size(instrs[k])
                       or (op == "BINARY_OP" and instrs[k].arg == 26)):
                 return
 
@@ -1513,7 +1514,7 @@ class DecompilerGeneric(DecompilerBase):
           ``STORE_ATTR``, ``STORE_DEREF``): store name must equal the last
           component of *left* (handles plain names and attribute chains).
         """
-        if instr_store.opname == "STORE_SUBSCR":
+        if instr_store.opname in ("STORE_SUBSCR", "STORE_SLICE"):
             return "[" in left and left.endswith("]")
         store_name = str(instr_store.argval)
         left_tail = left.split(".")[-1]
@@ -4394,7 +4395,7 @@ class DecompilerGeneric(DecompilerBase):
             key = self.stack.pop()
             container = self.stack.pop()
             val = self.stack.pop()
-            self._append_reconstructed(f"{container}[{key}] = {val}")
+            self._append_reconstructed(f"{self._receiver(container)}[{key}] = {val}")
 
         # ── imports ────────────────────────────────────────────────────
 
@@ -5319,6 +5320,17 @@ class DecompilerGeneric(DecompilerBase):
                 self.stack.append(text if origin is None
                                   else UnknownExpression(origin.reason, origin.opcode, origin.offset, text))
 
+    def _op_store_slice(self, _instr: BytecodeInstruction):
+        # Python 3.12+ STORE_SLICE pops: stop, start, container, value
+        if len(self.stack) >= 4:
+            stop = self.stack.pop()
+            start = self.stack.pop()
+            container = self.stack.pop()
+            val = self.stack.pop()
+            start = "" if str(start) == "None" else start
+            stop = "" if str(stop) == "None" else stop
+            self._append_reconstructed(f"{self._receiver(container)}[{start}:{stop}] = {val}")
+
     def _op_binary_slice(self, instr: BytecodeInstruction):
         # Python 3.11+ BINARY_SLICE pops: stop, start, container
         if len(self.stack) >= 3:
@@ -5331,7 +5343,7 @@ class DecompilerGeneric(DecompilerBase):
             if str(stop) == "None":
                 stop = ""
 
-            self.stack.append(f"{container}[{start}:{stop}]")
+            self.stack.append(f"{self._receiver(container)}[{start}:{stop}]")
 
         # INPLACE_* → augmented assignment
 
