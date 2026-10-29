@@ -3173,13 +3173,27 @@ class DecompilerGeneric(DecompilerBase):
 
         for target_off, count in jb_targets.items():
             if count >= 1 and target_off not in push_exc_offs:
-                t_ins = next((ins for ins in instrs if ins.offset == target_off), None)
+                t_idx = off2idx.get(target_off)
+                t_ins = instrs[t_idx] if t_idx is not None else None
                 if t_ins and t_ins.is_jump_target and t_ins.opname not in _TRY_LOOP_HEADS:
                     self.prescan.finally_merge_offsets.add(target_off)
                     if not self._has_exceptional_finally_copy(target_off):
                         # Handlers return to ordinary code after the `try`: there is
                         # no `finally`, only the handlers to place before that code.
                         self.prescan.except_only_merge_offsets.add(target_off)
+
+        # A try/except/finally outside any loop: the handlers leave by a forward jump to
+        # the inline `finally` body, which the handler wrapper repeats (3.11).
+        for k, jf in enumerate(instrs):
+            # (`except E as e` also unbinds the name between POP_EXCEPT and the jump)
+            if jf.opname != "JUMP_FORWARD" or not any(x.opname == "POP_EXCEPT" for x in instrs[max(0, k - 4):k]):
+                continue
+            target_off = self._get_jump_target(jf)
+            t_ins = next((ins for ins in instrs if ins.offset == target_off), None)
+            if (t_ins is not None and t_ins.is_jump_target and target_off not in push_exc_offs
+                    and target_off not in self.prescan.finally_merge_offsets
+                    and self._has_exceptional_finally_copy(target_off)):
+                self.prescan.finally_merge_offsets.add(target_off)
 
         # ── 4. Classify JUMP_BACKWARD as exc-handler exits ───────────────
         self.prescan.exc_handler_jump_offsets = set()
@@ -3251,6 +3265,9 @@ class DecompilerGeneric(DecompilerBase):
                     merge = body_end
                 elif e.end in self.prescan.finally_merge_offsets:
                     merge = e.end
+                elif self._try_rejoin_offset(body_end, e.target) in self.prescan.finally_merge_offsets:
+                    # The body's normal path jumps over the handlers to the inline `finally`.
+                    merge = self._try_rejoin_offset(body_end, e.target)
                 elif after_body is not None:
                     # Only the no-op that marks the end of the try body lies in between
                     # (a body ending in a loop leaves one before the inline finally).
@@ -3302,6 +3319,10 @@ class DecompilerGeneric(DecompilerBase):
             cleanup_end = self._with_exit_handler_end(pei_idx) if self.target_version < (3, 12) else None
             if cleanup_end is not None:
                 end_off = min(end_off, cleanup_end)
+            elif self.target_version < (3, 12):
+                # The handler ends with its own clean-up (`COPY 3; POP_EXCEPT; RERAISE 1`);
+                # what follows, in a loop, is the rest of the loop body.
+                end_off = min(end_off, self._wrapper_cleanup_end(pei_off, end_off))
             for ins in instrs:
                 if pei_off <= ins.offset < end_off:
                     self.prescan.wrapper_body_suppress.add(ins.offset)
@@ -3496,6 +3517,21 @@ class DecompilerGeneric(DecompilerBase):
                                 break
                     break
 
+    def _wrapper_cleanup_end(self, wrapper_off: int, default: int) -> int:
+        """
+        Offset just past the clean-up handler (`COPY 3; POP_EXCEPT; RERAISE 1`) of the
+        re-raise wrapper at *wrapper_off*, or *default* when it has none.
+        """
+        entries = self._exception_entries() or []
+        instrs = self.instructions
+        entry = next((e for e in entries if e.start == wrapper_off and e.lasti), None)
+        if entry is None:
+            return default
+        k = next((i for i, x in enumerate(instrs) if x.offset == entry.target), None)
+        if k is None or [x.opname for x in instrs[k:k + 3]] != ["COPY", "POP_EXCEPT", "RERAISE"]:
+            return default
+        return instrs[k + 2].offset + 2
+
     def _try_rejoin_offset(self, body_end: int, handler: int) -> Optional[int]:
         """
         Where a try body's normal path continues: the target of the forward jump over
@@ -3567,8 +3603,11 @@ class DecompilerGeneric(DecompilerBase):
             # code, can be protected too (an inner try's handlers): it does not count.
             # (3.11 lays a with statement's own exit handler out inline, between the
             # statement and the code after it, so those handlers are not that boundary.)
+            # (3.11 lays every handler out inline: an inner try's handlers come before this
+            # with's own, and the code after the try is still body.)
             cold = min((x.offset for x in instrs if x.opname == "PUSH_EXC_INFO" and x.offset > body_start
-                        and x.offset not in inline_exit_handlers), default=handler)
+                        and x.offset not in inline_exit_handlers
+                        and (self.target_version >= (3, 12) or x.offset > handler)), default=handler)
             # Code in a try nested in the body is protected by that try's handler, whose
             # own code the with's handler protects: those ranges belong to the body too.
             body_ranges = [e for e in entries if e.target in _owned_handlers(handler, entries) and e.start < cold]
@@ -4473,7 +4512,7 @@ class DecompilerGeneric(DecompilerBase):
         look = self.pc
         # Step 1: skip conditional jumps
         while (look < len(self.instructions)
-               and "POP_JUMP_IF" in self.instructions[look].opname):
+               and self.instructions[look].opname.startswith("POP_JUMP") and "_IF_" in self.instructions[look].opname):
             look += 1
         # Steps 2-5: scan binding zone
         for _ in range(8):
@@ -4520,6 +4559,8 @@ class DecompilerGeneric(DecompilerBase):
         # To avoid emitting a premature 'pass' or popping indentation before
         # the 'continue' is rendered, we check if the next instruction is a
         # jump that will be handled by our special logic.
+        if opname == "POP_EXCEPT" and self._is_exception_cleanup():
+            return  # `COPY 3; POP_EXCEPT; RERAISE 1`: the unwinding path, not the end of a clause
         if opname == "POP_EXCEPT" and self.emit.except_header_indents:
             next_is_handler_jump = False
             if self.pc < len(self.instructions):
@@ -4530,6 +4571,12 @@ class DecompilerGeneric(DecompilerBase):
             if not next_is_handler_jump and not self._defer_close_to_handler_return():
                 self._close_except_clause()
         pass  # cleanup suppression (_exc_cleanup_name) stays active until DELETE_NAME fires
+
+    def _is_exception_cleanup(self) -> bool:
+        """True when the POP_EXCEPT being handled is that of a `COPY 3; POP_EXCEPT; RERAISE 1` clean-up handler (3.11)."""
+        k = self.pc - 1  # index of *instr*
+        instrs = self.instructions
+        return (self.target_version < (3, 12) and 0 < k < len(instrs) - 1 and instrs[k - 1].opname == "COPY" and instrs[k + 1].opname == "RERAISE")
 
     def _close_except_clause(self) -> None:
         """End the innermost except clause: give an empty one a `pass`, and dedent."""

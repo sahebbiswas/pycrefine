@@ -8,24 +8,6 @@
           "get_with_conditional"
         ]
       }
-    },
-    {
-      "issue": 193,
-      "reason": "try/except/finally loses its finally block, and except E as e keeps the cleanup",
-      "tests": [
-        "tests/test_exceptions.py::TestExceptions::test_finally_body_after_except_not_before",
-        "tests/test_exceptions.py::TestExceptions::test_sequential_try_except_finally_blocks",
-        "tests/test_exceptions.py::TestExceptions::test_try_except_as",
-        "tests/test_exceptions.py::TestExceptions::test_try_except_as_no_cleanup_leak",
-        "tests/test_exceptions.py::TestExceptions::test_try_except_finally",
-        "tests/test_exceptions.py::TestExceptions::test_with_try_except_finally",
-        "tests/test_basic.py::TestWithBlockExits::test_try_statement_that_ends_the_with_body"
-      ],
-      "cases": {
-        "tests/test_control_flow.py::TestCodeAfterTryExceptInLoop::test_behavior_is_preserved": [
-          "for_try_finally_after"
-        ]
-      }
     }
   ],
   "3.10": [
