@@ -1,6 +1,7 @@
 """Version-independent decompiler: prescans, opcode handlers and block management."""
 import ast
 import dis
+import keyword
 import re
 import sys
 import types
@@ -4350,6 +4351,29 @@ class DecompilerGeneric(DecompilerBase):
 
         # ── stores ─────────────────────────────────────────────────────
 
+    def _store_marker(self, val: Any, name: str) -> bool:
+        """
+        Handle a store whose value is an internal marker (an import, or a 3.14 annotation
+        function) instead of an expression. True when the store has been dealt with.
+        """
+        if not isinstance(val, tuple) or not val:
+            return False
+        if val[0] == "_from_import_done" and len(val) == 3:
+            # `from m import sym [as name]`: the alias is only known here.
+            _, sym, stmt = val
+            self._append_reconstructed(stmt if name == sym else f"{stmt} as {name}")
+            return True
+        if val[0] == "_import_as" and len(val) == 3:
+            self._append_reconstructed(f"import {val[1]} as {name}")      # `import a.b as name`
+            return True
+        if val[0] == "_annotate" and len(val) == 2:
+            # 3.14: the lazily evaluated annotations of this body (``x: int = 1``).
+            self.emit.annotations = list(val[1])
+            if name == "__annotate_func__":
+                self._flush_class_annotations()
+            return True
+        return False
+
     def _op_store(self, instr: BytecodeInstruction):
         opname = instr.opname
         # Suppress the 'as e' STORE that was already emitted in the except header
@@ -4362,14 +4386,7 @@ class DecompilerGeneric(DecompilerBase):
             val = self.stack.pop()
             # Suppress: IMPORT_FROM already emitted `from X import Y`
             name = str(instr.argval)
-            if isinstance(val, tuple) and len(val) == 3 and val[0] == "_from_import_done":
-                # `from m import sym [as name]`: the alias is only known here.
-                _, sym, stmt = val
-                self._append_reconstructed(stmt if name == sym else f"{stmt} as {name}")
-                return
-            if isinstance(val, tuple) and len(val) == 3 and val[0] == "_import_as":
-                # `import a.b as name`
-                self._append_reconstructed(f"import {val[1]} as {name}")
+            if self._store_marker(val, name):
                 return
             # Suppress except-cleanup: `e = None` before `del e`
             if instr.offset in self.prescan.exc_cleanup_offsets:
@@ -4377,7 +4394,7 @@ class DecompilerGeneric(DecompilerBase):
             if name in (
                 "__module__", "__qualname__", "__firstlineno__",
                 "__classdictcell__", "__classcell__",
-                "__static_attributes__", "__classdict__",
+                "__static_attributes__", "__classdict__", "__conditional_annotations__",
             ):
                 return
             if isinstance(val, tuple) and len(val) >= 2 and val[0] == "import":
@@ -4412,12 +4429,27 @@ class DecompilerGeneric(DecompilerBase):
 
         # STORE_SUBSCR (x[key] = val)
 
+    @staticmethod
+    def _is_name_literal(text: Any) -> bool:
+        """True for the source of a string literal that is an identifier ('x')."""
+        try:
+            value = ast.literal_eval(str(text))
+        except (ValueError, SyntaxError):
+            return False
+        return isinstance(value, str) and value.isidentifier() and not keyword.iskeyword(value)
+
     def _op_store_subscr(self, instr: BytecodeInstruction):
         opname = instr.opname
         if len(self.stack) >= 3:
             key = self.stack.pop()
             container = self.stack.pop()
             val = self.stack.pop()
+            if (str(container) == "__annotations__" and self._is_name_literal(key)
+                    and not self.code_obj.co_flags & 0x1):  # 0x1 = CO_OPTIMIZED, a function body
+                # SETUP_ANNOTATIONS bodies (3.9 to 3.13) record ``name: annotation`` this way.
+                # A function has no such body: there it is an ordinary dict named __annotations__.
+                self._emit_annotation(ast.literal_eval(str(key)), str(val))
+                return
             self._append_reconstructed(f"{self._receiver(container)}[{key}] = {val}")
 
         # ── imports ────────────────────────────────────────────────────
@@ -5080,6 +5112,11 @@ class DecompilerGeneric(DecompilerBase):
 
         if code_obj_val is not None and isinstance(code_obj_val, tuple) and code_obj_val[0] == "code":
             inner_code = code_obj_val[1]
+            if inner_code.co_name == "__annotate__":
+                found = self._parse_annotate_code(inner_code)
+                if found is not None:
+                    self.stack.append(("_annotate", found))
+                    return
             positional = list(inner_code.co_varnames[: inner_code.co_argcount])
 
             # CO_VARARGS (0x04): function accepts *args — stored in
@@ -7004,7 +7041,111 @@ class DecompilerGeneric(DecompilerBase):
         self._collection_mutator(instr, "list")
 
     def _op_set_add(self, instr: BytecodeInstruction):
+        depth = int(instr.arg) if instr.arg is not None else 1
+        if len(self.stack) > depth and str(self.stack[-depth - 1]) == "__conditional_annotations__":
+            # 3.14: this statement ran an annotation (``y: str``), whose number is the value.
+            number = str(self.stack.pop())
+            self.stack[-depth] = "None"          # the POP_TOP that follows discards it
+            known = next(((name, text) for index, name, text in self.emit.annotations
+                          if number == str(index)), None)
+            if known is not None:
+                self._emit_annotation(*known)
+            else:
+                # A class body stores ``__annotate__`` last: remember where this one ran.
+                self.emit.annotation_marks.append((number, len(self.reconstructed) - 1, self.indent_level))
+            return
         self._collection_mutator(instr, "set")
+
+    def _emit_annotation(self, name: str, text: str) -> None:
+        """
+        Write ``name: text``, joined to the assignment just before it (``name = v``), which is
+        how ``name: text = v`` runs: the value is stored, then the annotation is evaluated.
+        """
+        prefix = "    " * self.indent_level
+        previous = self.reconstructed[-1] if self.reconstructed else ""
+        head = f"{prefix}{name} = "
+        if previous.startswith(head) and not previous[len(prefix):].startswith(" "):
+            self.reconstructed[-1] = f"{prefix}{name}: {text} = {previous[len(head):]}"
+        else:
+            self._append_reconstructed(f"{name}: {text}")
+
+    def _flush_class_annotations(self) -> None:
+        """
+        3.14 class bodies store ``__annotate__`` after the last statement, with no record of
+        where each annotation stood. Join each unconditional annotation to the assignment of
+        its name at the body's own level, and put the others (``y: str``) before the next
+        annotated line, which keeps the order of ``__annotations__``.
+        """
+        lines = self.reconstructed
+        for number, at, level in reversed(self.emit.annotation_marks):
+            found = next(((name, text) for index, name, text in self.emit.annotations
+                          if number == str(index)), None)
+            if found is None:
+                continue
+            name, text = found
+            where = "    " * level
+            if 0 <= at < len(lines) and lines[at].startswith(f"{where}{name} = ") \
+                    and not lines[at][len(where):].startswith(" "):
+                lines[at] = f"{where}{name}: {text} = {lines[at][len(where) + len(name) + 3:]}"
+            else:
+                lines.insert(at + 1, f"{where}{name}: {text}")
+        self.emit.annotation_marks.clear()
+        prefix = "    " * self.indent_level
+        pending = [(name, text) for index, name, text in self.emit.annotations if index is None]
+        self.emit.annotations = [a for a in self.emit.annotations if a[0] is not None]
+        slots = []                       # per annotation: index of its assignment line, or None
+        for name, _ in pending:
+            head = f"{prefix}{name} = "
+            at = next((k for k in range(len(lines) - 1, -1, -1)
+                       if lines[k].startswith(head) and not lines[k][len(prefix):].startswith(" ")), None)
+            slots.append(at)
+        for (name, text), at in zip(pending, slots):
+            if at is not None:
+                lines[at] = f"{prefix}{name}: {text} = {lines[at][len(prefix) + len(name) + 3:]}"
+        # Bare annotations go in front of the next annotated assignment, else at the end.
+        inserts = []
+        for k, ((name, text), at) in enumerate(zip(pending, slots)):
+            if at is None:
+                following = next((slots[j] for j in range(k + 1, len(slots)) if slots[j] is not None), None)
+                inserts.append((len(lines) if following is None else following, k, f"{prefix}{name}: {text}"))
+        for position, _, line in sorted(inserts, key=lambda t: (-t[0], -t[1])):
+            lines.insert(position, line)
+
+    def _parse_annotate_code(self, code) -> Optional[List[Tuple[Optional[int], str, str]]]:
+        """
+        Read the 3.14 ``__annotate__`` function of a module or class body as a list of
+        ``(number or None, name, annotation text)``. The number is set for annotations that
+        are tracked in ``__conditional_annotations__``. None when the code has another shape.
+        """
+        sub = _pick_decompiler_class(self)(code, self.indent_level, self.beautification_level,
+                                           target_version=self.target_version)
+        sub._disassemble()
+        ins = [i for i in sub.instructions if i.opname not in ("CACHE", "NOP", "NOT_TAKEN", "RESUME",
+                                                                "COPY_FREE_VARS", "TO_BOOL")]
+        start = next((k for k, i in enumerate(ins) if i.opname == "BUILD_MAP"), None)
+        if start is None:
+            return None
+        found: List[Tuple[Optional[int], str, str]] = []
+        begin = start + 1
+        for k in range(begin, len(ins)):
+            if ins[k].opname != "STORE_SUBSCR":
+                continue
+            piece = ins[begin:k]
+            begin = k + 1
+            if (len(piece) < 3 or piece[-2].opname != "COPY" or piece[-1].opname != "LOAD_CONST"
+                    or not isinstance(piece[-1].argval, str)):
+                return None
+            name, piece = piece[-1].argval, piece[:-2]
+            number = None
+            if (len(piece) >= 4 and piece[1].argval == "__conditional_annotations__"
+                    and piece[2].opname == "CONTAINS_OP" and piece[3].opname.startswith("POP_JUMP")):
+                number, piece = piece[0].argval, piece[4:]
+            piece = [i for i in piece if not (i.opname.startswith("LOAD_") and i.argval == "__classdict__")]
+            texts = self._eval_comp_slice(piece, 1) if piece else None
+            if texts is None or not isinstance(number, (int, type(None))):
+                return None
+            found.append((number, name, texts[0]))
+        return found or None
 
     def _op_set_update(self, instr: BytecodeInstruction):
         # Python 3.9+ frozenset literals generate: BUILD_SET 0, LOAD_CONST frozenset, SET_UPDATE 1
