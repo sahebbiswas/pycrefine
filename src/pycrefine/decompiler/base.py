@@ -249,22 +249,22 @@ class DecompilerBase:
 
     def _wrap_negative_literal(self, value: Any) -> str:
         """
-        Wrap negative numeric literals in parentheses to ensure valid syntax for attribute access or method calls.
+        Parenthesize a numeric literal that is the receiver of an attribute access or method call.
 
-        Example: -1 -> (-1). bit_length()
+        A negative number needs it for precedence (``(-1).bit_length()``) and an integer for
+        the tokenizer, which reads ``1024.`` as the start of a float (``(1024).to_bytes()``).
+        Non-negative floats and imaginary numbers (``1.5.hex()``, ``2j.real``) are fine as they
+        are; a negative one is parenthesized like any other negative number.
         """
         s = str(value)
-        if s.startswith("-"):
+        if s.startswith("-") or s.isdigit():
             try:
                 evaluated = ast.literal_eval(s)
-                if isinstance(evaluated, (int, float, complex)):
-                    return f"({s})"
+                if isinstance(evaluated, (int, float, complex)) and not isinstance(evaluated, bool):
+                    if s.startswith("-") or isinstance(evaluated, int):
+                        return f"({s})"
             except (ValueError, SyntaxError):
                 pass
-        # Also wrap variables with explicit unary minus like (-x) if needed?
-        # Only focus on numeric/complex literals that break attr access:
-        if s.startswith("(-") and s.endswith(")"):
-            return s
         return s
 
     def _module_level_return_none(self) -> bool:

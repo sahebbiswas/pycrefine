@@ -378,6 +378,28 @@ class TestSliceAssignment(unittest.TestCase):
         compile(out, "<decompiled>", "exec")
 
 
+class TestIntegerLiteralReceiver(unittest.TestCase):
+    """An integer literal followed by `.name` keeps its parentheses (#182)."""
+
+    SRC = (
+        "def f(n):\n    return n.bit_length() + (255).bit_length()\n"
+        "out = ((1024).to_bytes(2, 'little'), (3).bit_length(), 1.5.hex(), (-5).bit_length(),\n"
+        "       (16).real, (10).__add__(2), (1e3).is_integer(), (2j).real, f(3), (7).conjugate())\n"
+    )
+
+    def test_parentheses_are_kept(self):
+        out = decompile(self.SRC)
+        assert_contains(out, "(1024).to_bytes(", "(3).bit_length()", "(255).bit_length()", "(-5).bit_length()")
+        compile(out, "<decompiled>", "exec")
+
+    def test_behavior_is_preserved(self):
+        ns = {}
+        exec(decompile(self.SRC), ns)
+        ref = {}
+        exec(self.SRC, ref)
+        self.assertEqual(ns["out"], ref["out"])
+
+
 if __name__ == "__main__":
     unittest.main()
 
