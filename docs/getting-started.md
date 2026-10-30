@@ -12,7 +12,7 @@ pycrefine needs Python 3.9 or later and has no runtime dependencies. Pick one:
 | pip, in a virtual environment | `python -m pip install pycrefine` | you also want `import pycrefine` |
 | pipx | `pipx install pycrefine` | you only want the `pycrefine` command, isolated from your projects |
 | uv | `uvx pycrefine file.pyc` | you want to run it once without installing anything |
-| From GitHub | `python -m pip install "git+https://github.com/sahebbiswas/pycrefine"` | you want the latest `main`, or PyPI has no release yet |
+| From GitHub | `python -m pip install "git+https://github.com/sahebbiswas/pycrefine"` | you want fixes on `main` that PyPI does not have yet |
 | A source checkout | `git clone https://github.com/sahebbiswas/pycrefine` then `python pycrefine.py file.pyc` | you are developing pycrefine (see [CONTRIBUTING.md](../CONTRIBUTING.md)) |
 
 Check the install:
