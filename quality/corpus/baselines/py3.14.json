@@ -34,7 +34,7 @@
     "features/modern_generics": "syntax_error",
     "features/modern_match": "syntax_error",
     "features/modern_walrus": "mismatch",
-    "features/module_globals": "mismatch",
+    "features/module_globals": "equivalent",
     "features/opt_asserts_debug": "equivalent",
     "features/unpack_assign": "equivalent",
     "features/with_context": "syntax_error",

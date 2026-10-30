@@ -654,14 +654,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "unsupported",
-      "limitations": [
-        {
-          "issue": 199,
-          "versions": "all",
-          "summary": "import a.b as c"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "features/opt_asserts_debug",

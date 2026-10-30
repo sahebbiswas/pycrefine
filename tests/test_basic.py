@@ -460,6 +460,48 @@ class TestUnpackingIntoAttributesAndSubscripts(unittest.TestCase):
         self.assertEqual(len(calls), 1)
 
 
+class TestImportAliases(unittest.TestCase):
+    """`as` names in import statements are kept (#199)."""
+
+    SRC = (
+        "import os as o\n"
+        "import os.path as p\n"
+        "import xml.dom.minidom as md\n"
+        "import os.path\n"
+        "from os import path as q\n"
+        "from os import path as r, sep as s\n"
+        "from os import path, sep\n"
+        "from collections import abc as cabc, OrderedDict\n"
+        "import json, re as regex\n"
+        "def f():\n"
+        "    import os.path as lp\n"
+        "    from os import path as lq\n"
+        "    import sys as ss\n"
+        "    return lp.sep, lq.sep, ss.maxsize > 0\n"
+        "out = (o.sep, p.sep, md.__name__, q.sep, r.sep, s, path.sep, sep, cabc.__name__,\n"
+        "       OrderedDict.__name__, json.__name__, regex.__name__, f())\n"
+    )
+
+    def test_aliases_are_kept(self):
+        out = decompile(self.SRC)
+        assert_contains(out, "import os as o", "import os.path as p", "import xml.dom.minidom as md",
+                        "path as q", "path as r", "sep as s", "abc as cabc", "re as regex",
+                        "import os.path as lp", "from os import path as lq", "import sys as ss")
+
+    def test_plain_dotted_import_has_no_alias(self):
+        out = decompile("import os.path\nimport xml.dom\nx = os.path.sep\n")
+        self.assertNotIn(" as ", out)
+
+    def test_behavior_is_preserved(self):
+        ns = {}
+        exec(decompile(self.SRC), ns)
+        ref = {}
+        exec(self.SRC, ref)
+        self.assertEqual(ns["out"], ref["out"])
+        for name in ("o", "p", "md", "q", "r", "s", "cabc", "regex"):
+            self.assertIn(name, ns)
+
+
 if __name__ == "__main__":
     unittest.main()
 

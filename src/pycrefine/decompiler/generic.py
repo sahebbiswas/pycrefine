@@ -4359,9 +4359,16 @@ class DecompilerGeneric(DecompilerBase):
         if self.stack:
             val = self.stack.pop()
             # Suppress: IMPORT_FROM already emitted `from X import Y`
-            if isinstance(val, tuple) and len(val) == 2 and val[0] == "_from_import_done":
-                return
             name = str(instr.argval)
+            if isinstance(val, tuple) and len(val) == 3 and val[0] == "_from_import_done":
+                # `from m import sym [as name]`: the alias is only known here.
+                _, sym, stmt = val
+                self._append_reconstructed(stmt if name == sym else f"{stmt} as {name}")
+                return
+            if isinstance(val, tuple) and len(val) == 3 and val[0] == "_import_as":
+                # `import a.b as name`
+                self._append_reconstructed(f"import {val[1]} as {name}")
+                return
             # Suppress except-cleanup: `e = None` before `del e`
             if instr.offset in self.prescan.exc_cleanup_offsets:
                 return
@@ -4375,7 +4382,10 @@ class DecompilerGeneric(DecompilerBase):
                 _, imp_name, fromlist, level = val
                 dots = '.' * int(level) if level and int(level) > 0 else ''
                 if str(fromlist) in ("None", "()"):
-                    self._append_reconstructed(f"import {dots}{imp_name}")
+                    # `import a.b` binds `a`; any other name is an alias (`import os as o`).
+                    top = str(imp_name).split(".", maxsplit=1)[0]
+                    alias = "" if name == top else f" as {name}"
+                    self._append_reconstructed(f"import {dots}{imp_name}{alias}")
                 else:
                     inames = str(fromlist).strip("()").replace("'", "").replace(" ", "")
                     mod_part = f" {imp_name}" if imp_name else ""
@@ -4438,9 +4448,15 @@ class DecompilerGeneric(DecompilerBase):
             dots = '.' * int(level) if level and int(level) > 0 else ''
             mod_part = f" {mod_name}" if mod_name else ""
             sym = str(instr.argval)
-            self._append_reconstructed(f"from {dots}{mod_part} import {sym}")
-            # Push a sentinel so STORE_NAME for this symbol is suppressed
-            self.stack.append(("_from_import_done", sym))
+            if str(imp_tuple[2]) == "None":
+                # `import a.b as c`: IMPORT_FROM walks down the dotted name. The module is
+                # what ends up bound, so mark it once and keep the marker through the walk.
+                self.stack.append(("_import_as", mod_name, 0))
+                return
+            # The STORE that follows names the symbol (`as` when it differs): it emits the line.
+            self.stack.append(("_from_import_done", sym, f"from {dots}{mod_part} import {sym}"))
+        elif self.stack and isinstance(self.stack[-1], tuple) and self.stack[-1][0] == "_import_as":
+            self.stack.append(self.stack[-1])
         else:
             self.stack.append(instr.argval)
 
@@ -5278,7 +5294,7 @@ class DecompilerGeneric(DecompilerBase):
             # import module tuples (consumed by IMPORT_FROM already),
             # and internal sentinels.
             if isinstance(stmt, tuple) and stmt[0] in (
-                "code", "func", "import", "_from_import_done"
+                "code", "func", "import", "_from_import_done", "_import_as"
             ):
                 return
             if str(stmt) in ("None", "_exc_info", "_exc_match", "_exc"):
