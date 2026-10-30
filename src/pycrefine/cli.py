@@ -1,7 +1,10 @@
 """Command-line interface."""
 import argparse
+import importlib
+import os
 import sys
 import traceback
+from typing import Any, Optional, Sequence
 from .diagnostics import DecompilationError, comment_block
 from .loader import get_decompiler
 
@@ -16,10 +19,59 @@ ISSUES_URL = "https://github.com/sahebbiswas/pycrefine/issues"
 # CLI
 # ---------------------------------------------------------------------------
 
+def _version() -> str:
+    """The package version. Looked up on demand: the package imports this module, so a top-level import would be circular."""
+    return str(importlib.import_module(__package__ or "pycrefine").__version__)
+
+
+def _silence_stdout() -> None:
+    """Point stdout at the null device, so the flush at interpreter exit cannot fail again."""
+    try:
+        target = sys.stdout.fileno()
+    except (OSError, ValueError, AttributeError):  # stdout is not a real file, so there is nothing to flush
+        return
+    try:
+        null = os.open(os.devnull, os.O_WRONLY)
+    except OSError:  # no null device to use (descriptors exhausted, say): the exit status still tells the story
+        return
+    try:
+        os.dup2(null, target)
+    except OSError:
+        pass
+    finally:
+        os.close(null)
+
+
+def _write_stdout(text: str, what: str = "the decompiled source") -> None:
+    """Print *text*; a failure to write (a closed pipe, say) exits with status 1 and its own message."""
+    try:
+        print(text)
+        sys.stdout.flush()
+    except OSError as e:  # the input was read fine, so this is not a read error
+        print(f"Error: could not write {what} to standard output: {e.strerror or e}", file=sys.stderr)
+        _silence_stdout()
+        sys.exit(1)
+
+
+class _VersionAction(argparse.Action):
+    """``--version``, written through ``_write_stdout`` so a closed pipe gives the same one-line error."""
+
+    def __init__(self, option_strings: Sequence[str], dest: str = argparse.SUPPRESS,
+                 default: str = argparse.SUPPRESS, help: Optional[str] = None) -> None:  # pylint: disable=redefined-builtin
+        super().__init__(option_strings=option_strings, dest=dest, default=default, nargs=0, help=help)
+
+    def __call__(self, parser: argparse.ArgumentParser, namespace: argparse.Namespace, values: Any,
+                 option_string: Optional[str] = None) -> None:
+        _write_stdout(f"pycrefine {_version()}", "the version")
+        parser.exit()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
+        prog="pycrefine",
         description="A Python .pyc decompiler that reconstructs readable source code from compiled bytecode."
     )
+    parser.add_argument("--version", action=_VersionAction, help="Print the version and exit.")
     parser.add_argument("input", help="The .pyc file to decompile")
     parser.add_argument(
         "-o", "--output",
@@ -62,7 +114,7 @@ def main() -> None:
                 sys.exit(1)
         else:
             if output_text and output_text.strip():
-                print(output_text)
+                _write_stdout(output_text)
             else:
                 print(f"Warning: Decompiler returned no source code for {args.input}", file=sys.stderr)
                 sys.exit(1)
@@ -74,7 +126,7 @@ def main() -> None:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     except OSError as e:
-        print(f"Error: {e}", file=sys.stderr)
+        print(f"Error: cannot read {e.filename or args.input}: {e.strerror or e}", file=sys.stderr)
         sys.exit(1)
     except Exception as e:  # broad: last-resort guard so a decompiler bug never ends in a bare traceback  # pylint: disable=broad-exception-caught
         if args.debug:

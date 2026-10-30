@@ -5,6 +5,8 @@ import unittest
 
 from .test_helpers import _run39_full_impl, assert_contains, decompile
 
+_CRLF = 0x0A0D << 16   # the last two bytes of every CPython magic number
+
 
 class TestEdgeCases(unittest.TestCase):
     def test_empty_module(self):
@@ -108,7 +110,7 @@ class TestErrorHandling(unittest.TestCase):
         """A file with an unrecognised magic number raises ValueError with a descriptive message."""
         import struct
         with tempfile.NamedTemporaryFile(suffix=".pyc", delete=False) as f:
-            f.write(struct.pack("<I", 0xDEADBEEF))
+            f.write(struct.pack("<I", 0x0A0DFFFF))      # a magic number ending in \r\n, for no known version
             f.write(b"\x00" * 12)
             path = f.name
         try:
@@ -124,7 +126,7 @@ class TestErrorHandling(unittest.TestCase):
         import struct
         with tempfile.NamedTemporaryFile(suffix=".pyc", delete=False) as f:
             # 3310 is Python 3.4. This is unsupported.
-            f.write(struct.pack("<I", 3310))
+            f.write(struct.pack("<I", 3310 | _CRLF))
             f.write(b"\x00" * 12)
             path = f.name
 
@@ -143,7 +145,7 @@ class TestErrorHandling(unittest.TestCase):
         """ValueError for corrupted marshal data includes the inferred version name."""
         import struct
         with tempfile.NamedTemporaryFile(suffix=".pyc", delete=False) as f:
-            f.write(struct.pack("<I", 3425))   # 3.9: readable on any host
+            f.write(struct.pack("<I", 3425 | _CRLF))   # 3.9: readable on any host
             f.write(b"\x00" * 12)
             f.write(b"GARBAGE")
             path = f.name
