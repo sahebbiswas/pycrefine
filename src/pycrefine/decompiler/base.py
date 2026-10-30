@@ -42,6 +42,7 @@ class DecompilerBase:
         self._accum_counter = 0
         # Names _fresh_accum_name has already handed out for this code object.
         self._issued_temp_names: Set[str] = set()
+        self._unpack_groups: List[List[str]] = []
         # Loop-item placeholders _loop_placeholder chose because "_item" was already in use.
         self._loop_placeholder_names: Set[str] = set()
         self._code_names_cache: Optional[Set[str]] = None

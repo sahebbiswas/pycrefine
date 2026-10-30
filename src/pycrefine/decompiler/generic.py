@@ -4248,6 +4248,19 @@ class DecompilerGeneric(DecompilerBase):
             getattr(self, handler_name)(instr)
         else:
             self._op_unknown(instr)
+        if self._unpack_groups:
+            self._release_unpack_temporaries()
+
+    def _release_unpack_temporaries(self) -> None:
+        """Delete the temporaries of a fallback unpacking once its last target has been stored.
+
+        The original program never bound them, so they must not stay visible to `locals()`,
+        `vars()` or a class body's namespace.
+        """
+        live = {str(v) for v in self.stack if isinstance(v, _UnpackAccessor)}
+        for group in [g for g in self._unpack_groups if not live.intersection(g)]:
+            self._unpack_groups.remove(group)
+            self._append_reconstructed(f"del {', '.join(group)}")
 
     def _check_jump_targets(self) -> None:
         """Report a jump that lands where no instruction starts: the control flow cannot be followed."""
@@ -4484,8 +4497,14 @@ class DecompilerGeneric(DecompilerBase):
                 self._append_reconstructed(f"{lhs} = {val_str}")
                 accessors = [*head, star, *tail]
             else:
-                accessors = [f"{val_str}[{i}]" for i in range(n)]
+                # The same for a plain unpacking whose targets cannot be written inline (an
+                # attribute or a subscript among them): unpack once into temporaries, so an
+                # iterator works, the value is evaluated once and a wrong count raises the
+                # ValueError of the original instead of an IndexError or nothing at all.
+                accessors = [self._fresh_accum_name("_unpack") for _ in range(n)]
+                self._append_reconstructed(f"{', '.join(accessors)}{',' if n == 1 else ''} = {val_str}")
             self.stack.extend(reversed([_UnpackAccessor(a) for a in accessors]))
+            self._unpack_groups.append(list(accessors))
 
         # ── subscript / attr ───────────────────────────────────────────
 

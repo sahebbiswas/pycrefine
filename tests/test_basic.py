@@ -383,13 +383,15 @@ class TestIntegerLiteralReceiver(unittest.TestCase):
 
     SRC = (
         "def f(n):\n    return n.bit_length() + (255).bit_length()\n"
+        "def g(c, n):\n    return (9).bit_length() if c else n.bit_length()\n"
         "out = ((1024).to_bytes(2, 'little'), (3).bit_length(), 1.5.hex(), (-5).bit_length(),\n"
-        "       (16).real, (10).__add__(2), (1e3).is_integer(), (2j).real, f(3), (7).conjugate())\n"
+        "       (16).real, (10).__add__(2), (1e3).is_integer(), (2j).real, f(3), (7).conjugate(), g(True, 5), g(False, 5))\n"
     )
 
     def test_parentheses_are_kept(self):
         out = decompile(self.SRC)
-        assert_contains(out, "(1024).to_bytes(", "(3).bit_length()", "(255).bit_length()", "(-5).bit_length()")
+        assert_contains(out, "(1024).to_bytes(", "(3).bit_length()", "(255).bit_length()", "(-5).bit_length()",
+                        "(9).bit_length()")
         compile(out, "<decompiled>", "exec")
 
     def test_behavior_is_preserved(self):
@@ -398,6 +400,64 @@ class TestIntegerLiteralReceiver(unittest.TestCase):
         ref = {}
         exec(self.SRC, ref)
         self.assertEqual(ns["out"], ref["out"])
+
+
+class TestUnpackingIntoAttributesAndSubscripts(unittest.TestCase):
+    """`o.a, o.b = it` unpacks once, so iterators and wrong counts behave as in the source (#188)."""
+
+    SRC = (
+        "class O:\n    pass\n"
+        "def attrs(it):\n    o = O()\n    o.a, o.b = it\n    return o.a, o.b\n"
+        "def subscripts(it):\n    d = {}\n    d['x'], d['y'] = it\n    return d\n"
+        "def mixed(it):\n    o = O()\n    lst = [0]\n    o.p, (lst[0], o.q) = it\n    return o.p, lst, o.q\n"
+        "def single(it):\n    o = O()\n    o.a, = it\n    return o.a\n"
+        "def loop(pairs):\n    o = O()\n    seen = []\n    for o.a, o.b in pairs:\n        seen.append((o.a, o.b))\n    return seen\n"
+        "def called(make):\n    o = O()\n    d = {}\n    o.a, d['b'] = make()\n    return o.a, d\n"
+    )
+
+    def _namespaces(self):
+        ns = {}
+        exec(decompile(self.SRC), ns)
+        ref = {}
+        exec(self.SRC, ref)
+        return ns, ref
+
+    def test_iterators_and_nesting_work(self):
+        ns, ref = self._namespaces()
+        cases = (
+            ("attrs", lambda: iter([1, 2])), ("attrs", lambda: (3, 4)),
+            ("subscripts", lambda: iter("ab")),
+            ("mixed", lambda: [1, iter([2, 3])]),
+            ("single", lambda: iter([9])),
+            ("loop", lambda: iter([(1, 2), (3, 4)])),
+        )
+        for name, make in cases:
+            with self.subTest(function=name):
+                self.assertEqual(ns[name](make()), ref[name](make()))
+
+    def test_wrong_counts_raise_the_same_error(self):
+        ns, ref = self._namespaces()
+        for name, value in (("attrs", [1, 2, 3]), ("attrs", [1]), ("single", [1, 2]), ("subscripts", "abc")):
+            with self.subTest(function=name, value=value):
+                with self.assertRaises(ValueError) as expected:
+                    ref[name](iter(value))
+                with self.assertRaises(ValueError) as actual:
+                    ns[name](iter(value))
+                self.assertEqual(str(actual.exception), str(expected.exception))
+
+    def test_source_is_evaluated_once(self):
+        out = decompile(self.SRC)
+        self.assertNotIn("it[0]", out)
+        self.assertNotIn("it[1]", out)
+        ns, _ = self._namespaces()
+        calls = []
+
+        def make():
+            calls.append(1)
+            return (1, 2)
+
+        self.assertEqual(ns["called"](make), (1, {"b": 2}))
+        self.assertEqual(len(calls), 1)
 
 
 if __name__ == "__main__":
