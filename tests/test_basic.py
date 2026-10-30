@@ -512,6 +512,10 @@ class TestStarredTupleDisplay(unittest.TestCase):
         "def c(xs, ys): return (*xs, *ys)\n"
         "def d(xs): return (*xs,)\n"
         "def e(xs, y): return (*xs, y, 1, 2)\n"
+        "def loop(xs):\n"
+        "    for i in range(2):\n"
+        "        result = (*xs, i)\n"
+        "    return result\n"
         "def f(xs):\n"
         "    t = (0, *xs, 9)\n"
         "    return t\n"
@@ -523,7 +527,7 @@ class TestStarredTupleDisplay(unittest.TestCase):
         "def o(xs): return (*(x * 2 for x in xs if x), *sorted(xs, key=lambda v: -v))\n"
         "class K:\n    t = (*'ab', 3)\n"
         "out = (n([1], 0), o([3, 0, 1]), a([1], 2), b([1], 2), c([1], [2]), d([5]), e([1], 2), f([3]), g([7]), h([7]),\n"
-        "       k([7], 'xy'), m(lambda *p, **q: (p, q), [4]), K.t)\n"
+        "       k([7], 'xy'), m(lambda *p, **q: (p, q), [4]), K.t, loop([7]))\n"
     )
 
     def test_results_are_tuples(self):
@@ -540,6 +544,87 @@ class TestStarredTupleDisplay(unittest.TestCase):
         assert_contains(out, "return (*xs, y)", "return (y, *xs)", "return (*xs, *ys)", "return (*xs,)",
                         "(*xs, y, 1, 2)", "[(*xs, i) for i in range(2)]", "[[*xs, i] for i in range(2)]")
         self.assertNotIn("_res", out)
+
+
+class TestVariableAnnotations(unittest.TestCase):
+    """Annotations in class and module bodies stay annotations (#173)."""
+
+    SRC = (
+        "from typing import Dict, List, Optional\n"
+        "import sys\n"
+        "class K:\n"
+        "    a: int = 3\n"
+        "    b: str\n"
+        "    c: List[int] = [1]\n"
+        "    def m(self): return 1\n"
+        "    d: Optional[Dict[str, int]] = None\n"
+        "    e: 'float'\n"
+        "class G:\n"
+        "    x: int = 1\n"
+        "    if sys.maxsize:\n"
+        "        y: str = 'y'\n"
+        "    z: bool\n"
+        "class H:\n"
+        "    if not sys.maxsize:\n"
+        "        q: int\n"
+        "    r: str\n"
+        "x: int = 5\n"
+        "y: str\n"
+        "w: Optional[int] = None\n"
+        "if x:\n"
+        "    t: float = 2.0\n"
+        "else:\n"
+        "    t2: int\n"
+        "def f():\n"
+        "    z: int = 4\n"
+        "    w: float\n"
+        "    return z\n"
+        "out = (K.a, K.c, x, w, t, f())\n"
+    )
+
+    @staticmethod
+    def _annotations(ns):
+        """Module annotations: a dict up to 3.13, produced by __annotate__ since 3.14."""
+        found = ns["__annotations__"] if "__annotations__" in ns else ns["__annotate__"](1)
+        return {name: str(value) for name, value in found.items()}
+
+    def test_annotations_are_kept(self):
+        out = decompile(self.SRC)
+        assert_contains(out, "a: int = 3", "b: str", "c: List[int] = [1]", "e: 'float'", "x: int = 5",
+                        "y: str", "w: Optional[int] = None", "t: float = 2.0", "t2: int", "x: int = 1",
+                        "y: str = 'y'", "z: bool")
+        self.assertNotIn("__annotations__", out)
+        self.assertNotIn("__conditional_annotations__", out)
+
+    def test_behavior_is_preserved(self):
+        ns = {}
+        exec(decompile(self.SRC), ns)
+        ref = {}
+        exec(self.SRC, ref)
+        self.assertEqual(ns["out"], ref["out"])
+        self.assertEqual(self._annotations(ns), self._annotations(ref))
+        for cls in ("K", "G", "H"):
+            self.assertEqual(list(ns[cls].__annotations__), list(ref[cls].__annotations__))
+            self.assertEqual(ns[cls].__annotations__, ref[cls].__annotations__)
+
+    def test_a_dict_named_annotations_is_not_an_annotation(self):
+        """Test subscript stores into a dict called __annotations__ stay assignments outside annotation bodies."""
+        src = (
+            "def f():\n"
+            "    __annotations__ = {}\n"
+            "    __annotations__['x'] = int\n"
+            "    return __annotations__\n"
+            "class E:\n"
+            "    __annotations__ = {}\n"
+            "    __annotations__['class'] = int\n"
+            "out = (f(), E.__annotations__)\n"
+        )
+        out = decompile(src)
+        assert_contains(out, "__annotations__['x'] = int", "__annotations__['class'] = int")
+        ns, ref = {}, {}
+        exec(out, ns)
+        exec(src, ref)
+        self.assertEqual(ns["out"], ref["out"])
 
 
 if __name__ == "__main__":

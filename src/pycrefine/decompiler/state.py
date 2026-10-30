@@ -98,6 +98,8 @@ class EmissionState:  # pylint: disable=too-many-instance-attributes
     boolop_pending: List[Any] = field(default_factory=list)         # operators opened but not yet joined
     else_stack_snapshots: Dict[int, List[Any]] = field(default_factory=dict)  # second arm's offset -> stack to restore
     open_with_sentinels: List[Any] = field(default_factory=list)    # 3.14: (body end, body start) of open with bodies
+    annotations: List[Any] = field(default_factory=list)            # 3.14: (number or None, name, text) of this body's annotations
+    annotation_marks: List[Any] = field(default_factory=list)       # 3.14 class: (number, line index, indent) of annotations that ran before `__annotate__` was seen
     pei_indents: Dict[int, int] = field(default_factory=dict)
     finally_wrapper_indent: Dict[int, int] = field(default_factory=dict)  # 3.9
     kw_names: Any = ()                                              # keyword names of the call being built
