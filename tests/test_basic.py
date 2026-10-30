@@ -304,6 +304,7 @@ class TestDeleteSubscriptAndAttribute(unittest.TestCase):
         out = decompile(self.SRC)
         assert_contains(out, "del o.p.q", "del xs[0]", "del d['b']", "del seq[key]", "del grid[0][1]")
         self.assertIn("del xs[0:1]", out)
+        self.assertIn("del xs[:1]", out)
 
     def test_behavior_is_preserved(self):
         ns = {}
@@ -311,6 +312,70 @@ class TestDeleteSubscriptAndAttribute(unittest.TestCase):
         ref = {}
         exec(self.SRC, ref)
         self.assertEqual(ns["out"], ref["out"])
+
+
+class TestSliceAssignment(unittest.TestCase):
+    """`x[a:b] = v`, chained and augmented forms keep the slice (#181)."""
+
+    SRC = (
+        "ys = list(range(8))\n"
+        "ys[1:3] = []\n"
+        "ys[:2] = [9, 9, 9]\n"
+        "ys[4:] = [7]\n"
+        "ys[:] = ys + [1]\n"
+        "zs = list(range(10))\n"
+        "zs[::2] = [0] * 5\n"
+        "a = list(range(6))\n"
+        "a[1:3] = a[3:5] = [7, 8]\n"
+        "b = list(range(5))\n"
+        "b[1:3] += [9]\n"
+        "b[:2] *= 2\n"
+        "def f(seq, i, j, new):\n"
+        "    seq[i:j] = new\n"
+        "    seq[i:] = new\n"
+        "    seq[:j] = new\n"
+        "    return seq\n"
+        "class C:\n"
+        "    def __init__(self):\n        self.d = list(range(5))\n"
+        "c = C()\n"
+        "c.d[1:-1] = ['q']\n"
+        "out = (ys, zs, a, b, f(list(range(6)), 1, 3, ['x']), c.d)\n"
+    )
+
+    def test_statements_are_kept(self):
+        out = decompile(self.SRC)
+        assert_contains(out, "ys[1:3] = []", "ys[:2] = [9, 9, 9]", "ys[4:] = [7]", "zs[::2] = ", "b[1:3] += [9]",
+                        "seq[i:j] = new", "c.d[1:-1] = ['q']")
+
+    def test_behavior_is_preserved(self):
+        ns = {}
+        exec(decompile(self.SRC), ns)
+        ref = {}
+        exec(self.SRC, ref)
+        self.assertEqual(ns["out"], ref["out"])
+
+    def test_slice_targets_of_a_tuple_assignment_stay_simultaneous(self):
+        src = (
+            "xs = [1, 2, 3, 4]\n"
+            "xs[0:1], xs[2:3] = xs[2:3], xs[0:1]\n"
+            "def f(a, b):\n"
+            "    a[0:2], b = b, a[0:2]\n"
+            "    return a, b\n"
+            "out = (xs, f([1, 2, 3, 4], [9, 8]))\n"
+        )
+        ns = {}
+        exec(decompile(src), ns)
+        self.assertEqual(ns["out"], ([3, 2, 1, 4], ([9, 8, 3, 4], [1, 2])))
+
+    def test_loosely_binding_container_is_parenthesized(self):
+        src = (
+            "def f(a, b):\n"
+            "    (a < b)[1:2] = 1\n"
+            "    return (a < b)[1:2]\n"
+        )
+        out = decompile(src)
+        assert_contains(out, "(a < b)[1:2] = 1")
+        compile(out, "<decompiled>", "exec")
 
 
 if __name__ == "__main__":
