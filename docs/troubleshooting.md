@@ -36,9 +36,10 @@ uvx pycrefine file.pyc
 
 ### `No matching distribution found for pycrefine`
 
-Either pycrefine has no release on PyPI yet, or your Python is older than 3.9 (pip skips
-releases whose `Requires-Python` your interpreter does not meet). Check
-`python --version`, and install from GitHub until the first release:
+Your Python is probably older than 3.9: pip skips releases whose `Requires-Python` your
+interpreter does not meet. Check `python --version` and use a newer interpreter. If the
+version is right, update pip (`python -m pip install --upgrade pip`) and try again. To
+install the unreleased `main` instead, use GitHub:
 
 ```bash
 python -m pip install "git+https://github.com/sahebbiswas/pycrefine"

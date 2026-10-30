@@ -1,5 +1,7 @@
 # pycrefine
 
+[![PyPI](https://img.shields.io/pypi/v/pycrefine.svg)](https://pypi.org/project/pycrefine/)
+[![Python versions](https://img.shields.io/pypi/pyversions/pycrefine.svg)](https://pypi.org/project/pycrefine/)
 [![Python 3.9](https://github.com/sahebbiswas/pycrefine/actions/workflows/ci-py39.yml/badge.svg?branch=main&event=push)](https://github.com/sahebbiswas/pycrefine/actions/workflows/ci-py39.yml)
 [![Python 3.10](https://github.com/sahebbiswas/pycrefine/actions/workflows/ci-py310.yml/badge.svg?branch=main&event=push)](https://github.com/sahebbiswas/pycrefine/actions/workflows/ci-py310.yml)
 [![Python 3.11](https://github.com/sahebbiswas/pycrefine/actions/workflows/ci-py311.yml/badge.svg?branch=main&event=push)](https://github.com/sahebbiswas/pycrefine/actions/workflows/ci-py311.yml)
@@ -40,11 +42,19 @@ shows how to run it under another Python in one command. Some constructs (`match
 
 ## Install
 
+pycrefine is published on [PyPI](https://pypi.org/project/pycrefine/):
+
 ```bash
 python -m pip install pycrefine
+python -m pip install --upgrade pycrefine    # update an existing install
 ```
 
-Until the first release reaches PyPI, install from GitHub instead:
+The `pycrefine` command and `import pycrefine` are available after that. To try it once
+without installing anything, use `uvx pycrefine file.pyc`; to keep the command apart from
+your projects, use `pipx install pycrefine`.
+
+Releases on PyPI may lag behind `main`. Use the PyPI release for stable installs; if you need
+a fix that is on `main` but not yet released, install from GitHub instead:
 
 ```bash
 python -m pip install "git+https://github.com/sahebbiswas/pycrefine"
