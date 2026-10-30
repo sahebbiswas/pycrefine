@@ -32,7 +32,7 @@
     "features/modern_except_star": "mismatch",
     "features/modern_match": "mismatch",
     "features/modern_walrus": "mismatch",
-    "features/module_globals": "mismatch",
+    "features/module_globals": "equivalent",
     "features/opt_asserts_debug": "equivalent",
     "features/unpack_assign": "equivalent",
     "features/with_context": "equivalent",

@@ -30,7 +30,7 @@
     "features/io_streams": "equivalent",
     "features/modern_async": "mismatch",
     "features/modern_walrus": "mismatch",
-    "features/module_globals": "mismatch",
+    "features/module_globals": "equivalent",
     "features/opt_asserts_debug": "equivalent",
     "features/unpack_assign": "equivalent",
     "features/with_context": "equivalent",
