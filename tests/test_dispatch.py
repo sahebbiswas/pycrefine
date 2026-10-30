@@ -29,6 +29,7 @@ OPCODES_OF_OTHER_VERSIONS = frozenset((
     "BINARY_OP",
     "BINARY_SLICE",
     "STORE_SLICE",
+    "LIST_TO_TUPLE",
     "BINARY_SUBSCR",
     "BUILD_CONST_KEY_MAP",
     "CACHE",

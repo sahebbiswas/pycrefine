@@ -170,8 +170,7 @@
       "unsupported_opcode": 1
     },
     "stdlib/copy": {
-      "incomplete_exception_reconstruction": 3,
-      "unsupported_opcode": 2
+      "incomplete_exception_reconstruction": 3
     },
     "stdlib/getopt": {
       "incomplete_exception_reconstruction": 2

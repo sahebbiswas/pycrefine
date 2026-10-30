@@ -214,7 +214,7 @@ _BASE_DISPATCH: Dict[str, str] = {
     "GET_ITER": "_op_no_op", "UNPACK_SEQUENCE": "_op_unpack_sequence",
     "UNPACK_EX": "_op_unpack_sequence",
     "LIST_APPEND": "_op_list_append",
-    "LIST_EXTEND": "_op_list_extend", "DICT_MERGE": "_op_dict_merge",
+    "LIST_TO_TUPLE": "_op_list_to_tuple", "LIST_EXTEND": "_op_list_extend", "DICT_MERGE": "_op_dict_merge",
     "DICT_UPDATE": "_op_dict_merge",
     "SET_ADD": "_op_set_add", "SET_UPDATE": "_op_set_update",
     "MAP_ADD": "_op_map_add",
@@ -2141,7 +2141,9 @@ class DecompilerGeneric(DecompilerBase):
             k = pos
             while k < n and not (
                     (body[k].opname.startswith("POP_JUMP_IF") and filter_form(k))
-                    or body[k].opname == acc_op
+                    # The comprehension's own append reaches below one iterator per loop; a
+                    # shallower one builds a display inside the element (``[*xs, i]``).
+                    or (body[k].opname == acc_op and int(body[k].arg or 0) == len(heads) + 1)
                     or (body[k].opname == "GET_ITER" and k + 1 < n and body[k + 1].opname == "FOR_ITER")):
                 k += 1
             if k >= n:
@@ -6615,6 +6617,9 @@ class DecompilerGeneric(DecompilerBase):
         comparison cannot rebind it (`(-x) ** 2` is not `-x ** 2`).
         """
         if instr.opname == "CALL_INTRINSIC_1":
+            if "LIST_TO_TUPLE" in str(instr.argrepr):
+                self._op_list_to_tuple(instr)
+                return
             # Only unary plus changes the expression; the other intrinsics are
             # bookkeeping that never reaches the source.
             if "UNARY_POSITIVE" not in str(instr.argrepr):
@@ -6885,6 +6890,24 @@ class DecompilerGeneric(DecompilerBase):
             same = False
         return f"{star}{text}" if same else f"{star}({text})"
 
+    def _op_list_to_tuple(self, _instr: BytecodeInstruction):
+        """
+        A tuple display with a starred item, ``(*xs, y)``, is built as a list and then
+        converted. Turn the list display on top of the stack back into a tuple display.
+        """
+        if not self.stack:
+            return
+        text = str(self.stack.pop())
+        try:
+            node = ast.parse(text, mode="eval").body
+        except SyntaxError:
+            node = None
+        if isinstance(node, ast.List):
+            inner = text[1:-1]
+            self.stack.append(f"({inner},)" if len(node.elts) == 1 else f"({inner})")
+        else:
+            self.stack.append(f"tuple({text})")
+
     def _op_list_extend(self, instr: BytecodeInstruction):
         opname = instr.opname
         if len(self.stack) >= 2:
@@ -6910,7 +6933,9 @@ class DecompilerGeneric(DecompilerBase):
             key = None
 
         i = int(instr.arg) if instr.arg is not None else 1
-        in_loop = any(b[1] in ("for", "while") for b in self.blocks)
+        # A comprehension appends to a collection below its iterator (depth 2 or more); depth 1
+        # is the display being built right here, e.g. the list behind ``(*xs, y)``, even in a loop.
+        in_loop = i != 1 and any(b[1] in ("for", "while") for b in self.blocks)
 
         if len(self.stack) >= i:
             raw_target = self.stack[-i]

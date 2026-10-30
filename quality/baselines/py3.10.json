@@ -31,16 +31,12 @@
         "class DataProcessor/def process": {
           "incomplete_exception_reconstruction": 1
         },
-        "def member_decorator": {
-          "unsupported_opcode": 1
-        },
         "def run_test": {
           "incomplete_exception_reconstruction": 1
         }
       },
       "diagnostics": {
-        "incomplete_exception_reconstruction": 2,
-        "unsupported_opcode": 1
+        "incomplete_exception_reconstruction": 2
       }
     },
     "corpus/indent2.py": {
@@ -179,10 +175,7 @@
     },
     "tests/fixtures/foreign_pyc/comprehensive.cpython-39.pyc": {
       "kind": "pyc",
-      "status": "compiles",
-      "diagnostics": {
-        "unsupported_opcode": 1
-      }
+      "status": "compiles"
     },
     "tests/fixtures/foreign_pyc/simple.cpython-313.pyc": {
       "kind": "pyc",
