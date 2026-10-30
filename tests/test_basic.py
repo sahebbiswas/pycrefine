@@ -491,6 +491,7 @@ class TestImportAliases(unittest.TestCase):
     def test_plain_dotted_import_has_no_alias(self):
         out = decompile("import os.path\nimport xml.dom\nx = os.path.sep\n")
         self.assertNotIn(" as ", out)
+        assert_contains(out, "import os.path", "import xml.dom")
 
     def test_behavior_is_preserved(self):
         ns = {}
@@ -500,6 +501,45 @@ class TestImportAliases(unittest.TestCase):
         self.assertEqual(ns["out"], ref["out"])
         for name in ("o", "p", "md", "q", "r", "s", "cabc", "regex"):
             self.assertIn(name, ns)
+
+
+class TestStarredTupleDisplay(unittest.TestCase):
+    """A tuple display with a starred item stays a tuple (#183)."""
+
+    SRC = (
+        "def a(xs, y): return (*xs, y)\n"
+        "def b(xs, y): return (y, *xs)\n"
+        "def c(xs, ys): return (*xs, *ys)\n"
+        "def d(xs): return (*xs,)\n"
+        "def e(xs, y): return (*xs, y, 1, 2)\n"
+        "def f(xs):\n"
+        "    t = (0, *xs, 9)\n"
+        "    return t\n"
+        "def g(xs): return [(*xs, i) for i in range(2)]\n"
+        "def h(xs): return [[*xs, i] for i in range(2)]\n"
+        "def k(xs, ys): return [(*xs, i, j) for i in range(2) for j in ys]\n"
+        "def m(f, xs): return f((*xs, 1), k=(*xs,))\n"
+        "def n(xs, y): return (*xs, 1 if y else 2, -y)\n"
+        "def o(xs): return (*(x * 2 for x in xs if x), *sorted(xs, key=lambda v: -v))\n"
+        "class K:\n    t = (*'ab', 3)\n"
+        "out = (n([1], 0), o([3, 0, 1]), a([1], 2), b([1], 2), c([1], [2]), d([5]), e([1], 2), f([3]), g([7]), h([7]),\n"
+        "       k([7], 'xy'), m(lambda *p, **q: (p, q), [4]), K.t)\n"
+    )
+
+    def test_results_are_tuples(self):
+        ns = {}
+        exec(decompile(self.SRC), ns)
+        ref = {}
+        exec(self.SRC, ref)
+        self.assertEqual(ns["out"], ref["out"])
+        self.assertIsInstance(ns["a"]([1], 2), tuple)
+        self.assertIsInstance(ns["d"]([5]), tuple)
+
+    def test_source_keeps_the_displays(self):
+        out = decompile(self.SRC)
+        assert_contains(out, "return (*xs, y)", "return (y, *xs)", "return (*xs, *ys)", "return (*xs,)",
+                        "(*xs, y, 1, 2)", "[(*xs, i) for i in range(2)]", "[[*xs, i] for i in range(2)]")
+        self.assertNotIn("_res", out)
 
 
 if __name__ == "__main__":

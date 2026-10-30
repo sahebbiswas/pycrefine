@@ -84,9 +84,6 @@
     },
     "stdlib/bisect": {
       "unsupported_opcode": 1
-    },
-    "stdlib/copy": {
-      "unsupported_opcode": 2
     }
   }
 }

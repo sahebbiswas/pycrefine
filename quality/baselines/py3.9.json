@@ -26,14 +26,6 @@
         "def member_decorator": "compiles",
         "def run_test": "compiles",
         "def some_decorator": "compiles"
-      },
-      "unit_diagnostics": {
-        "def member_decorator": {
-          "unsupported_opcode": 1
-        }
-      },
-      "diagnostics": {
-        "unsupported_opcode": 1
       }
     },
     "corpus/indent2.py": {
@@ -141,10 +133,7 @@
     },
     "tests/fixtures/foreign_pyc/comprehensive.cpython-39.pyc": {
       "kind": "pyc",
-      "status": "compiles",
-      "diagnostics": {
-        "unsupported_opcode": 1
-      }
+      "status": "compiles"
     },
     "tests/fixtures/foreign_pyc/simple.cpython-313.pyc": {
       "kind": "pyc",
