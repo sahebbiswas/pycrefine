@@ -6,7 +6,7 @@
     "features/class_basic": "equivalent",
     "features/class_special_methods": "equivalent",
     "features/closure_counter": "mismatch",
-    "features/closure_decorator": "mismatch",
+    "features/closure_decorator": "equivalent",
     "features/comp_generators": "equivalent",
     "features/comp_list_dict_set": "equivalent",
     "features/data_structures": "equivalent",

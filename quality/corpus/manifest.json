@@ -67,16 +67,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 185,
-          "versions": [
-            "3.14"
-          ],
-          "summary": "f(*args, **kwargs) in a function (3.14)"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "features/comp_generators",

@@ -607,6 +607,48 @@ class TestVariableAnnotations(unittest.TestCase):
             self.assertEqual(list(ns[cls].__annotations__), list(ref[cls].__annotations__))
             self.assertEqual(ns[cls].__annotations__, ref[cls].__annotations__)
 
+    def test_future_annotations_keep_their_text(self):
+        """Test annotations stored as strings (from __future__ import annotations) are not quoted a second time."""
+        src = (
+            "from __future__ import annotations\n"
+            "from typing import List\n"
+            "class K:\n    a: int = 1\n    b: List[int]\n    c: 'str' = 'x'\n"
+            "x: int = 5\n"
+            "out = (K.__annotations__, __annotations__)\n"
+        )
+        ns, ref = {}, {}
+        exec(decompile(src), ns)
+        exec(src, ref)
+        self.assertEqual(ns["out"], ref["out"])
+
+    def test_future_annotations_explicit_write_keeps_its_call(self):
+        """Test a write of a non-string value into __annotations__ under the future import still runs."""
+        src = (
+            "from __future__ import annotations\n"
+            "calls = []\n"
+            "def side():\n    calls.append(1)\n    return 'int'\n"
+            "class E:\n    a: int = 1\n    __annotations__['x'] = side()\n"
+            "    __annotations__['y'] = 'not an expression'\n"
+            "out = (calls, E.__annotations__)\n"
+        )
+        ns, ref = {}, {}
+        exec(decompile(src), ns)
+        exec(src, ref)
+        self.assertEqual(ns["out"], ref["out"])
+
+    def test_explicit_annotations_write_keeps_its_call(self):
+        """Test an explicit write into a class's own __annotations__ dict still evaluates its value at once."""
+        src = (
+            "calls = []\n"
+            "def side():\n    calls.append(1)\n    return int\n"
+            "class E:\n    __annotations__ = {}\n    __annotations__['x'] = side()\n"
+            "out = (calls, E.__annotations__)\n"
+        )
+        ns, ref = {}, {}
+        exec(decompile(src), ns)
+        exec(src, ref)
+        self.assertEqual(ns["out"], ref["out"])
+
     def test_a_dict_named_annotations_is_not_an_annotation(self):
         """Test subscript stores into a dict called __annotations__ stay assignments outside annotation bodies."""
         src = (
@@ -624,6 +666,64 @@ class TestVariableAnnotations(unittest.TestCase):
         ns, ref = {}, {}
         exec(out, ns)
         exec(src, ref)
+        self.assertEqual(ns["out"], ref["out"])
+
+
+class TestStarredCallsAndClasses(unittest.TestCase):
+    """Calls with `*args` and `**kwargs`, and classes with starred bases (#227, #185, #235)."""
+
+    SRC = (
+        "def h(*a, **k): return a, k\n"
+        "def f(x, d, a, k):\n"
+        "    return [h(*a), h(**k), h(*a, **k), h(x, *a), h(x, 1, k=2, **d), h(x, *a, y=1),\n"
+        "            h(*a, 7), h(*a, *a), h(x, **k), h(x, 1, 2)]\n"
+        "def g(*args, **kwargs):\n"
+        "    return h(*args, **kwargs), h(1, *args, **kwargs)\n"
+        "class A: pass\n"
+        "class B: pass\n"
+        "class M(type): pass\n"
+        "bases = (A, B)\n"
+        "kw = {'metaclass': M}\n"
+        "class D(*bases, **kw):\n"
+        "    x = 1\n"
+        "class E(*bases):\n"
+        "    pass\n"
+        "class F(A, **kw):\n"
+        "    y = 2\n"
+        "def make(bs, k):\n"
+        "    class C(*bs, **k):\n"
+        "        def m(self): return 5\n"
+        "    return C\n"
+        "def merged(d):\n"
+        "    return [h(**{'x': 1, 'x': 2}), h(**{'x': 1, **{'x': 2}}), h(**{'x': 1, **d}), h(**{**d, 'x': 1}),\n"
+        "            h(x=1, **{'y': 2}), h(**{'x': 1, 'y': 2})]\n"
+        "out = (f(5, {'z': 3}, [1], {'q': 2}), g(1, w=2), [b.__name__ for b in D.__bases__],\n"
+        "       type(D).__name__, [b.__name__ for b in E.__bases__], type(F).__name__, F.y,\n"
+        "       make((A,), {}).m(0), merged({'x': 9}))\n"
+    )
+
+    def test_arguments_are_written_out(self):
+        out = decompile(self.SRC)
+        assert_contains(out, "h(*a)", "h(**k)", "h(*a, **k)", "h(x, *a)", "h(x, 1, k=2, **d)",
+                        "h(x, *a, y=1)", "h(*a, 7)", "h(*a, *a)", "h(*args, **kwargs)", "h(1, *args, **kwargs)")
+        self.assertNotIn("*(", out)
+
+    def test_repeated_and_overridable_keywords_keep_the_display(self):
+        """Test a ** display whose entries may repeat is not spread into keyword arguments."""
+        out = decompile(self.SRC)
+        assert_contains(out, "h(**{'x': 1, 'x': 2})", "h(**{'x': 1, **d})", "h(x=1, y=2)")
+
+    def test_classes_keep_starred_bases_and_keywords(self):
+        out = decompile(self.SRC)
+        assert_contains(out, "class D(*bases, **kw):", "class E(*bases):", "class F(A, **kw):",
+                        "class C(*bs, **k):")
+        self.assertNotIn("__build_class__", out)
+
+    def test_behavior_is_preserved(self):
+        ns = {}
+        exec(decompile(self.SRC), ns)
+        ref = {}
+        exec(self.SRC, ref)
         self.assertEqual(ns["out"], ref["out"])
 
 

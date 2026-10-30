@@ -34,8 +34,8 @@ from .._constants import (
 )
 from ..codeobj import _is_code
 from .base import DecompilerBase
-from ..expr import (StackNULL, UnknownExpression, _BoolExpr, _CollectionAccumSentinel, _UnpackAccessor, _unary_operand,
-                    is_unknown)
+from ..expr import (StackNULL, UnknownExpression, _BoolExpr, _CollectionAccumSentinel, _MergedDisplay, _UnpackAccessor,
+                    _unary_operand, is_unknown)
 from ..diagnostics import (AMBIGUOUS_EXPRESSION, INTERNAL_ERROR, STACK_UNDERFLOW, UNKNOWN_CONTROL_FLOW,
                            UNSUPPORTED_OPCODE, UNSUPPORTED_VERSION_CONSTRUCT, DecompilationError)
 from .state import DocState, EmissionState, PrescanState
@@ -4444,13 +4444,37 @@ class DecompilerGeneric(DecompilerBase):
             key = self.stack.pop()
             container = self.stack.pop()
             val = self.stack.pop()
-            if (str(container) == "__annotations__" and self._is_name_literal(key)
-                    and not self.code_obj.co_flags & 0x1):  # 0x1 = CO_OPTIMIZED, a function body
-                # SETUP_ANNOTATIONS bodies (3.9 to 3.13) record ``name: annotation`` this way.
-                # A function has no such body: there it is an ordinary dict named __annotations__.
-                self._emit_annotation(ast.literal_eval(str(key)), str(val))
+            text = self._annotation_text(container, key, val)
+            if text is not None:
+                self._emit_annotation(ast.literal_eval(str(key)), text)
                 return
             self._append_reconstructed(f"{self._receiver(container)}[{key}] = {val}")
+
+    def _annotation_text(self, container: Any, key: Any, val: Any) -> Optional[str]:
+        """The annotation ``name: text`` a store into ``__annotations__`` stands for, else None.
+
+        Module and class bodies of 3.9 to 3.13 record ``name: annotation`` as
+        ``__annotations__['name'] = annotation``. A function has no such body (there it is an
+        ordinary dict), and 3.14 records annotations lazily, except under
+        ``from __future__ import annotations``, where every annotation is stored as a string
+        constant; any other value there is an explicit write that must keep running.
+        """
+        flags = self.code_obj.co_flags
+        future = bool(flags & 0x1000000)  # CO_FUTURE_ANNOTATIONS
+        if (str(container) != "__annotations__" or not self._is_name_literal(key) or flags & 0x1
+                or (self.target_version >= (3, 14) and not future)):
+            return None
+        text = str(val)
+        if not future:
+            return text
+        try:
+            stored = ast.literal_eval(text)
+            if isinstance(stored, str):
+                ast.parse(stored, mode="eval")  # an annotation is an expression
+                return stored
+        except (ValueError, SyntaxError):
+            pass
+        return None
 
         # ── imports ────────────────────────────────────────────────────
 
@@ -5519,7 +5543,11 @@ class DecompilerGeneric(DecompilerBase):
         if opname == "CALL_FUNCTION_EX":
             flags = num_args
             kwargs_dict = None
-            if flags & 1:
+            if self.target_version >= (3, 14):
+                # 3.14 dropped the flag: the keyword slot is always there, a NULL when unused.
+                item = self._pop()
+                kwargs_dict = None if self._is_null_sentinel(item) else item
+            elif flags & 1:
                 item = self._pop()
                 while self._is_null_sentinel(item) and self.stack:
                     item = self.stack.pop()
@@ -5529,10 +5557,7 @@ class DecompilerGeneric(DecompilerBase):
             while self._is_null_sentinel(item) and self.stack:
                 item = self.stack.pop()
             args_tuple = item
-            final_args = [f"*{self._normalize_val(args_tuple)}"]
-            if kwargs_dict:
-                final_args.append(f"**{self._normalize_val(kwargs_dict)}")
-            raw_args = [args_tuple]
+            final_args, raw_args = self._call_ex_arguments(args_tuple, kwargs_dict)
         else:
             final_args = []
             final_args_raw = []
@@ -5692,6 +5717,61 @@ class DecompilerGeneric(DecompilerBase):
             self.stack.append("super()")
         else:
             self.stack.append(f"{func}({', '.join(final_args)})")
+
+    def _call_ex_arguments(self, args_tuple: Any, kwargs_dict: Any) -> Tuple[List[str], List[Any]]:
+        """
+        Arguments of a CALL_FUNCTION_EX call as source: the items of the positional tuple
+        display (``x, *a``), or ``*value`` for any other expression, followed by the entries
+        of the keyword dict display (``k=v``, ``**d``), or ``**value`` for any other.
+        Returns ``(arguments, raw items)``; the raw items keep a function or class body as the
+        tuple the decompiler pushed, which its text form has flattened.
+        """
+        shown, raw = [], []
+        text = str(self._normalize_val(args_tuple))
+        node = self._parse_display(text)
+        if isinstance(node, ast.Tuple):
+            for item in node.elts:
+                segment = ast.get_source_segment(text, item) or ast.unparse(item)
+                shown.append(segment)
+                try:
+                    value = ast.literal_eval(segment)
+                except (ValueError, SyntaxError):
+                    value = None
+                raw.append(value if isinstance(value, tuple) and value[:1] == ("func",) else segment)
+        elif text != "()":
+            shown.append(f"*{text}")
+            raw.append(args_tuple)
+        if kwargs_dict is not None:
+            text = str(self._normalize_val(kwargs_dict))
+            node = self._parse_display(text)
+            entries = []
+            names = set()
+            if isinstance(node, ast.Dict):
+                for key, value in zip(node.keys, node.values):
+                    segment = ast.get_source_segment(text, value) or ast.unparse(value)
+                    if key is None:
+                        entries.append(f"**{segment}")
+                    elif (isinstance(key, ast.Constant) and isinstance(key.value, str)
+                          and key.value.isidentifier() and not keyword.iskeyword(key.value)
+                          and key.value not in names):
+                        names.add(key.value)
+                        entries.append(f"{key.value}={segment}")
+                    else:
+                        # Not a keyword argument (or one that repeats): keep the whole display.
+                        entries = None
+                        break
+            else:
+                entries = None
+            shown.extend(entries if entries is not None else [f"**{text}"])
+        return shown, raw
+
+    @staticmethod
+    def _parse_display(text: str):
+        """The expression node of *text*, or None when it does not parse."""
+        try:
+            return ast.parse(text, mode="eval").body
+        except SyntaxError:
+            return None
 
     def _op_load_build_class(self, instr: BytecodeInstruction):
         opname = instr.opname
@@ -7175,13 +7255,15 @@ class DecompilerGeneric(DecompilerBase):
     def _op_dict_merge(self, instr: BytecodeInstruction):
         opname = instr.opname
         if len(self.stack) >= 2:
+            merged = isinstance(self.stack[-1], _MergedDisplay)
             src = str(self.stack.pop())
             base = str(self.stack.pop())
             parts = []
-            for text in (base, src):
-                items = self._display_items(text, ast.Dict)
+            for is_src, text in ((False, base), (True, src)):
+                items = None if (merged and is_src) else self._display_items(text, ast.Dict)
                 parts.append(items if items is not None else self._unpacked("**", text))
-            self.stack.append("{" + ", ".join(part for part in parts if part) + "}")
+            text = "{" + ", ".join(part for part in parts if part) + "}"
+            self.stack.append(_MergedDisplay(text) if instr.opname == "DICT_UPDATE" else text)
 
         # ── secondary LOAD paths (dead-code guard — already handled above
         #    for the primary names; this catches any variant not in the top

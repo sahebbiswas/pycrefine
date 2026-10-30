@@ -102,6 +102,16 @@ class _UnpackAccessor(str):
     """
 
 
+class _MergedDisplay(str):
+    """A dict display built by ``{k: v, **d}`` (``DICT_UPDATE``), as source text.
+
+    Passing such a display on with ``**`` is not the same as writing its entries as keyword
+    arguments: the display silently lets a later entry replace an earlier one, while a call
+    with a repeated keyword raises ``TypeError``. The type lets the merge that follows keep
+    the display as ``**{...}`` rather than spread its entries into the call.
+    """
+
+
 class UnknownExpression(str):
     """
     An expression the decompiler could not determine, standing in for it on the stack.
