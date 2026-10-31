@@ -3221,7 +3221,7 @@ class DecompilerGeneric(DecompilerBase):
                 # Suppress exactly that copy's exit jumps, never body-level ifs.
                 after_loop = self.instructions[jb_idx + 1].offset
                 if exit_block is None and self.target_version >= (3, 14):
-                    before_handlers = self._exit_block_before_handlers(guard_offset, body_start)
+                    before_handlers = self._exit_block_before_handlers(guard_offset)
                     if before_handlers is not None:
                         exit_block, after_loop = before_handlers[:2], before_handlers[2]
                 if exit_block is not None:
@@ -3316,14 +3316,13 @@ class DecompilerGeneric(DecompilerBase):
                     return t, block
         return None
 
-    def _exit_block_before_handlers(self, guard_offset: int, body_start: int) -> Optional[Tuple[int, List[int], int]]:
+    def _exit_block_before_handlers(self, guard_offset: int) -> Optional[Tuple[int, List[int], int]]:
         """
         3.14: the loop-exit `return` that sits between a loop's `try` body and its handlers.
 
         When the loop body ends in a `try`, the code after the loop is laid out ahead of the
         `except` handlers, and the handlers jump back to the loop head themselves. Returns
-        (offset of the block, offsets of its instructions, offset just past the last handler's
-        jump back), or None.
+        (offset of the block, offsets of its instructions, offset where the handlers end), or None.
         """
         instrs = self.instructions
         by_offset = {ins.offset: n for n, ins in enumerate(instrs)}
@@ -3335,12 +3334,11 @@ class DecompilerGeneric(DecompilerBase):
         if (after_block + 1 >= len(instrs) or instrs[after_block].opname != "PUSH_EXC_INFO"
                 or instrs[after_block + 1].opname == "WITH_EXCEPT_START"):   # (a `with` exit handler, not an `except`)
             return None
-        exits = [k for k, ins in enumerate(instrs)
-                 if k > after_block and self._is_backward_instruction(ins)
-                 and self._get_jump_target(ins) == body_start and self._is_handler_exit_back_jump(k)]
-        if not exits or exits[-1] + 1 >= len(instrs):
+        if not self._handlers_all_leave(instrs[after_block].offset):
             return None
-        return target, block, instrs[exits[-1] + 1].offset
+        reraise = next((n for n in range(after_block, len(instrs))
+                        if instrs[n].opname == "RERAISE" and instrs[n].arg == 0), None)
+        return None if reraise is None else (target, block, instrs[reraise].offset)
 
     def _emit_relocated_exit(self, offset: int) -> None:
         """Emit the loop-exit `return` that the compiler placed inside the loop's range, now that the loop has ended at *offset*."""
@@ -3513,10 +3511,11 @@ class DecompilerGeneric(DecompilerBase):
         if has_push and not any(
                 target <= i.offset < jb.offset and i.opname == "PUSH_EXC_INFO" for i in instrs):
             return False
+        start = self._before_exit_calls(idx)   # (`except E: continue` in a `with` runs the exit call first)
         for back in range(1, 7):
-            if idx - back < 0:
+            if start - back < 0:
                 break
-            name = instrs[idx - back].opname
+            name = instrs[start - back].opname
             if name == "POP_EXCEPT":
                 return True
             if name in ("CALL", "BINARY_OP", "COMPARE_OP", "RERAISE", "RETURN_VALUE",
@@ -3765,6 +3764,13 @@ class DecompilerGeneric(DecompilerBase):
                     return True
         return False
 
+    def _copy_exit_target(self, idx: int, k: int, guard_exit: int) -> int:
+        """Where the condition copy's jump at *k* leaves, for the loop closed by the jump at *idx*: *guard_exit* when it takes the jump back to the exit block the guard also targets."""
+        exit_to = self._get_jump_target(self.instructions[k])
+        if self._exit_block_after(idx) is not None and exit_to == self.instructions[idx + 1].offset:
+            return guard_exit
+        return exit_to
+
     def _dup_guard_jump_offsets(self, jb: BytecodeInstruction) -> set:
         """
         Offsets of the jumps of a loop condition duplicated at the bottom of the loop
@@ -3815,10 +3821,7 @@ class DecompilerGeneric(DecompilerBase):
             if k < 0 or not (is_cond_jump(instrs[k]) and exits_loop(instrs[k])):
                 return set()
             guard_exit = self._loop_guard_exit(jb)
-            copy_exit = self._get_jump_target(instrs[k])
-            if self._exit_block_after(idx) is not None and copy_exit == instrs[idx + 1].offset:
-                copy_exit = guard_exit   # (leaves through the jump back to the exit block the guard also targets)
-            if guard_exit is not None and not self._same_code_at(copy_exit, guard_exit):
+            if guard_exit is not None and not self._same_code_at(self._copy_exit_target(idx, k, guard_exit), guard_exit):
                 return set()   # an `if c: continue` that repeats the loop's condition, not a copy of it
             # `jb` itself leaving a nested loop (back to an enclosing head) is that
             # loop's exit path, not a duplicated condition.
@@ -4114,7 +4117,7 @@ class DecompilerGeneric(DecompilerBase):
                 loop_heads = {ins.offset for ins in instrs if ins.opname == "FOR_ITER"}
                 loop_heads.update(self.prescan.while_header_targets.values())
 
-                if target in loop_heads:
+                if target in loop_heads or self._is_while_head(target):
                     self.prescan.exc_handler_continue_offsets.add(jb.offset)
 
         # ── 6. Build deferred-finally mappings ───────────────────────────
@@ -4187,6 +4190,11 @@ class DecompilerGeneric(DecompilerBase):
                     # Only the no-op that marks the end of the try body lies in between
                     # (a body ending in a loop leaves one before the inline finally).
                     merge = after_body
+                elif self.target_version >= (3, 12) and self._handlers_all_leave(e.target) \
+                        and self._body_falls_into(body_end, e.start):
+                    # (3.12+ lays the handlers out after all ordinary code.) Every way out of them is a
+                    # `continue` or a `return`, so nothing rejoins: they go right after the body.
+                    merge = body_end
                 else:
                     # Case 1: FOR_ITER loop wraps the try body.
                     # Use the FOR_ITER's jump target (loop-exit) as the merge.
@@ -4815,7 +4823,10 @@ class DecompilerGeneric(DecompilerBase):
             # An exit call belongs to this with when one of its protected ranges ends
             # right there (only NOPs in between); a later or nested with's exit calls
             # follow that with's own ranges instead.
-            range_ends = {e.end for e in ranges}
+            # (the end of a try nested in the body too: its own range covers the code the
+            # with's does not, so the exit after a try whose handlers all leave the loop
+            # follows that range)
+            range_ends = {e.end for e in ranges} | {e.end for e in body_ranges}
             # ... or when a jump from inside its body lands there (the normal exit after
             # an `if` at the end of the body is reached by the `if`'s jump).
             range_ends |= {self._get_jump_target(x) for x in instrs
@@ -4851,6 +4862,18 @@ class DecompilerGeneric(DecompilerBase):
             k += 1
         return k
 
+    def _before_exit_calls(self, idx: int) -> int:
+        """The index *idx* moved back over the inlined `with` exit calls that end right before it."""
+        moved = True
+        while moved:
+            moved = False
+            for size in (5, 6):  # the exit call, with 3.11's PRECALL or without it
+                if idx >= size and idx == self._with_exit_call_at(idx - size):
+                    idx -= size
+                    moved = True
+                    break
+        return idx
+
     def _handler_exit_before(self, jb_idx: int) -> bool:
         """
         Whether the jump at *jb_idx* leaves an exception handler: POP_EXCEPT (or other
@@ -4859,15 +4882,7 @@ class DecompilerGeneric(DecompilerBase):
         `except E: continue` inside a `with` in a loop exits the with on its way back.
         """
         instrs = self.instructions
-        start = jb_idx
-        moved = True
-        while moved:
-            moved = False
-            for size in (5, 6):  # the exit call, with 3.11's PRECALL or without it
-                if start >= size and start == self._with_exit_call_at(start - size):
-                    start -= size
-                    moved = True
-                    break
+        start = self._before_exit_calls(jb_idx)
         for back in range(1, 7):
             check_idx = start - back
             if check_idx < 0:
@@ -5040,6 +5055,65 @@ class DecompilerGeneric(DecompilerBase):
                 continue
             for k in range(start, end):
                 self.prescan.finally_body_suppress.add(self.instructions[k].offset)
+
+    def _is_while_head(self, offset: int) -> bool:
+        """
+        True if *offset* is where a `continue` re-enters a `while` loop: the loop's first body
+        instruction, or (3.12/3.13) the start of the condition ahead of it.
+        """
+        for body_start, guard in self.prescan.while_header_targets.items():
+            if guard < 0:
+                if offset == body_start:
+                    return True
+                continue
+            if offset == body_start:
+                return True
+            guard_ins = next((i for i in self.instructions if i.offset == guard), None)
+            exit_to = self._get_jump_target(guard_ins) if guard_ins is not None else None
+            if offset < body_start and isinstance(exit_to, int) \
+                    and self._is_loop_top_condition(offset, body_start, exit_to - 2):
+                return True
+        return False
+
+    def _handlers_all_leave(self, handler: int) -> bool:
+        """
+        True if the except clauses of the try whose first handler is at *handler* never rejoin the
+        code after it: no forward jump leaves them, and the last clause ends in a jump back
+        (`continue`) or `return`, before the re-raise for an exception no clause matches.
+        """
+        instrs = self.instructions
+        start = next((n for n, ins in enumerate(instrs) if ins.offset == handler), None)
+        if start is None:
+            return False
+        reraise = next((n for n in range(start, len(instrs))
+                        if instrs[n].opname == "RERAISE" and instrs[n].arg == 0), None)
+        if reraise is None or reraise == start:
+            return False
+        if any(ins.opname.startswith("JUMP_FORWARD") or ins.opname == "JUMP_ABSOLUTE" for ins in instrs[start:reraise]):
+            return False
+        end = instrs[reraise - 1]
+        if end.opname == "RETURN_CONST":
+            return end.argval is not None   # (`return None` is also how a function ends: not a way out of its own)
+        return end.opname in ("RETURN_VALUE", "JUMP_BACKWARD")
+
+    def _body_falls_into(self, offset: int, start: int) -> bool:
+        """
+        True if the try body that covers [*start*, *offset*) ends by falling through to *offset*:
+        nothing in it jumps past that point (an `if` ending in `break` leaves the range short), and
+        *offset* is not a handler.
+        """
+        instrs = self.instructions
+        for ins in instrs:
+            if start <= ins.offset < offset and "JUMP" in ins.opname:
+                target = self._get_jump_target(ins)
+                if isinstance(target, int) and target > offset:
+                    return False
+        at = next((n for n, ins in enumerate(instrs) if ins.offset == offset), None)
+        if at is None or at == 0 or instrs[at].opname in ("PUSH_EXC_INFO", "RETURN_VALUE") \
+                or instrs[at].opname.startswith("JUMP"):
+            return False   # (a RETURN_VALUE right at the end of the range returns what the body computed)
+        prev = instrs[at - 1].opname
+        return not prev.startswith(("RETURN_", "JUMP", "RAISE", "RERAISE"))
 
     def _merge_after_nops(self, offset: int) -> Optional[int]:
         """
@@ -5890,6 +5964,10 @@ class DecompilerGeneric(DecompilerBase):
             ahead = self.pc
             # `e = None; del e` for an `as` name sits between POP_EXCEPT and the jump
             ahead += self._is_as_name_cleanup(ahead, self.emit.exc_bound_names)
+            # (the exit call of an enclosing `with`, hidden, sits between a `continue` and its clause)
+            while (ahead < len(self.instructions)
+                   and self.instructions[ahead].offset in self.prescan.with_exit_suppress_offsets):
+                ahead += 1
             if (ahead + 1 < len(self.instructions) and self.instructions[ahead].opname == "POP_TOP"
                     and self.instructions[ahead + 1].opname in ("JUMP_FORWARD", "JUMP_ABSOLUTE", "JUMP_BACKWARD")):
                 # `break`: the loop's iterator is dropped before the jump to the code after the loop
@@ -5967,25 +6045,28 @@ class DecompilerGeneric(DecompilerBase):
         k = start
         while k < len(instrs):
             op = instrs[k].opname
-            if op in ("NOP", "CACHE", "POP_BLOCK"):
-                k += 1
+            if op in ("NOP", "CACHE", "POP_BLOCK") or instrs[k].offset in self.prescan.with_exit_suppress_offsets:
+                k += 1   # (the exit call of an enclosing `with` is hidden)
             elif self._is_as_name_cleanup(k, bound):
                 k += _AS_CLEANUP_LENGTH
             else:
                 break
         # A `break` that the compiler replaced by a copy of the `return` after the loop drops the
         # loop's iterator first (POP_TOP), before the returned value is computed.
+        shown = k - 1
+        while shown > 0 and instrs[shown].offset in self.prescan.with_exit_suppress_offsets:
+            shown -= 1
         if (0 < k < len(instrs) and instrs[k].opname == "POP_TOP"
-                and instrs[k - 1].opname in ("POP_EXCEPT", *_AS_CLEANUP_OPS)):
+                and instrs[shown].opname in ("POP_EXCEPT", *_AS_CLEANUP_OPS)):
             k += 1
         resume = k
         targets = {self._get_jump_target(x) for x in instrs if "JUMP" in x.opname or x.opname == "FOR_ITER"}
         placed = self.prescan.finally_body_suppress
         while k < len(instrs):
             ins = instrs[k]
-            if ins.offset in placed:
+            if ins.offset in placed or ins.offset in self.prescan.with_exit_suppress_offsets:
                 k += 1  # the inline finally body on the way out, rendered by its finally:
-                continue
+                continue   # (or the exit call of an enclosing `with`, hidden)
             if ins.offset in targets or ins.is_jump_target:
                 return None
             if ins.opname in ("RETURN_VALUE", "RETURN_CONST"):
@@ -7889,8 +7970,9 @@ class DecompilerGeneric(DecompilerBase):
                     self.indent_level += 1
                     # (a guard that leaves to a `return` placed inside the loop's range: the loop ends at its back-edge)
                     in_range = jump_target in self.prescan.relocated_suppress
-                    end = self._loop_end_after(bs) if in_range else jump_target
+                    end = jump_target
                     if in_range:
+                        end = next(at for at, block in self.prescan.relocated_exits.items() if block[0] == jump_target)
                         self.emit.relocated_indent[end] = self.indent_level - 1
                     self.blocks.append((end, "while"))
                     return
