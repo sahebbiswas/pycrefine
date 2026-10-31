@@ -813,21 +813,32 @@ class DecompilerGeneric(DecompilerBase):
 
     def _is_break_to_enclosing_head(self, instr: BytecodeInstruction, prev: Optional[BytecodeInstruction],
                                     jump_target: int) -> bool:
-        """3.9/3.10: *instr* drops the iterator of the innermost `for` loop and jumps back to the head of an enclosing loop."""
-        if instr.opname != "JUMP_ABSOLUTE" or prev is None or prev.opname != "POP_TOP":
+        """*instr* drops the iterator of the innermost `for` loop and jumps back to the head of an enclosing loop."""
+        if not self._is_iterator_drop(instr, prev):
             return False
         loop = next((b for b in reversed(self.blocks) if b[1] in ("for", "while")), None)
         return loop is not None and loop[1] == "for" and jump_target < self._for_start(loop[0])
 
+    def _is_iterator_drop(self, jump: BytecodeInstruction, prev: Optional[BytecodeInstruction]) -> bool:
+        """Whether *jump* is a backward jump right after the instruction that drops a `for` loop's iterator."""
+        if prev is None or prev.opname not in ("POP_TOP", "POP_ITER"):
+            return False
+        return jump.opname == "JUMP_ABSOLUTE" or (jump.opname.startswith("JUMP_BACKWARD")
+                                                 and self.target_version >= (3, 12))
+
     def _for_start(self, loop_end: int) -> int:
-        """Offset of the FOR_ITER of the loop that ends at *loop_end*, or -1."""
-        return max((x.offset for x in self.instructions
-                    if x.opname == "FOR_ITER" and x.offset < loop_end and loop_end == self._get_jump_target(x)),
-                   default=-1)
+        """Offset a jump back to the loop that ends at *loop_end* lands on (its FOR_ITER, or the EXTENDED_ARG before it), or -1."""
+        instrs = self.instructions
+        k = max((k for k, x in enumerate(instrs)
+                 if x.opname == "FOR_ITER" and x.offset < loop_end and loop_end == self._get_jump_target(x)),
+                default=-1)
+        while k > 0 and instrs[k - 1].opname == "EXTENDED_ARG":
+            k -= 1
+        return instrs[k].offset if k >= 0 else -1
 
     def _break_to_enclosing_head(self, loop_start: int, loop_end: int) -> Optional[int]:
         """
-        3.9/3.10: a `break` in a `for` loop that ends its enclosing loop's body jumps (after dropping the iterator)
+        A `break` in a `for` loop that ends its enclosing loop's body jumps (after dropping the iterator)
         straight back to that loop's head. Returns the offset of the jump that closes the enclosing loop and ends
         the `else` clause, or None when the loop has no such `break`.
         """
@@ -835,10 +846,10 @@ class DecompilerGeneric(DecompilerBase):
         for k, ins in enumerate(instrs):
             if ins.offset <= loop_start or ins.offset >= loop_end:
                 continue
-            if (ins.opname == "JUMP_ABSOLUTE" and k > 0 and instrs[k - 1].opname == "POP_TOP"
+            if (k > 0 and self._is_iterator_drop(ins, instrs[k - 1])
                     and self._get_jump_target(ins) < loop_start):
                 head = self._get_jump_target(ins)
-                closing = next((x.offset for x in instrs if x.offset >= loop_end and x.opname == "JUMP_ABSOLUTE"
+                closing = next((x.offset for x in instrs if x.offset >= loop_end and x.opname == ins.opname
                                 and self._get_jump_target(x) == head), None)
                 return closing
         return None
@@ -7262,7 +7273,11 @@ class DecompilerGeneric(DecompilerBase):
         that back-edge, still inside the loop: it belongs to the same branch, so the `else:`
         runs on to the loop's exit.
         """
-        head = next((i for i in self.instructions if i.offset == self._get_jump_target(instr)), None)
+        instrs = self.instructions
+        index = next((k for k, i in enumerate(instrs) if i.offset == self._get_jump_target(instr)), None)
+        while index is not None and index + 1 < len(instrs) and instrs[index].opname == "EXTENDED_ARG":
+            index += 1  # (the jump lands on the prefix of a long FOR_ITER)
+        head = None if index is None else instrs[index]
         if head is None or head.opname != "FOR_ITER":
             return loop_end
         exit_offset = self._get_jump_target(head)
