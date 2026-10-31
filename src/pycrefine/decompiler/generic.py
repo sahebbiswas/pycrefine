@@ -1445,7 +1445,7 @@ class DecompilerGeneric(DecompilerBase):
             "BINARY_MULTIPLY", "BINARY_TRUE_DIVIDE", "BINARY_FLOOR_DIVIDE",
             "BINARY_AND", "BINARY_OR", "BINARY_XOR", "BINARY_LSHIFT",
             "BINARY_RSHIFT", "BINARY_POWER", "BINARY_MATRIX_MULTIPLY",
-            "CALL_FUNCTION", "CALL", "CALL_METHOD", "CALL_FUNCTION_KW",
+            "CALL_FUNCTION", "CALL", "PRECALL", "CALL_METHOD", "CALL_FUNCTION_KW",
             "RETURN_VALUE", "RETURN_CONST", "YIELD_VALUE",
             "LIST_APPEND", "SET_ADD", "MAP_ADD",
             "UNARY_NEGATIVE", "UNARY_POSITIVE", "UNARY_INVERT", "UNARY_NOT",
@@ -2850,11 +2850,15 @@ class DecompilerGeneric(DecompilerBase):
         sub._enclosing_locals = self._enclosing_locals
         sub.instructions = instrs
         sub.pc = 0
+        sub._prescan_value_boolops()   # (an `and`/`or` in the branch is a value operator)
         while sub.pc < len(sub.instructions):
             instr = sub.instructions[sub.pc]
             sub.pc += 1
-            sub._current_instr = instr
-            sub._handle_instruction(instr)
+            sub._decompile_step(instr)
+        # An operator that joins where the branch ends (its value is what the branch yields).
+        while sub.emit.boolop_pending and sub.stack and not sub.emit.boolop_pending[-1][0].startswith("g"):
+            kind, left, _ = sub.emit.boolop_pending.pop()
+            sub.stack.append(_BoolExpr.join(kind, left, sub.stack.pop()))
         if any(line.strip() for line in sub.reconstructed) or len(sub.stack) != 1:
             return None
         return str(sub.stack[-1])
@@ -8139,6 +8143,11 @@ class DecompilerGeneric(DecompilerBase):
                     if any(ins.offset < x.offset < target
                            and x.opname in ("RETURN_VALUE", "RETURN_CONST", "RAISE_VARARGS")
                            for x in instrs):
+                        break
+                    # An unconditional jump over the target ends the branch the condition selects:
+                    # this is the test of a conditional expression whose arm is the chain.
+                    if any(ins.offset < x.offset < target and x.opname in ("JUMP_FORWARD", "JUMP_ABSOLUTE")
+                           and self._get_jump_target(x) >= target for x in instrs):
                         break
                     self.prescan.boolop_groups[ins.offset] = ("and" if ins.opname.endswith("IF_FALSE") else "or", target)
                     break
