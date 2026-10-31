@@ -4803,8 +4803,11 @@ class DecompilerGeneric(DecompilerBase):
             return  # `COPY 3; POP_EXCEPT; RERAISE 1`: the unwinding path, not the end of a clause
         if opname == "POP_EXCEPT" and self.emit.except_header_indents:
             next_is_handler_jump = False
-            if self.pc < len(self.instructions):
-                nxt = self.instructions[self.pc]
+            ahead = self.pc
+            if self._is_as_name_cleanup(ahead, self.emit.exc_bound_names):
+                ahead += 3  # `e = None; del e` for an `as` name sits between POP_EXCEPT and the jump
+            if ahead < len(self.instructions):
+                nxt = self.instructions[ahead]
                 if nxt.offset in self.prescan.exc_handler_jump_offsets:
                     next_is_handler_jump = True
 

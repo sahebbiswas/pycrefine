@@ -72,7 +72,7 @@
     "realworld/lru_cache": "equivalent",
     "realworld/state_machine": "mismatch",
     "realworld/text_stats": "equivalent",
-    "realworld/tokenizer": "syntax_error",
+    "realworld/tokenizer": "mismatch",
     "stdlib/bisect": "compiles",
     "stdlib/colorsys": "compiles",
     "stdlib/copy": "compiles",
