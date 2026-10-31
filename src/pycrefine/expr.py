@@ -112,6 +112,49 @@ class _MergedDisplay(str):
     """
 
 
+class _FStringField(str):
+    """One replacement field of an f-string (``{x!r:>5}``), as the source text of the whole f-string.
+
+    A field is built by ``FORMAT_VALUE`` (3.9 to 3.12) or ``FORMAT_SIMPLE`` / ``FORMAT_WITH_SPEC``
+    (3.13 and later) before anything knows whether ``BUILD_STRING`` will join it with other
+    pieces. When nothing does (``f"{x!r}"``, a lone field), the field is the whole string, so its
+    text is the complete f-string and any consumer gets valid source. ``BUILD_STRING`` and a
+    nested format spec read :attr:`piece`, the bare ``{...}`` text, instead.
+    """
+
+    piece: str
+
+    def __new__(cls, text: str, piece: str) -> "_FStringField":
+        self = super().__new__(cls, text)
+        self.piece = piece
+        return self
+
+
+class _FString(str):
+    """An f-string built by ``BUILD_STRING``, as source text, remembering the text between its quotes in :attr:`body`."""
+
+    body: str
+
+    def __new__(cls, text: str, body: str) -> "_FString":
+        self = super().__new__(cls, text)
+        self.body = body
+        return self
+
+
+class _ConvertedValue(str):
+    """The value a 3.13+ ``CONVERT_VALUE`` converts, waiting for the ``FORMAT_*`` that writes the field.
+
+    The text is the value itself; :attr:`conversion` is ``!s``, ``!r`` or ``!a``.
+    """
+
+    conversion: str
+
+    def __new__(cls, text: str, conversion: str) -> "_ConvertedValue":
+        self = super().__new__(cls, text)
+        self.conversion = conversion
+        return self
+
+
 class UnknownExpression(str):
     """
     An expression the decompiler could not determine, standing in for it on the stack.

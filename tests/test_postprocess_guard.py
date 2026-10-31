@@ -194,6 +194,14 @@ class TestKnownRewrites(unittest.TestCase):
         self.assertIn("elif b:", flat)
         self.assertPreserved('x = """\nelse:\n    if b:\n"""\n')
 
+    def test_print_triple_quoted_strings_are_matched_one_at_a_time(self):
+        """A closing triple quote is not paired with the next opening one, and prefixed strings stay."""
+        plain = self.assertPreserved("print(\'\'\'a\nb\'\'\')\n")
+        self.assertNotIn("\'\'\'", plain)
+        self.assertPreserved("print(f\'\'\'{x}\'\'\' + \'\'\'b\'\'\')\n")
+        self.assertPreserved('print(f"""{x}""" + """b""")\n')
+        self.assertPreserved("print(r\'\'\'a\\n\'\'\', b\'\'\'c\'\'\')\n")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "python_version": "3.11",
-  "python_patch": "3.11.17",
+  "python_patch": "3.11.15",
   "diagnostics_recorded": true,
   "entries": {
     "corpus/comprehensive.py": {

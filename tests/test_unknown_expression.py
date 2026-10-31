@@ -249,7 +249,7 @@ class TestUnderflowDoesNotInventSource(unittest.TestCase):
 
     def test_fstring_field(self):
         dec = self.run_op("_op_fstring", "FORMAT_VALUE", 0)
-        self.assertEqual(dec.stack, ["{?}"])
+        self.assertEqual(dec.stack, ['f"{?}"'])
         self.assertIn(dg.STACK_UNDERFLOW, [d.kind for d in dec.diagnostics])
 
     def test_const_key_map_keys(self):

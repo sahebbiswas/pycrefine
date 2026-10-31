@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "python_version": "3.13",
-  "python_patch": "3.13.17",
+  "python_patch": "3.13.18",
   "diagnostics_recorded": true,
   "entries": {
     "corpus/comprehensive.py": {
@@ -121,17 +121,6 @@
         "def issue_3": "compiles",
         "def issue_4": "compiles",
         "def issue_5": "compiles"
-      },
-      "unit_diagnostics": {
-        "def api_30": {
-          "unsupported_version_construct": 3
-        },
-        "def api_32": {
-          "unsupported_version_construct": 2
-        }
-      },
-      "diagnostics": {
-        "unsupported_version_construct": 5
       }
     },
     "tests/fixtures/foreign_pyc/comprehensive.cpython-312.pyc": {

@@ -460,12 +460,16 @@ def post_process_source(source: str, beautification_level: str = 'core') -> str:
         # strings with literal \n escapes. Use repr() to safely re-quote the value
         # so embedded quotes never produce invalid syntax.
         def repl_str(m):
-            raw_content = m.group(1)          # exactly what was between the triple quotes
+            # A prefixed string (f"""...""", r"""...""", b"""...""") is left as it is: repr() would
+            # write the prefix in front of a quoted copy of its text, which is not the same string.
+            if m.group(1):
+                return m.group(0)
             # repr() of a str always produces a syntactically valid Python literal.
-            return repr(raw_content)  # e.g. "'hello\\nworld'" or '"it\'s"'
+            return repr(m.group(3))  # e.g. "'hello\\nworld'" or '"it\'s"'
 
-        inner = re.sub(r"'''([\s\S]*?)'''", repl_str, inner)
-        inner = re.sub(r'"""([\s\S]*?)"""', repl_str, inner)
+        # Each literal is matched from its opener to its own closer in one pass, so the closer of
+        # one string is never taken for the opener of the next.
+        inner = re.sub("(?<![A-Za-z0-9_])([A-Za-z]{0,3})(\'\'\'|\"\"\")([\\s\\S]*?)\\2", repl_str, inner)
 
         # strip extra grouping parentheses if present, but only when the inner
         # expression is NOT a tuple (top-level comma would change semantics).

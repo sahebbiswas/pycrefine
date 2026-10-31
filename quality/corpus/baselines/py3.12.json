@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "python_version": "3.12",
-  "python_patch": "3.12.3",
+  "python_patch": "3.12.13",
   "entries": {
     "features/class_basic": "equivalent",
     "features/class_special_methods": "equivalent",
@@ -18,7 +18,7 @@
     "features/expr_arithmetic": "equivalent",
     "features/expr_boolops_ternary": "equivalent",
     "features/expr_comparisons": "equivalent",
-    "features/expr_strings": "syntax_error",
+    "features/expr_strings": "equivalent",
     "features/flow_for_else": "equivalent",
     "features/flow_if_elif": "equivalent",
     "features/flow_nested_loops": "equivalent",
@@ -30,7 +30,7 @@
     "features/io_streams": "equivalent",
     "features/modern_async": "mismatch",
     "features/modern_except_star": "mismatch",
-    "features/modern_fstring_nested": "syntax_error",
+    "features/modern_fstring_nested": "equivalent",
     "features/modern_generics": "syntax_error",
     "features/modern_match": "mismatch",
     "features/modern_walrus": "syntax_error",

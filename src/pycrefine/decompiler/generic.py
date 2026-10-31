@@ -34,8 +34,8 @@ from .._constants import (
 )
 from ..codeobj import _is_code
 from .base import DecompilerBase
-from ..expr import (StackNULL, UnknownExpression, _BoolExpr, _CollectionAccumSentinel, _MergedDisplay, _UnpackAccessor,
-                    _unary_operand, is_unknown)
+from ..expr import (StackNULL, UnknownExpression, _BoolExpr, _CollectionAccumSentinel, _ConvertedValue, _FString,
+                    _FStringField, _MergedDisplay, _UnpackAccessor, _unary_operand, is_unknown)
 from ..diagnostics import (AMBIGUOUS_EXPRESSION, INTERNAL_ERROR, STACK_UNDERFLOW, UNKNOWN_CONTROL_FLOW,
                            UNSUPPORTED_OPCODE, UNSUPPORTED_VERSION_CONSTRUCT, DecompilationError)
 from .state import DocState, EmissionState, PrescanState
@@ -104,8 +104,6 @@ _UNSUPPORTED_CONSTRUCTS = {
                     "await, async for and async with are not decompiled (issue #85)"),
     **dict.fromkeys(("LOAD_FROM_DICT_OR_DEREF", "CALL_INTRINSIC_2"),
                     "type parameters (PEP 695) are not decompiled (issue #85)"),
-    **dict.fromkeys(("CONVERT_VALUE", "FORMAT_WITH_SPEC"),
-                    "f-string conversions and format specs are dropped on 3.13 and later (issue #157)"),
 }
 
 # `async def` functions (CO_COROUTINE, CO_ASYNC_GENERATOR). One with no `await` in it has no opcode
@@ -176,7 +174,8 @@ _BASE_DISPATCH: Dict[str, str] = {
     "DUP_TOP": "_op_dup_top", "DUP_TOP_TWO": "_op_dup_top",
 
     # Strings
-    "FORMAT_VALUE": "_op_fstring", "FORMAT_SIMPLE": "_op_fstring",
+    "FORMAT_VALUE": "_op_fstring", "FORMAT_SIMPLE": "_op_fstring", "FORMAT_WITH_SPEC": "_op_fstring",
+    "CONVERT_VALUE": "_op_convert_value",
     "BUILD_STRING": "_op_build_string",
 
     # Jumps
@@ -2418,19 +2417,28 @@ class DecompilerGeneric(DecompilerBase):
                     mini_stack.append(self._format_val(val))
                 else:
                     mini_stack.append(str(val))
-            elif op in ("FORMAT_VALUE", "FORMAT_SIMPLE", "BUILD_STRING", "BUILD_CONST_KEY_MAP", "BUILD_MAP"):
-                if op in ("FORMAT_VALUE", "FORMAT_SIMPLE"):
+            elif op == "CONVERT_VALUE":
+                val = mini_stack.pop() if mini_stack else "{expr}"
+                mini_stack.append(_ConvertedValue(str(val), self._FSTRING_CONVERSIONS.get(int(ins.arg or 0), "")))
+            elif op in ("FORMAT_VALUE", "FORMAT_SIMPLE", "FORMAT_WITH_SPEC", "BUILD_STRING", "BUILD_CONST_KEY_MAP", "BUILD_MAP"):
+                if op in ("FORMAT_VALUE", "FORMAT_SIMPLE", "FORMAT_WITH_SPEC"):
+                    flags = int(ins.arg) if ins.arg is not None else 0
+                    conversion = self._FSTRING_CONVERSIONS.get(flags & 0x03, "") if op == "FORMAT_VALUE" else ""
+                    spec = mini_stack.pop() if mini_stack and (op == "FORMAT_WITH_SPEC" or (op == "FORMAT_VALUE" and flags & 0x04)) else None
                     val = mini_stack.pop() if mini_stack else "{expr}"
-                    mini_stack.append(f"{{{val}}}")
+                    if isinstance(val, _ConvertedValue):
+                        conversion = val.conversion
+                    mini_stack.append(self._make_fstring_field(val, conversion, spec))
                 elif op == "BUILD_STRING":
                     count = int(ins.arg) if ins.arg is not None else 0
                     parts = []
                     for _ in range(count):
                         if mini_stack:
                             p_val = mini_stack.pop()
-                            p = self._format_fstring_part(str(p_val))
+                            p = p_val.piece if isinstance(p_val, _FStringField) else self._format_fstring_part(str(p_val))
                             parts.insert(0, p)
-                    mini_stack.append(f'f"{"".join(parts)}"')
+                    res = "".join(parts)
+                    mini_stack.append(_FString(f'f"{res}"', res))
                 elif op in ("BUILD_MAP", "BUILD_CONST_KEY_MAP"):
                     count = int(ins.arg) if ins.arg is not None else 0
                     pop_cnt = (count * 2) if op == "BUILD_MAP" else (count + 1)
@@ -4334,6 +4342,15 @@ class DecompilerGeneric(DecompilerBase):
                 val = instr.arg
             if opname == "LOAD_GLOBAL_MODULE" and isinstance(val, (list, tuple)) and val:
                 val = val[0]
+            if opname == "LOAD_COMMON_CONSTANT":
+                # 3.14: a builtin by its place in the interpreter's table (AssertionError for `assert`).
+                name = getattr(val, "__name__", None)
+                if name is None and isinstance(instr.arg, int) and 0 <= instr.arg < len(_COMMON_CONSTANT_NAMES):
+                    name = _COMMON_CONSTANT_NAMES[instr.arg]
+                if name is not None:
+                    val = name
+                    self.stack.append(name)
+                    return
             if "CONST" in opname or "SMALL_INT" in opname:
                 self.stack.append(self._format_val(val))
             else:
@@ -5163,27 +5180,6 @@ class DecompilerGeneric(DecompilerBase):
                 else None
             )
 
-            # Attach default values to trailing positional args
-            if defaults is not None:
-                raw = str(defaults)
-                # defaults is repr of a tuple e.g. "('Hello',)" or "('Hello', 0)"
-                # Strip outer parens/quotes and split carefully
-                inner = raw.strip()
-                if inner.startswith("(") and inner.endswith(")"):
-                    inner = inner[1:-1]
-                # Split on comma but not inside nested parens/quotes (simple case)
-                defs = [d.strip() for d in inner.split(",") if d.strip()]
-                # Remove trailing empty string from tuple repr like "('x',)"
-                if defs and defs[-1] == "":
-                    defs = defs[:-1]
-                n_pos = len(positional)
-                n_defs = len(defs)
-                n_no_default = n_pos - n_defs
-                for i, d in enumerate(defs):
-                    idx = n_no_default + i
-                    if 0 <= idx < n_pos:
-                        positional[idx] = f"{positional[idx]}={d}"
-
             # Extract keyword-only parameters
             kwonly_params = []
             if inner_code.co_kwonlyargcount > 0:
@@ -5191,16 +5187,6 @@ class DecompilerGeneric(DecompilerBase):
                 kwonly_end = inner_code.co_argcount + inner_code.co_kwonlyargcount
                 kwonly_names = list(inner_code.co_varnames[kwonly_start:kwonly_end])
 
-                # Attach defaults if kw_defs is available
-                if kw_defs:
-                    # kw_defs is usually a string repr of a dict like "{'x': 1, 'y': 'hi'}"
-                    # We can use regex to safely extract the value for each parameter name.
-                    for i, name in enumerate(kwonly_names):
-                        # Pattern for finding the value of a key in a dict repr
-                        m_val = re.search(rf"'{name}': ([^,}}]+)", kw_defs)
-                        if m_val:
-                            val = m_val.group(1).strip()
-                            kwonly_names[i] = f"{name}={val}"
                 kwonly_params = kwonly_names
 
             # Combine positional, keyword-only, *args, and **kwargs
@@ -5230,7 +5216,20 @@ class DecompilerGeneric(DecompilerBase):
             dec._enclosing_locals = self._child_enclosing_locals()
             body = dec.decompile()
             sig = f"def {inner_code.co_name}({', '.join(params)}):"
-            
+            func_text = f"{sig}\n{body}"
+            for found, keyword_only in ((defaults, False), (kw_defs, True)):
+                if found is not None and (not keyword_only or found):
+                    with_defaults = self._add_parameter_defaults(("func", func_text), found, keyword_only)
+                    if with_defaults is None:
+                        self._report(AMBIGUOUS_EXPRESSION, f"default values {str(found)!r} could not be attached to {sig!r}", instr)
+                    else:
+                        func_text = str(with_defaults[1])
+            read = self._read_signature(("func", func_text))
+            if read is not None:
+                sig, body = read[1][:-len(" pass")], read[2][1:]
+            else:
+                sig, _, body = func_text.partition("\n")
+
             if inner_code.co_name == '<lambda>':
                 rendered = _render_func_tuple(f"{sig}\n{body}", [])
                 if not rendered.startswith("("):
@@ -5243,50 +5242,127 @@ class DecompilerGeneric(DecompilerBase):
 
         # ── SET_FUNCTION_ATTRIBUTE (Python 3.14+) ─────────────────────
 
+    @staticmethod
+    def _split_display(text: str, kind: type) -> Optional[Any]:
+        """The ``ast`` node of the tuple or dict display *text*, or None when it is not one."""
+        try:
+            node = ast.parse(text.strip(), mode="eval").body
+        except SyntaxError:
+            return None
+        return node if isinstance(node, kind) else None
+
+    @staticmethod
+    def _parse_def_head(head: str) -> Optional[Tuple[str, Any]]:
+        """``(head + " pass", ast.arguments)`` when *head* is the whole ``def`` line, else None."""
+        named = re.match(r"def\s+([^\s(]+)\s*\(", head)
+        if named is None:
+            return None
+        # `<lambda>` and the compiler's own parameters (`.0`, `.format`) are not identifiers:
+        # the copy that is parsed swaps those characters for ones of the same width, so the
+        # columns found in it are the columns of the text that is changed.
+        name = named.group(1)
+        placeholder = name if name.isidentifier() else "_" * len(name)
+        parsed = (head[:named.start(1)] + placeholder + re.sub(r"(?<=[(,\s*/])\.(?=\w)", "_", head[named.end(1):])
+                  + " pass")
+        try:
+            node = ast.parse(parsed).body[0]
+        except SyntaxError:
+            return None
+        arguments = getattr(node, "args", None)
+        return None if arguments is None else (head + " pass", arguments)
+
+    @classmethod
+    def _read_signature(cls, func_val: Any) -> Optional[Tuple[bool, str, str, Any]]:
+        """
+        ``(is_def, signature text, text after it, ast.arguments)`` of *func_val*, a
+        ``("func", source)`` tuple or the text of a lambda, or None when it cannot be read.
+        A default value can run over several lines, so the signature is the shortest run of
+        lines that is a complete ``def`` line.
+        """
+        is_def = isinstance(func_val, tuple) and len(func_val) > 1 and func_val[0] == "func"
+        text = str(func_val[1] if is_def else func_val)
+        if is_def:
+            lines = text.split("\n")
+            for count in range(1, min(len(lines), 200) + 1):
+                head = "\n".join(lines[:count])
+                found = cls._parse_def_head(head)
+                if found is not None:
+                    return True, found[0], text[len(head):], found[1]
+            return None
+        if not text.lstrip("(").startswith("lambda"):
+            return None
+        try:
+            node = ast.parse(text, mode="eval").body
+        except SyntaxError:
+            return None
+        arguments = getattr(node, "args", None)
+        return None if arguments is None else (False, text, "", arguments)
+
+    def _default_values(self, arguments: Any, defaults: Any, keyword_only: bool) -> Optional[List[Tuple[Any, str]]]:
+        """The ``(parameter node, value text)`` pairs that the display *defaults* gives, or None."""
+        display_text = str(defaults).strip()
+        if keyword_only:
+            display = self._split_display(display_text, ast.Dict)
+            if display is None:
+                return None
+            values: Dict[str, str] = {}
+            for key, value in zip(display.keys, display.values):
+                if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                    values[key.value] = ast.get_source_segment(display_text, value) or ast.unparse(value)
+            return [(arg, values[arg.arg]) for arg, current in zip(arguments.kwonlyargs, arguments.kw_defaults)
+                    if current is None and arg.arg in values]
+        display = self._split_display(display_text, ast.Tuple)
+        if display is None:
+            return None
+        segments = [ast.get_source_segment(display_text, item) or ast.unparse(item) for item in display.elts]
+        positional = arguments.posonlyargs + arguments.args
+        if len(segments) > len(positional) or arguments.defaults:
+            return None
+        return list(zip(positional[len(positional) - len(segments):], segments))
+
+    def _add_parameter_defaults(self, func_val: Any, defaults: Any, keyword_only: bool) -> Any:
+        """
+        *func_val* (a ``("func", source)`` tuple, or the text of a lambda) with default values
+        added to its parameters: the tuple display *defaults* goes to the last positional
+        parameters, the dict display *defaults* to the keyword-only ones it names. The values are
+        written after their parameters in the text already built, so the rest of it is untouched.
+        Returns None when *func_val* is not a function whose signature can be read, or *defaults*
+        is not the display it should be.
+        """
+        signature = self._read_signature(func_val)
+        if signature is None:
+            return None
+        is_def, shown, after, arguments = signature
+        params = self._default_values(arguments, defaults, keyword_only)
+        if params is None:
+            return None
+        data = shown.encode("utf-8")
+        starts = [0]
+        for row in data.split(b"\n"):
+            starts.append(starts[-1] + len(row) + 1)   # the columns are per line, in bytes
+        places = [(starts[arg.end_lineno - 1] + arg.end_col_offset, value) for arg, value in params]
+        for place, value in sorted(places, key=lambda pair: pair[0], reverse=True):
+            data = data[:place] + f"={value}".encode("utf-8") + data[place:]
+        patched = data.decode("utf-8")
+        if is_def:
+            return ("func", patched[:len(patched) - len(" pass")] + after)
+        return patched
+
     def _op_set_function_attribute(self, instr: BytecodeInstruction):
-        opname = instr.opname
-        # 3.14 uses SET_FUNCTION_ATTRIBUTE to attach defaults/annotations
-        # to a function after MAKE_FUNCTION.
-        # Stack layout: TOS=func_tuple, TOS-1=attribute_value
-        # arg bitmask: 0x01=defaults, 0x02=kwonly_defaults, 0x04=annotations, 0x08=closure
+        # 3.13+ attaches defaults, annotations and the closure to the function after MAKE_FUNCTION.
+        # Stack layout: TOS=function, TOS-1=attribute value
+        # arg bitmask: 0x01=defaults, 0x02=keyword-only defaults, 0x04=annotations, 0x08=closure, 0x10=annotate (3.14)
         attr_flags = int(instr.arg) if instr.arg is not None else 0
         func_val = self._pop(None)
         attr_val = self._pop(None)
-
-        if (func_val is not None and isinstance(func_val, tuple)
-                and func_val[0] == "func" and attr_val is not None
-                and (attr_flags & 0x01)):  # positional defaults
-            # Rewrite the function signature to include defaults
-            func_text = str(func_val[1])
-            lines_f = func_text.split("\n")
-            sig_line = lines_f[0] if lines_f else ""
-            # Parse: "def name(args):" -> attach defaults from attr_val
-            if sig_line.startswith("def ") and "(" in sig_line:
-                raw = str(attr_val).strip()
-                # attr_val is repr of tuple e.g. "(10,)" or "(10, 'hello')"
-                inner = raw
-                if inner.startswith("(") and inner.endswith(")"):
-                    inner = inner[1:-1]
-                defs = [d.strip() for d in inner.split(",") if d.strip()]
-                # Get arg list from sig
-                paren_start = sig_line.index("(") + 1
-                paren_end = sig_line.rindex(")")
-                args_str = sig_line[paren_start:paren_end]
-                args = [a.strip() for a in args_str.split(",") if a.strip()]
-                n_no_def = len(args) - len(defs)
-                for i, d in enumerate(defs):
-                    idx = n_no_def + i
-                    if 0 <= idx < len(args) and "=" not in args[idx]:
-                        args[idx] = f"{args[idx]}={d}"
-                new_sig = sig_line[:paren_start] + ", ".join(args) + sig_line[paren_end:]
-                lines_f[0] = new_sig
-                self.stack.append(("func", "\n".join(lines_f)))
+        if func_val is not None and attr_val is not None and attr_flags & 0x03:
+            with_defaults = self._add_parameter_defaults(func_val, attr_val, keyword_only=bool(attr_flags & 0x02))
+            if with_defaults is None:
+                self._report(AMBIGUOUS_EXPRESSION, f"default values {str(attr_val)!r} could not be attached to the function", instr)
             else:
-                self.stack.append(func_val)
-        else:
-            # Non-defaults attribute or unrecognised — push func back unchanged
-            if func_val is not None:
-                self.stack.append(func_val)
+                func_val = with_defaults
+        if func_val is not None:
+            self.stack.append(func_val)
 
         # ── return ─────────────────────────────────────────────────────
 
@@ -5889,24 +5965,68 @@ class DecompilerGeneric(DecompilerBase):
 
         # ── f-strings ──────────────────────────────────────────────────
 
-    def _op_fstring(self, instr: BytecodeInstruction):
-        # arg bitmask: 0x01=str(), 0x02=repr(), 0x03=ascii(), 0x04=format_spec
+    _FSTRING_CONVERSIONS = {1: "!s", 2: "!r", 3: "!a"}
+
+    def _fstring_spec(self, spec: Any) -> str:
+        """The text of a format spec, between the colon and the closing brace of its field."""
+        if isinstance(spec, _FStringField):
+            return spec.piece                      # the spec is one nested field: {x:{width}}
+        if isinstance(spec, _FString):
+            return spec.body                       # text and nested fields: {x:{width}.{precision}}
+        text = str(spec)
+        try:
+            value = ast.literal_eval(text)
+        except (ValueError, SyntaxError):
+            value = None
+        if isinstance(value, str):
+            return self._format_fstring_part(text)
+        return f"{{{text}}}"                       # not a constant: a field of its own
+
+    @staticmethod
+    def _fstring_quote(piece: str) -> str:
+        """The quote that lets *piece* stand alone as an f-string before 3.12 (no quote reuse inside a field)."""
+        for quote in ('"', "'"):
+            if quote not in piece:
+                return quote
+        for quote in ('"""', "'''"):
+            if quote not in piece and not piece.endswith(quote[0]):
+                return quote
+        return '"'
+
+    def _make_fstring_field(self, value: Any, conversion: str = "", spec: Any = None) -> _FStringField:
+        """
+        The field ``{value!r:spec}``, as the f-string a lone field is. The expression is set off
+        by a space when it starts with a brace (``{ {1, 2} }``), which would be read as an escape.
+        """
+        text = str(value)
+        if text.startswith("{"):
+            text = f" {text} "
+        piece = "{" + text + conversion + (f":{self._fstring_spec(spec)}" if spec is not None else "") + "}"
+        quote = self._fstring_quote(piece)
+        return _FStringField(f"f{quote}{piece}{quote}", piece)
+
+    def _op_convert_value(self, instr: BytecodeInstruction):
+        """3.13+: ``CONVERT_VALUE`` applies ``!s`` / ``!r`` / ``!a``; the ``FORMAT_*`` that follows writes the field."""
         arg = int(instr.arg) if instr.arg is not None else 0
+        value = self._pop()
+        self.stack.append(_ConvertedValue(str(value), self._FSTRING_CONVERSIONS.get(arg, "")))
+
+    def _op_fstring(self, instr: BytecodeInstruction):
+        opname = instr.opname
         conversion = ""
-        if (arg & 0x03) == 1: conversion = "!s"
-        elif (arg & 0x03) == 2: conversion = "!r"
-        elif (arg & 0x03) == 3: conversion = "!a"
-        
-        format_spec = ""
-        if (arg & 0x04):
-            # The format spec follows the value on the stack
-            spec = self._pop()
-            spec_str = str(spec).strip("'\"")
-            format_spec = f":{spec_str}"
-            
-        val = self._pop()
-        
-        self.stack.append(f"{{{val}{conversion}{format_spec}}}")
+        spec = None
+        if opname == "FORMAT_VALUE":
+            # 3.9 to 3.12. arg: 0x03 = conversion (1 str, 2 repr, 3 ascii), 0x04 = a format spec on the stack
+            arg = int(instr.arg) if instr.arg is not None else 0
+            conversion = self._FSTRING_CONVERSIONS.get(arg & 0x03, "")
+            if arg & 0x04:
+                spec = self._pop()
+        elif opname == "FORMAT_WITH_SPEC":
+            spec = self._pop()                     # 3.13+: the spec is on top of the value
+        value = self._pop()
+        if isinstance(value, _ConvertedValue):
+            conversion = value.conversion
+        self.stack.append(self._make_fstring_field(value, conversion, spec))
 
     def _op_build_string(self, instr: BytecodeInstruction):
         count = int(instr.arg) if instr.arg is not None else 0
@@ -5918,10 +6038,13 @@ class DecompilerGeneric(DecompilerBase):
                 if (p_val is None or str(p_val) == "__SENTINEL_NULL__" or 
                     getattr(p_val, '__class__', None).__name__ == 'StackNULL'):
                     continue
-                p = self._format_fstring_part(str(p_val))
+                if isinstance(p_val, _FStringField):
+                    p = p_val.piece
+                else:
+                    p = self._format_fstring_part(str(p_val))
                 parts.insert(0, p)
         res = "".join(parts)
-        self.stack.append(f"f\"{res}\"")
+        self.stack.append(_FString(f"f\"{res}\"", res))
         # ── jumps / control flow ───────────────────────────────────────
 
     def _op_jump(self, instr: BytecodeInstruction):
