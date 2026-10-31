@@ -3708,6 +3708,7 @@ class DecompilerGeneric(DecompilerBase):
         self.prescan.finally_body_suppress = set()     # inlined finally code to suppress
         self.emit.deferred_finally_lines = {}      # merge_offset → rendered finally lines
         self.emit.deferred_except_lines = {}       # merge_offset → rendered handler lines
+        self.emit.deferred_outer_except_lines = {}
         self.prescan.handler_section_suppress = set()  # except handler instructions to suppress
         self.prescan.wrapper_body_suppress = set()     # re-raise/with-exit wrapper instructions
         self.emit.pending_finally_merge = None
@@ -3733,13 +3734,14 @@ class DecompilerGeneric(DecompilerBase):
         # the try's normal path then ends where the clause does.
         self.prescan.try_else = {}
         exit_only = self._prescan_exit_only_finally(_exc_entries, real_push_exc, _body_end_by_target)
+        outer_handlers, outer_inner = self._outer_handler_map(real_push_exc)  # (outer NOP -> handler, handler -> inner handler)
         if self.target_version >= (3, 11):
             _body_start_by_target: Dict[int, int] = {}
             for e in _exc_entries:
                 if e.target in real_push_exc:
                     _body_start_by_target[e.target] = min(_body_start_by_target.get(e.target, e.start), e.start)
             for handler, end in list(_body_end_by_target.items()):
-                if handler in exit_only:
+                if handler in exit_only or handler in outer_handlers.values() or handler in outer_inner.values():
                     continue
                 region = self._try_else_region(end, handler, _body_start_by_target.get(handler, 0))
                 if region is not None:
@@ -3792,6 +3794,15 @@ class DecompilerGeneric(DecompilerBase):
                         self.prescan.push_exc_to_finally_merge[merge].sort()
                     if merge not in self.prescan.finally_merge_offsets:
                         self.prescan.except_only_merge_offsets.add(merge)
+
+        # The handlers of a try whose body is only another try rejoin where the inner try's do.
+        self.prescan.outer_handlers = set(outer_inner)
+        for outer_handler, inner_handler in outer_inner.items():
+            for merge, handlers in self.prescan.push_exc_to_finally_merge.items():
+                if inner_handler in handlers and outer_handler not in handlers:
+                    handlers.append(outer_handler)
+                    handlers.sort()
+                    break
 
         # ── Suppress full bodies of re-raise wrappers and with-exit handler
         for pei_off in sorted(self.prescan.suppress_push_exc_offsets):
@@ -3848,7 +3859,10 @@ class DecompilerGeneric(DecompilerBase):
                 handler_lines = self._render_handler_section(handler_instrs, merge_off)
                 if merge_off not in self.emit.deferred_except_lines:
                     self.emit.deferred_except_lines[merge_off] = []
-                self.emit.deferred_except_lines[merge_off].extend(handler_lines)
+                if push_off in self.prescan.outer_handlers:
+                    self.emit.deferred_outer_except_lines.setdefault(merge_off, []).extend(handler_lines)
+                else:
+                    self.emit.deferred_except_lines[merge_off].extend(handler_lines)
 
         # ── Find and suppress finally body instructions
         for merge_off, targets in self.prescan.push_exc_to_finally_merge.items():
@@ -3985,6 +3999,7 @@ class DecompilerGeneric(DecompilerBase):
                     self.emit.deferred_except_lines[finally_start] = []
                     break
         self._prescan_outer_finally()
+        self.prescan.nop_to_push_exc.update(outer_handlers)
         # The normal-exit epilogue for a `with` block is:
         #   LOAD_CONST None; LOAD_CONST None; LOAD_CONST None; CALL 2; POP_TOP
         # Suppress the LOAD_CONSTs and the CALL to prevent ``None(None, None)``.
@@ -4036,6 +4051,42 @@ class DecompilerGeneric(DecompilerBase):
                 continue
             self.prescan.nop_to_finally_merge[outer.offset] = merge
             self.prescan.outer_finally_merges.add(merge)
+
+    def _outer_handler_map(self, real_push_exc: set) -> Tuple[Dict[int, int], Dict[int, int]]:
+        """
+        The `except` handler of each try whose body is only another try, by that try's NOP, and the inner tries' handlers.
+
+        When a `try` body starts with, and is nothing but, another `try`, the exception table
+        covers none of the outer body: the inner body belongs to the inner handler, and the
+        outer handlers are reached only from inside the inner handler's section. Such a
+        handler starts after the inner one, and every range that leads to it begins in the
+        inner handler's section.
+        """
+        entries = self._exception_entries() or []
+        by_off = {ins.offset: ins for ins in self.instructions}
+        nops = set(self.prescan.try_nop_offsets) | {2}
+        inner_handlers = {}
+        for nop in nops:
+            if nop in by_off and by_off[nop].opname == "NOP":
+                cover = next((e.target for e in entries if e.start <= nop + 2 < e.end and e.target in real_push_exc), None)
+                if cover is not None:
+                    inner_handlers[nop] = cover
+        taken = set(inner_handlers.values())
+        found: Dict[int, int] = {}
+        inner_of_outer: Dict[int, int] = {}
+        for inner, inner_handler in sorted(inner_handlers.items()):
+            outer = by_off.get(inner - 2)
+            if outer is None or outer.opname != "NOP" or outer.offset in inner_handlers or outer.offset not in nops:
+                continue
+            body_end = max(e.end for e in entries if e.target == inner_handler)
+            handler = min((b for b in real_push_exc if b > inner_handler and b not in taken
+                           and any(e.target == b for e in entries)
+                           and all(body_end <= e.start < b for e in entries if e.target == b)), default=None)
+            if handler is not None:
+                found[outer.offset] = handler
+                inner_of_outer[handler] = inner_handler
+                taken.add(handler)
+        return found, inner_of_outer
 
     def _wrapper_cleanup_end(self, wrapper_off: int, default: int) -> int:
         """
@@ -4701,6 +4752,14 @@ class DecompilerGeneric(DecompilerBase):
             for line in except_lines:
                 self._append_reconstructed(line)
             self.indent_level = save_indent
+
+        # The handlers of the try around that one come next, one level out
+        outer_lines = self.emit.deferred_outer_except_lines.get(merge_offset)
+        if outer_lines:
+            self.indent_level = header_indent - 1
+            for line in outer_lines:
+                self._append_reconstructed(line)
+            self.indent_level = header_indent
 
         # Then emit the finally: block
         finally_lines = self.emit.deferred_finally_lines.get(merge_offset)
