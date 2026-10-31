@@ -1233,8 +1233,8 @@ class Decompiler39(DecompilerGeneric):
                 # Emit 'continue' instead of 'pass' in that case.
                 _emitted_continue = False
                 look = self.pc
-                if self._is_as_name_cleanup(look, self.emit.exc_bound_names):
-                    look += 3   # `e = None; del e` for an `as` name sits before the jump
+                # `e = None; del e` for an `as` name sits before the jump
+                look += self._is_as_name_cleanup(look, self.emit.exc_bound_names)
                 if (look < len(self.instructions)
                         and self.instructions[look].opname in ("JUMP_ABSOLUTE", "JUMP_BACKWARD")
                         and isinstance(self.instructions[look].argval, int)
@@ -1251,14 +1251,13 @@ class Decompiler39(DecompilerGeneric):
                         _emitted_continue = True
 
                 if not _emitted_continue:
-                    # `break`: the loop's iterator is dropped (POP_TOP) before the jump forward to
-                    # the code after the loop.
+                    # `break`: the loop's iterator is dropped (POP_TOP) before the jump out of the
+                    # loop. That is forward to the code after it, or back to the head of an enclosing
+                    # loop when the loop ended its body; a `continue` drops no iterator.
                     look = self.pc
-                    if self._is_as_name_cleanup(look, self.emit.exc_bound_names):
-                        look += 3
+                    look += self._is_as_name_cleanup(look, self.emit.exc_bound_names)
                     if (look + 1 < len(self.instructions) and self.instructions[look].opname == "POP_TOP"
-                            and self.instructions[look + 1].opname == "JUMP_ABSOLUTE"
-                            and self._get_jump_target(self.instructions[look + 1]) > self.instructions[look + 1].offset):
+                            and self.instructions[look + 1].opname == "JUMP_ABSOLUTE"):
                         self._append_reconstructed("break")
                         self.pc = look + 2
                         dead = self.instructions[look + 2:look + 4]

@@ -115,6 +115,7 @@ _ASYNC_DEF_REASON = "async def is not decompiled and is written as a plain def (
 # Opcodes that reach `_op_unknown` and are correctly left out of the source: they set up
 # generators and wide operands, or (3.10's `POP_BLOCK`) belong to block-based exception
 # handling, which is reported once per code object by `_report_version_gaps`.
+_AS_CLEANUP_LENGTH = 3   # LOAD_CONST None; STORE name; DELETE name
 # The instructions that can end the clean-up of an `as` name (`e = None; del e`), before a loop's iterator is dropped.
 _AS_CLEANUP_OPS = ("STORE_FAST", "DELETE_FAST", "STORE_NAME", "DELETE_NAME", "STORE_DEREF", "DELETE_DEREF",
                    "STORE_GLOBAL", "DELETE_GLOBAL")
@@ -400,7 +401,11 @@ class DecompilerGeneric(DecompilerBase):
         """
         accesses = [(ins.opname, ins.argval) for ins in self._compiled_instructions]
         outer_free = set(self.code_obj.co_freevars)
-        for const in self.code_obj.co_consts:
+        # A comprehension inside a comprehension is its own code object too, and its `:=` target
+        # also belongs to this body, so the walk goes down through every one of them.
+        pending = list(reversed(self.code_obj.co_consts))
+        while pending:
+            const = pending.pop()
             if not _is_code(const) or const.co_name not in ("<listcomp>", "<setcomp>", "<dictcomp>", "<genexpr>"):
                 continue
             inner = _pick_decompiler_class(self)(const, indent_level=1, beautification_level=self.beautification_level,
@@ -411,6 +416,7 @@ class DecompilerGeneric(DecompilerBase):
                         ins.opname in ("STORE_DEREF", "DELETE_DEREF") and ins.argval in outer_free
                         and ins.argval not in const.co_cellvars):
                     accesses.append((ins.opname, ins.argval))
+            pending.extend(reversed(const.co_consts))
         return accesses
 
     def _child_enclosing_locals(self) -> set:
@@ -4830,8 +4836,8 @@ class DecompilerGeneric(DecompilerBase):
         if opname == "POP_EXCEPT" and self.emit.except_header_indents:
             next_is_handler_jump = False
             ahead = self.pc
-            if self._is_as_name_cleanup(ahead, self.emit.exc_bound_names):
-                ahead += 3  # `e = None; del e` for an `as` name sits between POP_EXCEPT and the jump
+            # `e = None; del e` for an `as` name sits between POP_EXCEPT and the jump
+            ahead += self._is_as_name_cleanup(ahead, self.emit.exc_bound_names)
             if (ahead + 1 < len(self.instructions) and self.instructions[ahead].opname == "POP_TOP"
                     and self.instructions[ahead + 1].opname in ("JUMP_FORWARD", "JUMP_ABSOLUTE", "JUMP_BACKWARD")):
                 # `break`: the loop's iterator is dropped before the jump to the code after the loop
@@ -4874,14 +4880,19 @@ class DecompilerGeneric(DecompilerBase):
         hit = [e for e in entries if e.start <= offset < e.end and e.lasti]
         return min(hit, key=lambda e: e.end - e.start).target if hit else None
 
-    def _is_as_name_cleanup(self, k: int, bound: set) -> bool:
-        """Whether ``LOAD_CONST None; STORE name; DELETE name`` for an ``as`` name starts at *k*."""
-        trio = self.instructions[k:k + 3]
-        if len(trio) < 3 or trio[0].opname != "LOAD_CONST" or trio[0].argval is not None:
-            return False
+    def _is_as_name_cleanup(self, k: int, bound: set) -> int:
+        """
+        How many instructions of ``LOAD_CONST None; STORE name; DELETE name`` (the clean-up of an
+        ``as`` name) start at *k*: that many (always 3), or 0 when they do not.
+        """
+        trio = self.instructions[k:k + _AS_CLEANUP_LENGTH]
+        if len(trio) < _AS_CLEANUP_LENGTH or trio[0].opname != "LOAD_CONST" or trio[0].argval is not None:
+            return 0
         store, delete = trio[1], trio[2]
-        return (store.opname.startswith("STORE_") and delete.opname.startswith("DELETE_")
-                and str(store.argval) in bound and delete.argval == store.argval)
+        if (store.opname.startswith("STORE_") and delete.opname.startswith("DELETE_")
+                and str(store.argval) in bound and delete.argval == store.argval):
+            return _AS_CLEANUP_LENGTH
+        return 0
 
     def _handler_exit_return(self, start: int) -> Optional[Tuple[int, int]]:
         """
@@ -4907,7 +4918,7 @@ class DecompilerGeneric(DecompilerBase):
             if op in ("NOP", "CACHE", "POP_BLOCK"):
                 k += 1
             elif self._is_as_name_cleanup(k, bound):
-                k += 3
+                k += _AS_CLEANUP_LENGTH
             else:
                 break
         # A `break` that the compiler replaced by a copy of the `return` after the loop drops the
@@ -6174,6 +6185,7 @@ class DecompilerGeneric(DecompilerBase):
     def _op_build_string(self, instr: BytecodeInstruction):
         count = int(instr.arg) if instr.arg is not None else 0
         parts = []
+        quote_in_field = False
         for _ in range(count):
             if self.stack:
                 p_val = self.stack.pop()
@@ -6183,11 +6195,15 @@ class DecompilerGeneric(DecompilerBase):
                     continue
                 if isinstance(p_val, _FStringField):
                     p = p_val.piece
+                    quote_in_field = quote_in_field or '"' in p
                 else:
                     p = self._format_fstring_part(str(p_val))
                 parts.insert(0, p)
         res = "".join(parts)
-        self.stack.append(_FString(f"f\"{res}\"", res))
+        # Before 3.12 a field cannot reuse the quote its f-string is written with, so a field
+        # that holds a double quote needs another outer quote.
+        quote = self._fstring_quote(res) if quote_in_field else '"'
+        self.stack.append(_FString(f"f{quote}{res}{quote}", res))
         # ── jumps / control flow ───────────────────────────────────────
 
     def _op_jump(self, instr: BytecodeInstruction):

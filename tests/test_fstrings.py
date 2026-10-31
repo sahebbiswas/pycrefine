@@ -88,6 +88,21 @@ class TestFStringFields(unittest.TestCase):
     def test_field_whose_text_has_double_quotes_only(self):
         self.assert_same_behavior("d = {'k': 3.5}\nprint(f'{d[\"k\"]!r:>8}')\n")
 
+    def test_composite_f_string_with_a_field_holding_a_double_quote(self):
+        """Before 3.12 a field cannot reuse the f-string's quote, so the text around it needs another."""
+        out = self.assert_same_behavior(
+            "d = {'say \"hi\"': 7}\n"
+            "n = 2\n"
+            "print(f'''a{d.get('say \"hi\"')}b''')\n"
+            "print(f'''{n}-{d.get('say \"hi\"')!r}-{n:>3}''')\n"
+            "print(f'''x{d.get('say \"hi\"')}y{n}''')\n"
+        )
+        self.assertGreaterEqual(ast.dump(ast.parse(out)).count("JoinedStr"), 3, out)
+
+    def test_composite_f_string_without_a_double_quote_keeps_its_quote(self):
+        out = decompile("def f(d, n):\n    return f'a{d[\"k\"]}b{n}'\n")
+        self.assertIn('f"a{d[\'k\']}b{n}"', out)
+
 
 class TestFStringFieldBuilder(unittest.TestCase):
     """The pieces the handlers build the fields from."""

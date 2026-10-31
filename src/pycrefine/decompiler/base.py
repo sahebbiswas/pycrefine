@@ -30,6 +30,8 @@ class DecompilerBase:
         # Exception table, filled in on first use by _exception_entries(); False = not yet read.
         self._exception_entries_cache: Any = False
         self.instructions: List[BytecodeInstruction] = []
+        # The instructions as compiled, kept as `decompile()` starts: `instructions` is rewritten
+        # as comprehensions are rebuilt inline, and `_scope_accesses` needs what the compiler wrote.
         self._compiled_instructions: List[BytecodeInstruction] = []
         self.reconstructed: List[str] = []
         self.indent_level = indent_level
