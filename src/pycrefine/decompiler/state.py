@@ -53,6 +53,7 @@ class PrescanState:  # pylint: disable=too-many-instance-attributes
     push_exc_to_finally_merge: Dict[int, List[int]] = field(default_factory=dict)  # merge offset -> handler entry points that rejoin there
     finally_merge_offsets: Set[int] = field(default_factory=set)    # merge labels where deferred finally/except text is emitted
     except_only_merge_offsets: Set[int] = field(default_factory=set)
+    outer_finally_merges: Set[int] = field(default_factory=set)     # merge labels whose `finally` belongs to the try around the one that has the handlers
     finally_body_suppress: Set[int] = field(default_factory=set)
     finally_targets: Set[int] = field(default_factory=set)          # 3.9
     finally_from_handler: Dict[int, int] = field(default_factory=dict)  # 3.9: handler offset -> its RERAISE
