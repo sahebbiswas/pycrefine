@@ -32,8 +32,6 @@ These change what the code does, or produce code that does not compile:
 | `return` inside an `except` clause, with a `finally` | 3.12, 3.14 | the `finally:` block is lost when every path returns | [#171](https://github.com/sahebbiswas/pycrefine/issues/171) |
 | `try` nested at the very start of another `try` | 3.12, 3.14 | the outer `except` clauses attach to the inner `try` | [#169](https://github.com/sahebbiswas/pycrefine/issues/169) |
 | `while` loop whose `try` body returns and whose handler continues the loop | all | an `if` instead of the loop | [#170](https://github.com/sahebbiswas/pycrefine/issues/170) |
-| `try` / `except` / `else` | 3.12, 3.14 | the `else:` body is merged into the `try`, so exceptions it raises are caught | [#158](https://github.com/sahebbiswas/pycrefine/issues/158) |
-| `try` / `except` / `else` whose `else` returns, with code after the `try` | 3.12, 3.14 (3.9 with `finally`) | the code after the `try` lands in the last `except` clause; invalid output with `finally` on 3.9 | [#162](https://github.com/sahebbiswas/pycrefine/issues/162) |
 | Empty `finally: pass` in a loop | 3.9 | the `finally:` block is lost | [#141](https://github.com/sahebbiswas/pycrefine/issues/141) |
 | `if c: continue` directly followed by `return` in a `while` loop | all | the `if` is dropped, so the loop returns on its first pass | [#160](https://github.com/sahebbiswas/pycrefine/issues/160) |
 | Some code in the test corpus | 3.12, 3.14 | output that does not parse | [#91](https://github.com/sahebbiswas/pycrefine/issues/91) |

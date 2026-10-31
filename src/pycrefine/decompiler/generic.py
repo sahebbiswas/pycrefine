@@ -718,6 +718,7 @@ class DecompilerGeneric(DecompilerBase):
 
         # Final block closure for anything spanning to the very end
         self._close_blocks(0x7fffffff)
+        self._flush_pending_else()
 
         # Final cleanup: suppress redundant trailing 'return None' at the base indent
         if self.reconstructed:
@@ -764,6 +765,9 @@ class DecompilerGeneric(DecompilerBase):
         if instr.offset in self.prescan.empty_try_skip:
             if instr.offset in self.prescan.empty_try_handlers:
                 self._emit_empty_try(instr.offset)
+            return
+        if instr.offset in self.prescan.try_else:
+            self._defer_try_else(instr)
             return
         self._handle_instruction(instr)
         # `self.pc` is already past `instr`, and tuple_assign[2] is the index of the last store
@@ -898,6 +902,9 @@ class DecompilerGeneric(DecompilerBase):
         """
         if not line:
             return
+        if self.emit.pending_else and line.strip() and not line.lstrip().startswith("except"):
+            # a line at or outside the try's indent ends the try statement: its `else` comes first
+            self._flush_pending_else(self.indent_level + (len(line) - len(line.lstrip())) // 4)
         # A clause header directly after another header at the same indent means
         # the earlier clause has an empty body (e.g. `except A: pass` then `except B:`).
         if line.startswith(("except", "elif ", "else:", "finally:")):
@@ -3419,6 +3426,21 @@ class DecompilerGeneric(DecompilerBase):
             if e.target in real_push_exc:
                 _body_end_by_target[e.target] = max(_body_end_by_target.get(e.target, 0), e.end)
 
+        # 3.11+ writes the `else` clause of a try right after its body, so it lies between the body
+        # and the code that follows the try. It is set aside to be written after the handlers, and
+        # the try's normal path then ends where the clause does.
+        self.prescan.try_else = {}
+        if self.target_version >= (3, 11):
+            _body_start_by_target: Dict[int, int] = {}
+            for e in _exc_entries:
+                if e.target in real_push_exc:
+                    _body_start_by_target[e.target] = min(_body_start_by_target.get(e.target, e.start), e.start)
+            for handler, end in list(_body_end_by_target.items()):
+                region = self._try_else_region(end, handler, _body_start_by_target.get(handler, 0))
+                if region is not None:
+                    self.prescan.try_else[region[0]] = region[1]
+                    _body_end_by_target[handler] = region[1]
+
         # Map: first real PUSH_EXC_INFO → finally-merge offset
         for e in _exc_entries:
             if e.target in real_push_exc:
@@ -3696,6 +3718,148 @@ class DecompilerGeneric(DecompilerBase):
         if k is None or [x.opname for x in instrs[k:k + 3]] != ["COPY", "POP_EXCEPT", "RERAISE"]:
             return default
         return instrs[k + 2].offset + 2
+
+    def _line_numbers(self) -> Dict[int, Optional[int]]:
+        """The source line of every instruction: a line starts at an instruction and holds the ones after it."""
+        lines: Dict[int, Optional[int]] = {}
+        current: Optional[int] = None
+        for ins in self.instructions:
+            if ins.starts_line is not None:
+                current = ins.starts_line
+            lines[ins.offset] = current
+        return lines
+
+    def _is_implicit_return_at(self, index: int) -> bool:
+        """Whether the instruction at *index* is part of the `return None` the compiler adds to the end of a body."""
+        instrs = self.instructions
+        ins = instrs[index]
+        if ins.opname == "RETURN_CONST":
+            return ins.argval is None
+        if ins.opname == "RETURN_VALUE":
+            return index > 0 and instrs[index - 1].opname == "LOAD_CONST" and instrs[index - 1].argval is None
+        return (ins.opname == "LOAD_CONST" and ins.argval is None and index + 1 < len(instrs)
+                and instrs[index + 1].opname == "RETURN_VALUE")
+
+    def _else_start(self, tail: List[BytecodeInstruction], before: List[BytecodeInstruction],
+                    handler: int, body_start: int) -> Optional[int]:
+        """
+        Index in *tail* where a try's `else` clause can start, or None when nothing there is one:
+        a jump ends the normal path (over the handlers, back to a loop), a branch of the body that
+        goes on past the point is still inside the body, and code that a jump from before the try
+        goes to (a loop's exit) is not an else.
+        """
+        body_end = tail[0].offset
+        lines = self._line_numbers()
+        body_line = lines[before[-1].offset]
+        if any(ins.offset >= handler and "JUMP" in ins.opname and self._get_jump_target(ins) == body_end
+               for ins in self.instructions):
+            return None                # the handlers rejoin right after the body: all of the tail is shared
+        k = 0
+        while k < len(tail) and "JUMP" not in tail[k].opname and (
+                tail[k].opname in _FILLER_OPS or lines[tail[k].offset] == body_line):
+            k += 1
+        if k >= len(tail) or "JUMP" in tail[k].opname:
+            return None
+
+        def goes_to(ins: BytecodeInstruction, low: int) -> bool:
+            target = self._get_jump_target(ins) if "JUMP" in ins.opname or ins.opname == "FOR_ITER" else None
+            return isinstance(target, int) and low <= target < handler
+
+        start = tail[k].offset
+        if any(goes_to(ins, start + 1) for ins in before):
+            return None
+        if any(ins.offset < body_start and goes_to(ins, start) for ins in self.instructions):
+            return None
+        return k
+
+    def _try_else_region(self, body_end: int, handler: int, body_start: int = 0) -> Optional[Tuple[int, int]]:
+        """
+        The `else` clause of a try statement (3.11+), as the offsets ``(start, end)`` it covers, or None.
+
+        The clause follows the end of the protected range. Its first instructions can still finish
+        the last statement of the body (the store of `x = f()` is not protected). The clause is
+        what follows, up to where the paths of the try rejoin, and it is told from the code
+        after the try statement by its lines: that code is written at the end of each handler too
+        (or the handlers jump back to it), so a line a handler has is not part of the clause.
+
+        With no place where the paths rejoin before the handlers, every path ends in its own copy of
+        the code after the try, and the clause takes the copy that ends the normal path.
+        """
+        instrs = self.instructions
+        lines = self._line_numbers()
+        before = [ins for ins in instrs if ins.offset < body_end]
+        tail = [ins for ins in instrs if body_end <= ins.offset < handler]
+        if not before or not tail:
+            return None
+        body_line = lines[before[-1].offset]
+        # (an implicit `return None` has the line of the last statement, not one of its own)
+        # (only lines that start in the handlers count: an instruction without a line of its own
+        # takes the one before it)
+        handler_lines = {ins.starts_line for n, ins in enumerate(instrs)
+                         if ins.offset >= handler and ins.starts_line is not None
+                         and not self._is_implicit_return_at(n)}
+        # Where the handlers rejoin the normal path, ahead of them: a jump back to code after the body.
+        rejoin = min((t for ins in instrs if ins.offset >= handler and "JUMP" in ins.opname
+                      for t in [self._get_jump_target(ins)] if isinstance(t, int) and body_end < t < handler),
+                     default=None)
+        k = self._else_start(tail, before, handler, body_start)
+        if k is None:
+            return None
+        end = k
+        while end < len(tail):
+            ins = tail[end]
+            target = self._get_jump_target(ins) if "JUMP" in ins.opname else None
+            # a jump over the handlers, or back to the enclosing loop (a `continue`), leaves the clause
+            leaves = isinstance(target, int) and (target > handler or target < body_end)
+            if lines[ins.offset] in handler_lines or leaves or (rejoin is not None and ins.offset >= rejoin):
+                break
+            end += 1
+        if end == k:
+            return None                # nothing but the code after the try
+        if rejoin is None:
+            # no rejoin: the normal path ends in its own copy of the code after the try, which goes with the clause
+            for j in range(end, len(tail)):
+                if "JUMP" in tail[j].opname:
+                    break
+                if tail[j].opname in ("RETURN_VALUE", "RETURN_CONST", "RAISE_VARARGS", "RERAISE"):
+                    end = j + 1
+                    break
+        while end > k and tail[end - 1].opname in _FILLER_OPS:
+            end -= 1
+        after = tail[end].offset if end < len(tail) else handler
+        return tail[k].offset, after
+
+    def _defer_try_else(self, instr: BytecodeInstruction) -> None:
+        """
+        At the start of a try's `else` clause: render the clause, skip it here, and keep it until the
+        try's handlers have been written (`_flush_pending_else` writes it).
+        """
+        end = self.prescan.try_else[instr.offset]
+        start_idx = self.pc - 1
+        end_idx = next((i for i in range(self.pc, len(self.instructions)) if self.instructions[i].offset >= end),
+                       len(self.instructions))
+        hidden = self.prescan.finally_body_suppress | self.prescan.handler_section_suppress
+        body = [ins for ins in self.instructions[start_idx:end_idx] if ins.offset not in hidden]
+        lines = [ln for ln in self._render_handler_section(body, 0) if ln.strip()]
+        self.emit.pending_else.append((self.indent_level - 1, lines or ["return None"]))
+        self.pc = end_idx
+
+    def _flush_pending_else(self, upto: int = -1) -> None:
+        """
+        Write the `else` clauses set aside by `_defer_try_else`, innermost first, once their try
+        statement is over: when a line is written at the try's indent that is not another handler,
+        or (with *upto* negative) at the end of the code.
+        """
+        pending = self.emit.pending_else
+        while pending and (upto < 0 or upto <= pending[-1][0]):
+            indent, lines = pending.pop()
+            saved = self.indent_level
+            self.indent_level = indent
+            self._append_reconstructed("else:")
+            self.indent_level = indent + 1
+            for line in lines:
+                self._append_reconstructed(line)
+            self.indent_level = saved
 
     def _try_rejoin_offset(self, body_end: int, handler: int) -> Optional[int]:
         """
@@ -4216,6 +4380,7 @@ class DecompilerGeneric(DecompilerBase):
                 sub.prescan.handler_return_close.discard(instr.offset)
                 sub._close_except_clause()
 
+        sub._flush_pending_else()
         return [line for line in sub.reconstructed if line or line == ""]
 
     # ------------------------------------------------------------------
