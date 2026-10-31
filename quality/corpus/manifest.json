@@ -345,19 +345,7 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 201,
-          "versions": [
-            "3.11",
-            "3.12",
-            "3.13",
-            "3.14"
-          ],
-          "summary": "augmented assignment in one if/else branch becomes ?"
-        }
-      ]
+      "support": "supported"
     },
     {
       "id": "features/func_defaults_kwargs",

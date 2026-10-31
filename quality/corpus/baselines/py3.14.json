@@ -23,7 +23,7 @@
     "features/flow_if_elif": "equivalent",
     "features/flow_nested_loops": "equivalent",
     "features/flow_try_in_loops": "equivalent",
-    "features/flow_while": "syntax_error",
+    "features/flow_while": "equivalent",
     "features/func_defaults_kwargs": "syntax_error",
     "features/func_lambda_sorted": "equivalent",
     "features/func_recursion": "equivalent",
@@ -83,9 +83,6 @@
     "stdlib/textwrap": "compiles"
   },
   "diagnostics": {
-    "features/flow_while": {
-      "ambiguous_expression": 1
-    },
     "features/modern_async": {
       "unsupported_version_construct": 18
     },

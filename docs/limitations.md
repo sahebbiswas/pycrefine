@@ -24,8 +24,6 @@ These change what the code does, or produce code that does not compile:
 | `async def`, `await`, `async for`, `async with` | all | a generator full of `yield None` | [#85](https://github.com/sahebbiswas/pycrefine/issues/85) |
 | `yield from`, and `x = yield` | 3.12, 3.14 | `yield None` and the value is lost | [#152](https://github.com/sahebbiswas/pycrefine/issues/152) |
 | Walrus (`:=`) inside a comprehension, or a comprehension variable captured by a `lambda` | 3.12+ | a broken explicit loop | [#99](https://github.com/sahebbiswas/pycrefine/issues/99) |
-| Conditional expression used as a callee, `(f if c else g)(x)` | all | an `if/else` that loses one branch's call | [#178](https://github.com/sahebbiswas/pycrefine/issues/178) |
-| Conditional expression whose branch builds a list/dict or calls with `*args`/keywords | all | an empty `if/else` and the wrong assignment | [#147](https://github.com/sahebbiswas/pycrefine/issues/147) |
 | `try`/`except` around a `with` that always raises, inside another `with` | 3.12, 3.14 | the code after the outer `with` is misplaced | [#146](https://github.com/sahebbiswas/pycrefine/issues/146) |
 | Code after a `with` whose body never falls through (always `raise`s or `continue`s) | 3.12, 3.14 | lost; it runs only when `__exit__` suppresses the exception | [#177](https://github.com/sahebbiswas/pycrefine/issues/177) |
 | `except E: continue` inside a `with` block inside a loop | all | the `continue` or the code after the `with` lands in the wrong block | [#176](https://github.com/sahebbiswas/pycrefine/issues/176) |
@@ -44,7 +42,6 @@ The code runs the same way, but it does not read like the original:
 
 | Construct | What you get | Issue |
 |---|---|---|
-| Chained comparison used as a value (`x = a < b < c`) | an `if/else` with stray expression lines | [#154](https://github.com/sahebbiswas/pycrefine/issues/154) |
 | A short `if/elif/else` or conditional expression at the end of a function (3.12+) | separate `if` blocks, each ending in `return` | the compiler duplicates the tail |
 | `if` at the end of a loop body | `if not cond: continue` followed by the body | the compiler's layout |
 | Dict and list displays with `**` / `*` | `{**{**{}, **b}, **{'x': 1}}`, `[*list(a), *rest]` | how the bytecode builds them |

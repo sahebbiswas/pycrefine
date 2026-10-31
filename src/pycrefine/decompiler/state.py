@@ -41,6 +41,7 @@ class PrescanState:  # pylint: disable=too-many-instance-attributes
     boolop_groups: Dict[int, Any] = field(default_factory=dict)     # 3.9-3.10: plain POP_JUMP offset -> (op, target)
     # --- conditional expressions and compound conditions -------------------------------
     ternary_jumps: Dict[int, Any] = field(default_factory=dict)     # jump offset -> how to render the conditional expression
+    chain_values: Dict[int, Tuple[List[str], list, int]] = field(default_factory=dict)  # 3.12+: chained comparison used as a value
     ternary_suppress: Set[int] = field(default_factory=set)         # instruction offsets a ternary already covers
     compound_cond_map: Dict[int, str] = field(default_factory=dict)  # controlling offset -> combined condition text
     compound_suppress: Set[int] = field(default_factory=set)        # instruction offsets a compound condition already covers
