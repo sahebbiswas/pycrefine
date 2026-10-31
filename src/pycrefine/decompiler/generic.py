@@ -3984,6 +3984,7 @@ class DecompilerGeneric(DecompilerBase):
                     # (no real PUSH_EXC_INFO), so no handler lines to pre-decompile.
                     self.emit.deferred_except_lines[finally_start] = []
                     break
+        self._prescan_outer_finally()
         # The normal-exit epilogue for a `with` block is:
         #   LOAD_CONST None; LOAD_CONST None; LOAD_CONST None; CALL 2; POP_TOP
         # Suppress the LOAD_CONSTs and the CALL to prevent ``None(None, None)``.
@@ -4012,6 +4013,29 @@ class DecompilerGeneric(DecompilerBase):
                                     self.prescan.with_exit_suppress_offsets.add(off)
                                 break
                     break
+
+    def _prescan_outer_finally(self) -> None:
+        """
+        Give a `finally` to the try that holds a try/except directly, not to the inner one.
+
+        `try: <try/except> finally: ...` compiles like `try/except/finally`, except that the
+        outer `try` has a `NOP` of its own right before the inner one, and nothing protected
+        by an exception handler lies between the two. The `finally` then belongs to the outer
+        `try`; the inner one only has its handlers.
+        """
+        instrs = self.instructions
+        by_off = {ins.offset: ins for ins in instrs}
+        for merge, targets in self.prescan.push_exc_to_finally_merge.items():
+            if merge in self.prescan.except_only_merge_offsets or merge not in self.prescan.finally_merge_offsets:
+                continue
+            inner = min((nop for nop, pei in self.prescan.nop_to_push_exc.items() if pei in targets), default=None)
+            outer = None if inner is None else by_off.get(inner - 2)
+            if (outer is None or outer.opname != "NOP" or outer.offset in self.prescan.nop_to_push_exc
+                    or outer.offset in self.prescan.nop_to_finally_merge
+                    or not (outer.offset == 2 or outer.offset in self.prescan.try_nop_offsets)):
+                continue
+            self.prescan.nop_to_finally_merge[outer.offset] = merge
+            self.prescan.outer_finally_merges.add(merge)
 
     def _wrapper_cleanup_end(self, wrapper_off: int, default: int) -> int:
         """
@@ -4670,6 +4694,7 @@ class DecompilerGeneric(DecompilerBase):
 
         # Emit pre-decompiled except handler lines first
         except_lines = self.emit.deferred_except_lines.get(merge_offset)
+        outer_finally = merge_offset in self.prescan.outer_finally_merges
         if except_lines:
             save_indent = self.indent_level
             self.indent_level = header_indent
@@ -4680,12 +4705,13 @@ class DecompilerGeneric(DecompilerBase):
         # Then emit the finally: block
         finally_lines = self.emit.deferred_finally_lines.get(merge_offset)
         if finally_lines:
-            self.indent_level = header_indent
+            # (the handlers belong to the inner try; the `finally` is one level out, on the outer try)
+            self.indent_level = header_indent - (1 if outer_finally else 0)
             self._append_reconstructed("finally:")
             self.indent_level += 1
             for line in finally_lines:
                 self._append_reconstructed(line)
-            self.indent_level -= 1
+            self.indent_level = header_indent
 
     def _render_handler_section(self, handler_instrs: list, merge_offset: int) -> list:
         """
