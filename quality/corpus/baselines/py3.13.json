@@ -33,7 +33,7 @@
     "features/modern_fstring_nested": "equivalent",
     "features/modern_generics": "syntax_error",
     "features/modern_match": "syntax_error",
-    "features/modern_walrus": "syntax_error",
+    "features/modern_walrus": "equivalent",
     "features/module_globals": "equivalent",
     "features/opt_asserts_debug": "equivalent",
     "features/unpack_assign": "equivalent",
@@ -95,9 +95,6 @@
     "features/modern_match": {
       "stack_underflow": 1,
       "unsupported_version_construct": 6
-    },
-    "features/modern_walrus": {
-      "stack_underflow": 1
     }
   }
 }

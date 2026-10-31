@@ -30,6 +30,7 @@ class DecompilerBase:
         # Exception table, filled in on first use by _exception_entries(); False = not yet read.
         self._exception_entries_cache: Any = False
         self.instructions: List[BytecodeInstruction] = []
+        self._compiled_instructions: List[BytecodeInstruction] = []
         self.reconstructed: List[str] = []
         self.indent_level = indent_level
         self.stack: List[Any] = []

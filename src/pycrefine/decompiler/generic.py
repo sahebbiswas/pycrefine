@@ -374,15 +374,14 @@ class DecompilerGeneric(DecompilerBase):
         enclosing = self._enclosing_locals
         globals_: List[str] = []
         nonlocals: List[str] = []
-        for ins in self.instructions:
-            name = ins.argval
+        for opname, name in self._scope_accesses():
             if not isinstance(name, str) or name.startswith("."):
                 continue
-            if (ins.opname in ("STORE_GLOBAL", "DELETE_GLOBAL")
-                    or (ins.opname == "LOAD_GLOBAL" and name in enclosing)):
+            if (opname in ("STORE_GLOBAL", "DELETE_GLOBAL")
+                    or (opname == "LOAD_GLOBAL" and name in enclosing)):
                 if name not in globals_:
                     globals_.append(name)
-            elif ins.opname in ("STORE_DEREF", "DELETE_DEREF") and name in freevars:
+            elif opname in ("STORE_DEREF", "DELETE_DEREF") and name in freevars:
                 if name not in nonlocals:
                     nonlocals.append(name)
         lines = []
@@ -391,6 +390,28 @@ class DecompilerGeneric(DecompilerBase):
         if nonlocals:
             lines.append("nonlocal " + ", ".join(nonlocals))
         return lines
+
+    def _scope_accesses(self) -> List[Tuple[str, Any]]:
+        """
+        ``(opcode name, name)`` of every access this body makes to a name, in order. That includes
+        the comprehensions written inside it: the target of a `:=` there belongs to this body, and
+        the comprehension is its own code object before 3.12 and rebuilt inline from 3.12, so its
+        accesses are read from the code as compiled, not from what is left after rebuilding.
+        """
+        accesses = [(ins.opname, ins.argval) for ins in self._compiled_instructions]
+        outer_free = set(self.code_obj.co_freevars)
+        for const in self.code_obj.co_consts:
+            if not _is_code(const) or const.co_name not in ("<listcomp>", "<setcomp>", "<dictcomp>", "<genexpr>"):
+                continue
+            inner = _pick_decompiler_class(self)(const, indent_level=1, beautification_level=self.beautification_level,
+                                                 target_version=self.target_version)
+            inner._disassemble()
+            for ins in inner.instructions:
+                if ins.opname in ("STORE_GLOBAL", "DELETE_GLOBAL") or (
+                        ins.opname in ("STORE_DEREF", "DELETE_DEREF") and ins.argval in outer_free
+                        and ins.argval not in const.co_cellvars):
+                    accesses.append((ins.opname, ins.argval))
+        return accesses
 
     def _child_enclosing_locals(self) -> set:
         """Names bound in this or an enclosing function scope (``CO_OPTIMIZED`` = 0x01)."""
@@ -646,6 +667,7 @@ class DecompilerGeneric(DecompilerBase):
         """
         self._disassemble()
         self.instructions = self._split_superinstructions(self.instructions)
+        self._compiled_instructions = list(self.instructions)
         self._report_version_gaps()
         self._check_jump_targets()
         self._collapse_inlined_comprehensions()
@@ -6009,10 +6031,57 @@ class DecompilerGeneric(DecompilerBase):
         is computed once; writing it per target would run it once per target).
         """
         value = self.stack[-1]
-        if type(value) is str and self._stored_next():  # pylint: disable=unidiomatic-typecheck
-            value = _ChainedValue(value)
-            self.stack[-1] = value
+        if type(value) is str:  # pylint: disable=unidiomatic-typecheck
+            first = self._next_real_index()
+            store = self.instructions[first] if first is not None else None
+            if (store is not None and store.opname in self._NAME_STORES
+                    and str(store.argval) not in self._COMPILER_NAMES and not self._chain_follows(first + 1)):
+                # `(name := value)`: the copy stays on the stack as the expression's value
+                self.stack[-1] = f"({store.argval} := {value})"
+                self.pc = first + 1
+                return
+            if self._stored_next():
+                value = _ChainedValue(value)
+                self.stack[-1] = value
         self.stack.append(value)
+
+    _NAME_STORES = ("STORE_FAST", "STORE_NAME", "STORE_GLOBAL", "STORE_DEREF")
+    # Names the compiler stores a duplicated value into (a class body's cell): not assignments in the source.
+    _COMPILER_NAMES = ("__classcell__", "__classdictcell__", "__class__", "__classdict__", "__static_attributes__")
+
+    def _next_real_index(self) -> Optional[int]:
+        """Index of the next instruction that does something (past CACHE and NOP), or None."""
+        index = self.pc
+        while index < len(self.instructions) and self.instructions[index].opname in ("CACHE", "NOP"):
+            index += 1
+        return index if index < len(self.instructions) else None
+
+    def _chain_follows(self, index: int) -> bool:
+        """
+        True when the duplicated value is stored again right away, from *index* on: the next
+        store takes it with only the operands of its own target (`a[i + 1]`) pushed in between.
+        Otherwise the copy is used by the expression it sits in, and the store was a walrus.
+        """
+        depth = 0   # values above the duplicate
+        for ins in self.instructions[index:]:
+            op = ins.opname
+            if op in ("CACHE", "NOP", "PUSH_NULL"):
+                continue
+            if op in self._NAME_STORES or op.startswith("UNPACK_") or op == "STORE_FAST_STORE_FAST":
+                return depth == 0
+            if op == "DUP_TOP" or (op == "COPY" and ins.arg == 1):
+                return depth == 0   # a third target: the value is duplicated once more
+            if op in ("STORE_ATTR", "STORE_SUBSCR", "STORE_SLICE"):
+                return depth == {"STORE_ATTR": 1, "STORE_SUBSCR": 2, "STORE_SLICE": 3}[op]
+            if op.startswith("LOAD_"):
+                depth += 1
+            elif op in ("BINARY_OP", "BINARY_SUBSCR") and depth >= 2:
+                depth -= 1
+            elif op == "BUILD_SLICE" and isinstance(ins.arg, int) and depth >= ins.arg:
+                depth -= ins.arg - 1
+            else:
+                return False
+        return False
 
     def _emit_assignment(self, target: str, value: Any) -> None:
         """Write ``target = value``, or add *target* to the statement an earlier store of the same
