@@ -1102,7 +1102,7 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "unsupported",
+      "support": "partial",
       "limitations": [
         {
           "issue": 179,
@@ -1119,14 +1119,11 @@
           "summary": "3.11 break or continue in an except clause inside a loop is lost"
         },
         {
-          "issue": 170,
+          "issue": 286,
           "versions": [
-            "3.9",
-            "3.12",
-            "3.13",
-            "3.14"
+            "3.9"
           ],
-          "summary": "while loop whose try body returns and whose handler continues"
+          "summary": "except E: continue in a while loop decompiles wrongly on 3.9"
         }
       ]
     },
@@ -1150,15 +1147,6 @@
             "3.10"
           ],
           "summary": "3.10 block-based exception handlers are not decompiled"
-        },
-        {
-          "issue": 170,
-          "versions": [
-            "3.12",
-            "3.13",
-            "3.14"
-          ],
-          "summary": "while loop whose try body returns and whose handler continues"
         }
       ]
     },
