@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 @dataclass
 class PrescanState:  # pylint: disable=too-many-instance-attributes
     # --- while loops (_prescan_while_loops) --------------------------------------------
+    inverted_guards: Dict[int, int] = field(default_factory=dict)    # guard offset -> body start, for a while loop that leaves by jumping back to an enclosing loop
     loop_exit_jumps: Set[int] = field(default_factory=set)          # jumps back to an enclosing loop that only leave a while loop
     while_body_offsets: Set[int] = field(default_factory=set)       # where a while body starts, to drop the repeated condition
     while_header_targets: Dict[int, int] = field(default_factory=dict)  # body start -> guard POP_JUMP offset
