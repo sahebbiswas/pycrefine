@@ -24,7 +24,6 @@ These change what the code does, or produce code that does not compile:
 | `async def`, `await`, `async for`, `async with` | all | a generator full of `yield None` | [#85](https://github.com/sahebbiswas/pycrefine/issues/85) |
 | `yield from`, and `x = yield` | 3.12, 3.14 | `yield None` and the value is lost | [#152](https://github.com/sahebbiswas/pycrefine/issues/152) |
 | Walrus (`:=`) inside a comprehension, or a comprehension variable captured by a `lambda` | 3.12+ | a broken explicit loop | [#99](https://github.com/sahebbiswas/pycrefine/issues/99) |
-| Keyword-only defaults, `assert`, f-string `!r`/format specs | 3.14 | the default and the format are lost; `assert` raises `0(...)` | [#157](https://github.com/sahebbiswas/pycrefine/issues/157) |
 | Conditional expression used as a callee, `(f if c else g)(x)` | all | an `if/else` that loses one branch's call | [#178](https://github.com/sahebbiswas/pycrefine/issues/178) |
 | Conditional expression whose branch builds a list/dict or calls with `*args`/keywords | all | an empty `if/else` and the wrong assignment | [#147](https://github.com/sahebbiswas/pycrefine/issues/147) |
 | `try`/`except` around a `with` that always raises, inside another `with` | 3.12, 3.14 | the code after the outer `with` is misplaced | [#146](https://github.com/sahebbiswas/pycrefine/issues/146) |

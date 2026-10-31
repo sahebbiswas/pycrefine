@@ -43,17 +43,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 203,
-          "versions": [
-            "3.13",
-            "3.14"
-          ],
-          "summary": "3.13/3.14 lambda defaults in comprehensions are dropped"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "features/closure_decorator",
@@ -182,14 +173,6 @@
             "3.10"
           ],
           "summary": "3.10 block-based exception handlers are not decompiled"
-        },
-        {
-          "issue": 157,
-          "versions": [
-            "3.13",
-            "3.14"
-          ],
-          "summary": "keyword-only defaults, f-string conversions and format specs dropped (3.13/3.14)"
         }
       ]
     },
@@ -288,22 +271,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "unsupported",
-      "limitations": [
-        {
-          "issue": 200,
-          "versions": "all",
-          "summary": "lone f-string field with a conversion"
-        },
-        {
-          "issue": 157,
-          "versions": [
-            "3.13",
-            "3.14"
-          ],
-          "summary": "keyword-only defaults, f-string conversions and format specs dropped (3.13/3.14)"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "features/flow_for_else",
@@ -417,14 +386,6 @@
           "issue": 147,
           "versions": "all",
           "summary": "conditional expression with a list/dict display or call arguments"
-        },
-        {
-          "issue": 157,
-          "versions": [
-            "3.13",
-            "3.14"
-          ],
-          "summary": "keyword-only defaults, f-string conversions and format specs dropped (3.13/3.14)"
         }
       ]
     },
@@ -532,18 +493,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "unsupported",
-      "limitations": [
-        {
-          "issue": 85,
-          "versions": [
-            "3.12",
-            "3.13",
-            "3.14"
-          ],
-          "summary": "modern constructs (async, match, except*, type parameters, PEP 701 f-strings)"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "features/modern_generics",
@@ -1444,17 +1395,8 @@
         "optimize": 0
       },
       "equivalence": "compile_only",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 157,
-          "versions": [
-            "3.13",
-            "3.14"
-          ],
-          "summary": "keyword-only defaults, f-string conversions and format specs dropped (3.13/3.14)"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "stdlib/colorsys",
@@ -1491,14 +1433,6 @@
             "3.10"
           ],
           "summary": "3.10 block-based exception handlers are not decompiled"
-        },
-        {
-          "issue": 157,
-          "versions": [
-            "3.13",
-            "3.14"
-          ],
-          "summary": "keyword-only defaults, f-string conversions and format specs dropped (3.13/3.14)"
         }
       ]
     },
@@ -1590,17 +1524,8 @@
         "optimize": 0
       },
       "equivalence": "compile_only",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 157,
-          "versions": [
-            "3.13",
-            "3.14"
-          ],
-          "summary": "keyword-only defaults, f-string conversions and format specs dropped (3.13/3.14)"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     }
   ]
 }

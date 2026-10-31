@@ -18,7 +18,7 @@
     "features/expr_arithmetic": "equivalent",
     "features/expr_boolops_ternary": "equivalent",
     "features/expr_comparisons": "equivalent",
-    "features/expr_strings": "syntax_error",
+    "features/expr_strings": "equivalent",
     "features/flow_for_else": "equivalent",
     "features/flow_if_elif": "equivalent",
     "features/flow_nested_loops": "equivalent",

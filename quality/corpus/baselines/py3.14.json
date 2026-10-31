@@ -5,20 +5,20 @@
   "entries": {
     "features/class_basic": "equivalent",
     "features/class_special_methods": "equivalent",
-    "features/closure_counter": "mismatch",
+    "features/closure_counter": "equivalent",
     "features/closure_decorator": "equivalent",
     "features/comp_generators": "equivalent",
     "features/comp_list_dict_set": "equivalent",
     "features/data_structures": "equivalent",
     "features/decorators_properties": "equivalent",
     "features/exc_finally": "equivalent",
-    "features/exc_raise_chain": "mismatch",
+    "features/exc_raise_chain": "equivalent",
     "features/exc_try_except": "equivalent",
     "features/exc_uncaught": "equivalent",
     "features/expr_arithmetic": "equivalent",
     "features/expr_boolops_ternary": "equivalent",
     "features/expr_comparisons": "equivalent",
-    "features/expr_strings": "mismatch",
+    "features/expr_strings": "equivalent",
     "features/flow_for_else": "equivalent",
     "features/flow_if_elif": "equivalent",
     "features/flow_nested_loops": "equivalent",
@@ -30,7 +30,7 @@
     "features/io_streams": "equivalent",
     "features/modern_async": "mismatch",
     "features/modern_except_star": "mismatch",
-    "features/modern_fstring_nested": "syntax_error",
+    "features/modern_fstring_nested": "equivalent",
     "features/modern_generics": "syntax_error",
     "features/modern_match": "syntax_error",
     "features/modern_walrus": "mismatch",
@@ -73,52 +73,31 @@
     "realworld/state_machine": "mismatch",
     "realworld/text_stats": "equivalent",
     "realworld/tokenizer": "syntax_error",
-    "stdlib/bisect": "syntax_error",
+    "stdlib/bisect": "compiles",
     "stdlib/colorsys": "compiles",
-    "stdlib/copy": "syntax_error",
+    "stdlib/copy": "compiles",
     "stdlib/fnmatch": "compiles",
     "stdlib/getopt": "compiles",
     "stdlib/queue": "compiles",
     "stdlib/shlex": "compiles",
-    "stdlib/textwrap": "syntax_error"
+    "stdlib/textwrap": "compiles"
   },
   "diagnostics": {
-    "features/class_special_methods": {
-      "unsupported_version_construct": 2
-    },
-    "features/exc_raise_chain": {
-      "unsupported_version_construct": 1
-    },
-    "features/expr_strings": {
-      "unsupported_version_construct": 4
-    },
     "features/flow_while": {
       "ambiguous_expression": 1
     },
     "features/modern_async": {
       "unsupported_version_construct": 18
     },
-    "features/modern_fstring_nested": {
-      "unsupported_version_construct": 2
-    },
     "features/modern_generics": {
       "unsupported_version_construct": 3
     },
     "features/modern_match": {
       "stack_underflow": 1,
-      "unsupported_version_construct": 8
+      "unsupported_version_construct": 6
     },
     "features/with_context": {
       "stack_underflow": 1
-    },
-    "realworld/state_machine": {
-      "unsupported_version_construct": 4
-    },
-    "stdlib/shlex": {
-      "unsupported_version_construct": 5
-    },
-    "stdlib/textwrap": {
-      "unsupported_version_construct": 1
     }
   }
 }

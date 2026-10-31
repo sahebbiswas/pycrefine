@@ -353,7 +353,11 @@ def _render_func_tuple(body_text: str, args: List[str]) -> str:
     # ── Case 2: lambda ───────────────────────────────────────────────────
     if "<lambda>" in lines[0]:
         # Extract params from 'def <lambda>(params):'
-        m = re.match(r"^[ \t]*def\s+<lambda>\s*\(([^)]*)\):", lines[0])
+        # (a default value can run over several lines, so the parameters end at the first `):` that
+        # is followed by the body)
+        m = re.match(r"^[ \t]*def\s+<lambda>\s*\((.*?)\):[ \t]*\n[ \t]*return\b", body_text.lstrip("\n"), flags=re.DOTALL)
+        if m is None:
+            m = re.match(r"^[ \t]*def\s+<lambda>\s*\((.*)\):\s*$", lines[0])
         params = m.group(1).strip() if m else ""
         # Find return expression reliably without truncating multiline strings
         m_ret = re.search(r"^[ \t]*return\s+(.*)", body_text, flags=re.MULTILINE | re.DOTALL)

@@ -116,8 +116,6 @@ class TestUnsupportedConstruct(unittest.TestCase):
 ASYNC_SRC = "async def f():\n    return 1\n"
 ASYNC_GEN_SRC = "async def f():\n    yield 1\n"
 ASYNC_METHOD_SRC = "class A:\n    async def f(self):\n        return 1\n"
-CONVERSION_IN_COMPREHENSION_SRC = "def f(y):\n    return [f'{x!r}' for x in y]\n"
-CONVERSION_IN_COMPREHENSION_FILTER_SRC = "def f(y):\n    return [x for x in y if f'{x!r}']\n"
 COMBINED_CONDITION_SRC = "def f(a, b):\n    if a > 1 and b < 2:\n        return 1\n    return 2\n"
 
 
@@ -150,28 +148,44 @@ class TestAsyncDef(unittest.TestCase):
             self.assertEqual(dec.diagnostics, [])
 
 
-@unittest.skipUnless(sys.version_info >= (3, 13), "f-string conversions are dropped on 3.13 and later")
 class TestSubDecompilersReport(unittest.TestCase):
     """Decompilers of part of a code object, whose output is kept, report to the parent."""
 
+    @staticmethod
+    def _reporting_load(original):
+        def load(self, instr):
+            original(self, instr)
+            self._report(dg.UNSUPPORTED_VERSION_CONSTRUCT, "a construct the slice cannot rebuild", instr)
+        return load
+
+    SRC = "result = left + right\n"
+
+    @staticmethod
+    def _loads(dec):
+        dec.decompile()
+        dec.diagnostics.clear()
+        return [ins for ins in dec.instructions if ins.opname == "LOAD_NAME"]
+
     def test_comprehension_slice_diagnostics_reach_the_parent(self):
-        for src in (CONVERSION_IN_COMPREHENSION_SRC, CONVERSION_IN_COMPREHENSION_FILTER_SRC):
-            with self.subTest(src=src):
-                dec = _decompiler(src)
-                dec.decompile()
-                self.assertIn(dg.UNSUPPORTED_VERSION_CONSTRUCT, [d.kind for d in dec.diagnostics])
+        """A slice that is kept (it gave exactly one expression) hands over what its decompiler reported."""
+        dec = _decompiler(self.SRC)
+        with patch.object(DecompilerGeneric, "_op_load", self._reporting_load(DecompilerGeneric._op_load)):
+            result = dec._eval_comp_slice(self._loads(dec)[:1])
+        self.assertEqual(len(result), 1)
+        self.assertEqual([d.kind for d in dec.diagnostics], [dg.UNSUPPORTED_VERSION_CONSTRUCT])
 
     def test_comprehension_slice_failure_stops_a_strict_run(self):
-        for src in (CONVERSION_IN_COMPREHENSION_SRC, CONVERSION_IN_COMPREHENSION_FILTER_SRC):
-            with self.subTest(src=src):
-                with self.assertRaises(DecompilationError):
-                    _decompiler(src, strict=True).decompile()
+        dec = _decompiler(self.SRC, strict=True)
+        with patch.object(DecompilerGeneric, "_op_load", self._reporting_load(DecompilerGeneric._op_load)):
+            with self.assertRaises(DecompilationError):
+                dec._eval_comp_slice(self._loads(dec)[:1])
 
     def test_a_rejected_slice_leaves_no_diagnostics_behind(self):
-        dec = _decompiler(CLEAN_SRC)
-        dec.decompile()
+        dec = _decompiler(self.SRC)
         before = list(dec.diagnostics)
-        self.assertIsNone(dec._eval_comp_slice([dec.instructions[0], dec.instructions[-1]]))
+        with patch.object(DecompilerGeneric, "_op_load", self._reporting_load(DecompilerGeneric._op_load)):
+            # two loads leave two values where one is wanted: the slice is not used
+            self.assertIsNone(dec._eval_comp_slice(self._loads(dec)[:2]))
         self.assertEqual(dec.diagnostics, before)
 
 
