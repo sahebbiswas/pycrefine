@@ -1374,12 +1374,24 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "unsupported",
+      "support": "partial",
       "limitations": [
         {
-          "issue": 208,
-          "versions": "all",
-          "summary": "try with several except clauses gets a stray continue"
+          "issue": 265,
+          "versions": [
+            "3.9",
+            "3.12",
+            "3.13",
+            "3.14"
+          ],
+          "summary": "else branch after an elif that ends in continue is moved out of the if chain"
+        },
+        {
+          "issue": 179,
+          "versions": [
+            "3.10"
+          ],
+          "summary": "3.10 block-based exception handlers are not decompiled"
         }
       ]
     },

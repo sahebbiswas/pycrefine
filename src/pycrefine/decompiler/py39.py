@@ -1233,6 +1233,8 @@ class Decompiler39(DecompilerGeneric):
                 # Emit 'continue' instead of 'pass' in that case.
                 _emitted_continue = False
                 look = self.pc
+                if self._is_as_name_cleanup(look, self.emit.exc_bound_names):
+                    look += 3   # `e = None; del e` for an `as` name sits before the jump
                 if (look < len(self.instructions)
                         and self.instructions[look].opname in ("JUMP_ABSOLUTE", "JUMP_BACKWARD")
                         and isinstance(self.instructions[look].argval, int)
