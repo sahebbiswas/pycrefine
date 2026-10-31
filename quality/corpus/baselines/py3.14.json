@@ -37,7 +37,7 @@
     "features/module_globals": "equivalent",
     "features/opt_asserts_debug": "equivalent",
     "features/unpack_assign": "equivalent",
-    "features/with_context": "syntax_error",
+    "features/with_context": "equivalent",
     "generated/cf_for_finally_break": "equivalent",
     "generated/cf_for_finally_continue": "equivalent",
     "generated/cf_for_finally_return": "equivalent",
@@ -92,9 +92,6 @@
     "features/modern_match": {
       "stack_underflow": 1,
       "unsupported_version_construct": 6
-    },
-    "features/with_context": {
-      "stack_underflow": 1
     }
   }
 }

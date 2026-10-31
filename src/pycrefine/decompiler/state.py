@@ -88,6 +88,9 @@ class PrescanState:  # pylint: disable=too-many-instance-attributes
         state.while_header_targets = self.while_header_targets
         state.while_body_offsets = self.while_body_offsets
         state.dup_guard_exits = self.dup_guard_exits
+        state.with_exit_suppress_offsets = self.with_exit_suppress_offsets
+        state.with_body_end = self.with_body_end
+        state.with_exit_owner = self.with_exit_owner
         return state
 
 

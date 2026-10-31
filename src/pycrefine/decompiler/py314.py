@@ -79,7 +79,10 @@ class Decompiler314(Decompiler311Plus):
             return
 
         # Python 3.14 with preamble starting at COPY 1
-        if opname == "COPY" and instr.arg == 1:
+        if opname == "COPY" and instr.arg == 1 and not (
+                instr.offset in self.prescan.handler_section_suppress
+                or instr.offset in self.prescan.finally_body_suppress
+                or instr.offset in self.prescan.wrapper_body_suppress):
             if self.pc + 4 < len(self.instructions):
                 seq = self.instructions[self.pc: self.pc + 5]
                 # Pattern: LOAD_SPECIAL 1 (__exit__), SWAP 2, SWAP 3, LOAD_SPECIAL 0 (__enter__), CALL 0
