@@ -560,30 +560,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "unsupported",
-      "limitations": [
-        {
-          "issue": 205,
-          "versions": "all",
-          "summary": "assignment expressions in if/while conditions"
-        },
-        {
-          "issue": 189,
-          "versions": [
-            "3.9"
-          ],
-          "summary": "walrus inside a comprehension is dropped (3.9)"
-        },
-        {
-          "issue": 99,
-          "versions": [
-            "3.12",
-            "3.13",
-            "3.14"
-          ],
-          "summary": "walrus or captured loop variable in an inlined comprehension (3.12+)"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "features/module_globals",

@@ -29,7 +29,7 @@
     "features/func_recursion": "equivalent",
     "features/io_streams": "equivalent",
     "features/modern_async": "mismatch",
-    "features/modern_walrus": "mismatch",
+    "features/modern_walrus": "equivalent",
     "features/module_globals": "equivalent",
     "features/opt_asserts_debug": "equivalent",
     "features/unpack_assign": "equivalent",

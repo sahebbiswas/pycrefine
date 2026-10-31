@@ -93,6 +93,13 @@ class TestChainedAssignment(unittest.TestCase):
         )
         self.assert_evaluates_once(src, "run()")
 
+    def test_walrus_in_a_later_target(self):
+        src = self.HEADER + (
+            "def g():\n    calls.append(2)\n    return 0\n"
+            "def run():\n    b = [0]\n    a = b[(k := g())] = make()\n    return a, b, k\n"
+        )
+        self.assert_evaluates_once(src, "run()", expected_calls=2)
+
     def test_target_expression_is_evaluated_in_order(self):
         src = (
             "calls = []\n"
