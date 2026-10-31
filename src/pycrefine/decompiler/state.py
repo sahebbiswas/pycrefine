@@ -53,6 +53,7 @@ class PrescanState:  # pylint: disable=too-many-instance-attributes
     push_exc_to_finally_merge: Dict[int, List[int]] = field(default_factory=dict)  # merge offset -> handler entry points that rejoin there
     finally_merge_offsets: Set[int] = field(default_factory=set)    # merge labels where deferred finally/except text is emitted
     except_only_merge_offsets: Set[int] = field(default_factory=set)
+    outer_handlers: Set[int] = field(default_factory=set)           # handlers of a try whose body is only another try
     outer_finally_merges: Set[int] = field(default_factory=set)     # merge labels whose `finally` belongs to the try around the one that has the handlers
     finally_body_suppress: Set[int] = field(default_factory=set)
     finally_targets: Set[int] = field(default_factory=set)          # 3.9
@@ -98,6 +99,7 @@ class EmissionState:  # pylint: disable=too-many-instance-attributes
     exc_bound_names: Set[str] = field(default_factory=set)          # every name bound by `except ... as`
     deferred_finally_lines: Dict[int, List[str]] = field(default_factory=dict)  # merge offset -> rendered finally body
     deferred_except_lines: Dict[int, List[str]] = field(default_factory=dict)   # merge offset -> rendered handler
+    deferred_outer_except_lines: Dict[int, List[str]] = field(default_factory=dict)  # merge offset -> handlers of the try around the one that rejoins there
     pending_finally_merge: Optional[int] = None                     # merge offset awaiting emission
     boolop_pending: List[Any] = field(default_factory=list)         # operators opened but not yet joined
     else_stack_snapshots: Dict[int, List[Any]] = field(default_factory=dict)  # second arm's offset -> stack to restore

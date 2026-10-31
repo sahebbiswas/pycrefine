@@ -1,4 +1,4 @@
-"""A try/except that starts the body of another try keeps its own handlers (#253)."""
+"""A try whose body is a try/except keeps its own finally (#253) and except clauses (#169)."""
 import ast
 import sys
 import unittest
@@ -12,8 +12,7 @@ def _namespace(code):
     return namespace
 
 
-@unittest.skipIf(sys.version_info < (3, 11), "3.9 and 3.10 try/except is tracked separately")
-class TestNestedTryFinally(unittest.TestCase):
+class _Base(unittest.TestCase):
 
     def assert_same_results(self, source, *calls):
         out = decompile(source)
@@ -22,6 +21,10 @@ class TestNestedTryFinally(unittest.TestCase):
         for call in calls:
             self.assertEqual(eval(call, rebuilt), eval(call, original), f"{call}\n{out}")  # pylint: disable=eval-used
         return out
+
+
+@unittest.skipIf(sys.version_info < (3, 11), "3.9 and 3.10 try/except is tracked separately")
+class TestNestedTryFinally(_Base):
 
     def test_except_inside_finally_body_end(self):
         src = ("def g(f, o):\n    try:\n        try:\n            f()\n        except ValueError:\n"
@@ -50,6 +53,41 @@ class TestNestedTryFinally(unittest.TestCase):
                "                    raise ValueError\n                o.append(x)\n            except ValueError:\n"
                "                o.append('h')\n        finally:\n            o.append('f')\n    return o\n")
         self.assert_same_results(src, "g([0, 1, 2], [])")
+
+
+@unittest.skipIf(sys.version_info < (3, 11), "3.9 and 3.10 try/except is tracked separately")
+class TestNestedTryExcept(_Base):
+    """The outer except clauses of a try whose body is another try (#169)."""
+
+    def test_returning_handlers(self):
+        src = ("def d(f):\n    try:\n        try:\n            f()\n        except KeyError:\n"
+               "            return 'inner'\n    except ValueError:\n        return 'outer'\n    return 'none'\n"
+               "def k():\n    raise KeyError\n"
+               "def v():\n    raise ValueError\n")
+        out = self.assert_same_results(src, "d(lambda: 0)", "d(k)", "d(v)")
+        self.assertLess(out.index("except KeyError"), out.index("except ValueError"))
+        self.assertEqual(out.count("try:"), 2)
+
+    def test_falling_through_handlers(self):
+        src = ("def d(f, o):\n    try:\n        try:\n            f()\n        except KeyError:\n"
+               "            o.append('k')\n    except ValueError:\n        o.append('v')\n    o.append('end')\n    return o\n"
+               "def k():\n    raise KeyError\n"
+               "def v():\n    raise ValueError\n")
+        self.assert_same_results(src, "d(lambda: 0, [])", "d(k, [])", "d(v, [])")
+
+    def test_outer_catches_error_from_inner_handler(self):
+        src = ("def d(f, o):\n    try:\n        try:\n            f()\n        except KeyError:\n"
+               "            raise ValueError\n    except ValueError:\n        o.append('outer')\n    return o\n"
+               "def k():\n    raise KeyError\n")
+        self.assert_same_results(src, "d(k, [])", "d(lambda: 0, [])")
+
+    def test_two_outer_handlers(self):
+        src = ("def d(f, o):\n    try:\n        try:\n            f()\n        except KeyError:\n"
+               "            o.append('k')\n    except ValueError:\n        o.append('v')\n"
+               "    except TypeError:\n        o.append('t')\n    return o\n"
+               "def t():\n    raise TypeError\n"
+               "def v():\n    raise ValueError\n")
+        self.assert_same_results(src, "d(t, [])", "d(v, [])", "d(lambda: 0, [])")
 
 
 if __name__ == "__main__":
