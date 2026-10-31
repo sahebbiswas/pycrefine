@@ -55,7 +55,7 @@
     "generated/cf_while_if_break": "equivalent",
     "generated/cf_while_if_continue": "equivalent",
     "generated/cf_while_if_return": "equivalent",
-    "generated/cf_while_nested_break": "mismatch",
+    "generated/cf_while_nested_break": "equivalent",
     "generated/cf_while_nested_continue": "equivalent",
     "generated/cf_while_nested_return": "equivalent",
     "generated/cf_while_try_break": "syntax_error",

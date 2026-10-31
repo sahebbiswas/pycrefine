@@ -29,7 +29,6 @@ These change what the code does, or produce code that does not compile:
 | `except E: continue` inside a `with` block inside a loop | all | the `continue` or the code after the `with` lands in the wrong block | [#176](https://github.com/sahebbiswas/pycrefine/issues/176) |
 | `try` nested at the very start of another `try` | 3.12, 3.14 | the outer `except` clauses attach to the inner `try` | [#169](https://github.com/sahebbiswas/pycrefine/issues/169) |
 | `while` loop whose `try` body returns and whose handler continues the loop | all | an `if` instead of the loop | [#170](https://github.com/sahebbiswas/pycrefine/issues/170) |
-| `if c: continue` directly followed by `return` in a `while` loop | all | the `if` is dropped, so the loop returns on its first pass | [#160](https://github.com/sahebbiswas/pycrefine/issues/160) |
 | Some code in the test corpus | 3.12, 3.14 | output that does not parse | [#91](https://github.com/sahebbiswas/pycrefine/issues/91) |
 
 Whenever the decompiler knows it is guessing, it records a diagnostic instead of staying
