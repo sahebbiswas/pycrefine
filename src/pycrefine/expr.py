@@ -185,3 +185,13 @@ class UnknownExpression(str):
 def is_unknown(value: Any) -> bool:
     """True if *value* is a placeholder for an expression that could not be determined."""
     return isinstance(value, UnknownExpression)
+
+
+class _ChainedValue(str):
+    """
+    A value that DUP_TOP / COPY left on the stack twice, so that several stores take it: a chained
+    assignment ``a = b = f()`` computes ``f()`` once. ``row`` is the index of the output row the
+    first store wrote, which the next store takes over as another target of the same statement.
+    """
+    row: Optional[int] = None
+    alias: Optional[str] = None   # a temporary that already holds the value, for stores that cannot join

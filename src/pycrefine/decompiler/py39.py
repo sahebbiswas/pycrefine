@@ -1118,7 +1118,7 @@ class Decompiler39(DecompilerGeneric):
                 return
             # Not an exception-match pattern — real DUP_TOP: duplicate TOS
             if self.stack:
-                self.stack.append(self.stack[-1])
+                self._duplicate_top()
 
         # JUMP_IF_NOT_EXC_MATCH: 3.9/3.10 typed-except gate.
         # This fires when DUP_TOP already consumed the LOAD+JUMP_IF_NOT_EXC_MATCH
