@@ -30,6 +30,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 class PrescanState:  # pylint: disable=too-many-instance-attributes
     # --- while loops (_prescan_while_loops) --------------------------------------------
     inverted_guards: Dict[int, int] = field(default_factory=dict)    # guard offset -> body start, for a while loop that leaves by jumping back to an enclosing loop
+    relocated_exits: Dict[int, List[int]] = field(default_factory=dict)  # offset where a loop ends -> offsets of the exit block (a `return`) the compiler placed inside it
+    relocated_suppress: Set[int] = field(default_factory=set)        # offsets of exit blocks emitted after their loop instead of in place
     loop_exit_jumps: Set[int] = field(default_factory=set)          # jumps back to an enclosing loop that only leave a while loop
     while_body_offsets: Set[int] = field(default_factory=set)       # where a while body starts, to drop the repeated condition
     while_header_targets: Dict[int, int] = field(default_factory=dict)  # body start -> guard POP_JUMP offset
@@ -105,6 +107,7 @@ class EmissionState:  # pylint: disable=too-many-instance-attributes
     deferred_finally_lines: Dict[int, List[str]] = field(default_factory=dict)  # merge offset -> rendered finally body
     deferred_except_lines: Dict[int, List[str]] = field(default_factory=dict)   # merge offset -> rendered handler
     deferred_outer_except_lines: Dict[int, List[str]] = field(default_factory=dict)  # merge offset -> handlers of the try around the one that rejoins there
+    relocated_indent: Dict[int, int] = field(default_factory=dict)  # end offset of a loop with a relocated exit block -> indent of its header
     pending_finally_merge: Optional[int] = None                     # merge offset awaiting emission
     boolop_pending: List[Any] = field(default_factory=list)         # operators opened but not yet joined
     else_stack_snapshots: Dict[int, List[Any]] = field(default_factory=dict)  # second arm's offset -> stack to restore

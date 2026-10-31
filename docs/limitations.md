@@ -27,8 +27,9 @@ These change what the code does, or produce code that does not compile:
 | `try`/`except` around a `with` that always raises, inside another `with` | 3.12, 3.14 | the code after the outer `with` is misplaced | [#146](https://github.com/sahebbiswas/pycrefine/issues/146) |
 | Code after a `with` whose body never falls through (always `raise`s or `continue`s) | 3.12, 3.14 | lost; it runs only when `__exit__` suppresses the exception | [#177](https://github.com/sahebbiswas/pycrefine/issues/177) |
 | `except E: continue` inside a `with` block inside a loop | all | the `continue` or the code after the `with` lands in the wrong block | [#176](https://github.com/sahebbiswas/pycrefine/issues/176) |
+| `while` loop whose `try` body has an `except` that does `continue`, followed by code after the loop (or an `else:`) | 3.12, 3.13 | the code after the loop is written inside the `try` body and the `continue` is dropped | [#291](https://github.com/sahebbiswas/pycrefine/issues/291) |
+| A conditional expression in a `while` condition | 3.12+ | a constant condition and empty `if`/`else` statements | [#292](https://github.com/sahebbiswas/pycrefine/issues/292) |
 | `try` nested at the very start of another `try` | 3.12, 3.14 | the outer `except` clauses attach to the inner `try` | [#169](https://github.com/sahebbiswas/pycrefine/issues/169) |
-| `while` loop whose `try` body returns and whose handler continues the loop | all | an `if` instead of the loop | [#170](https://github.com/sahebbiswas/pycrefine/issues/170) |
 | Some code in the test corpus | 3.12, 3.14 | output that does not parse | [#91](https://github.com/sahebbiswas/pycrefine/issues/91) |
 
 Whenever the decompiler knows it is guessing, it records a diagnostic instead of staying
