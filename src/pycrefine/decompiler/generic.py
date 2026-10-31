@@ -689,6 +689,7 @@ class DecompilerGeneric(DecompilerBase):
         self._prescan_try_structure()
         self._prescan_ternaries()
         self._prescan_compound_conds()
+        self._prescan_inverted_chains()
         self._prescan_value_boolops()
 
         # Docstring (#166). A function's lives in its constants (no instruction loads
@@ -2093,6 +2094,186 @@ class DecompilerGeneric(DecompilerBase):
 
             i = controlling_idx + 1
 
+    def _last_inverted_clause(self, jump_offset: int, loop_end: int) -> int:
+        """
+        3.14: the last conditional jump of a condition at the head of a loop that leaves by
+        jumping back to an enclosing loop (`expr; POP_JUMP_IF_TRUE next; JUMP_BACKWARD head`
+        per clause), or *jump_offset* when it is not one.
+        """
+        instrs = self.instructions
+        index = {ins.offset: k for k, ins in enumerate(instrs)}
+        k = index[jump_offset]
+        last = k
+        while True:
+            pair = self._exit_pair_jump(k)
+            j = (pair if pair is not None else k) + 1
+            while j < len(instrs) and instrs[j].offset <= loop_end and (
+                    instrs[j].opname in _COMPOUND_EXPR_OPS or instrs[j].opname in _COMPOUND_SKIP):
+                j += 1
+            clause = (j < len(instrs) and instrs[j].offset < loop_end and instrs[j].opname.startswith("POP_JUMP")
+                      and "IF_TRUE" in instrs[j].opname)
+            if clause and (pair is not None or self._exit_pair_jump(j) is not None):
+                k = last = j
+                continue
+            break
+        return instrs[last].offset
+
+    def _is_clause_exit_jump(self, k: int, body_start: int) -> bool:
+        """
+        Whether the backward jump at *k*, in the copy of a loop condition below the body, is the
+        second half of a clause: it leaves for an enclosing loop's head (after `IF_TRUE next`),
+        or repeats the body (after an `or` clause's `IF_FALSE next`).
+        """
+        ins = self.instructions[k]
+        if not self._is_backward_instruction(ins):
+            return False
+        window = range(max(k - 4, 0), k)
+        target = self._get_jump_target(ins)
+        if target < body_start:
+            return any(self._exit_pair_jump(j) == k for j in window)
+        return target == body_start and any(self._skips_jump_to(j, body_start) for j in window)
+
+    def _skips_jump_to(self, k: int, head: int) -> bool:
+        """Whether the conditional jump at *k* hops over a backward jump to *head* (`IF_FALSE next; JUMP_BACKWARD head`)."""
+        instrs = self.instructions
+        if not instrs[k].opname.startswith("POP_JUMP"):
+            return False
+        j = k + 1
+        while j < len(instrs) and instrs[j].opname in _COMPOUND_SKIP:
+            j += 1
+        return (j + 1 < len(instrs) and self._is_backward_instruction(instrs[j])
+                and self._get_jump_target(instrs[j]) == head
+                and self._get_jump_target(instrs[k]) == instrs[j + 1].offset)
+
+    def _exit_pair_jump(self, k: int) -> Optional[int]:
+        """
+        Index of the backward jump that follows the conditional jump at *k* when the two make
+        one "go on, or leave the loop" step: `POP_JUMP_IF_TRUE next; JUMP_BACKWARD head`.
+        """
+        instrs = self.instructions
+        if not (instrs[k].opname.startswith("POP_JUMP") and "IF_TRUE" in instrs[k].opname):
+            return None
+        j = k + 1
+        while j < len(instrs) and instrs[j].opname in _COMPOUND_SKIP:
+            j += 1
+        if j < len(instrs) and self._is_backward_instruction(instrs[j]):
+            return j
+        return None
+
+    def _inverted_chain(self, guard_idx: int):
+        """
+        The clauses of a `while a and b:` / `a or b` condition whose exit is a jump back to an
+        enclosing loop's head (3.12+), as `[(jump index, first index of its expression, exit jump index)]`.
+
+        Each clause is `expr; POP_JUMP_IF_TRUE t; JUMP_BACKWARD head` (go on at `t`, or leave) or,
+        in an `or`, `expr; POP_JUMP_IF_TRUE body` (done, enter the body). The last clause is the
+        guard itself.
+        """
+        instrs = self.instructions
+        chain = []
+        jump = guard_idx
+        while True:
+            start = jump
+            while start > 0 and (instrs[start - 1].opname in _COMPOUND_EXPR_OPS
+                                 or instrs[start - 1].opname in _COMPOUND_SKIP):
+                start -= 1
+            while instrs[start].opname in _COMPOUND_SKIP:
+                start += 1
+            chain.insert(0, (jump, start, self._exit_pair_jump(jump)))
+            prev = start - 1
+            while prev >= 0 and instrs[prev].opname in _COMPOUND_SKIP:
+                prev -= 1
+            if prev < 0:
+                break
+            if self._is_backward_instruction(instrs[prev]):
+                pair = prev - 1
+                while pair >= 0 and instrs[pair].opname in _COMPOUND_SKIP:
+                    pair -= 1
+                if pair >= 0 and self._exit_pair_jump(pair) == prev:
+                    jump = pair
+                    continue
+            elif instrs[prev].opname.startswith("POP_JUMP") and "IF_TRUE" in instrs[prev].opname:
+                jump = prev
+                continue
+            break
+        return chain
+
+    def _chain_target(self, jump: BytecodeInstruction, starts: list, body_entry: int):
+        """Where *jump* of an inverted chain goes: "body", or the index of the clause that starts at its target."""
+        target = self._get_jump_target(jump)
+        if target == body_entry:
+            return "body"
+        return starts.index(target) if target in starts else None
+
+    def _chain_condition(self, i: int, chain: list, exprs: list, targets: list):
+        """
+        `(text, is_or)` of the condition made by clauses *i* on of an inverted chain, or None
+        for a shape that is not a plain `and` / `or` run.
+        """
+        on = targets[i]
+        if on is None:
+            return None
+        if chain[i][2] is not None:  # leaves when false
+            if on == "body":
+                return (exprs[i], False) if i == len(chain) - 1 else None
+            rest = self._chain_condition(on, chain, exprs, targets)
+            if rest is None:
+                return None
+            return f"{exprs[i]} and {f'({rest[0]})' if rest[1] else rest[0]}", False
+        if on != "body":
+            return self._chain_or_group(i, on, chain, exprs, targets)
+        rest = self._chain_condition(i + 1, chain, exprs, targets) if i + 1 < len(chain) else None
+        return None if rest is None else (f"{exprs[i]} or {rest[0]}", True)
+
+    def _chain_or_group(self, i: int, on: int, chain: list, exprs: list, targets: list):
+        """`(a or b) and rest`: the clauses of the group all jump to where `rest` starts, the last one leaving otherwise."""
+        last = next((m for m in range(i + 1, len(chain)) if chain[m][2] is not None), None)
+        if last is None or targets[last] != on or last != on - 1 or any(targets[m] != on for m in range(i, last)):
+            return None
+        rest = self._chain_condition(on, chain, exprs, targets)
+        if rest is None:
+            return None
+        return f"({' or '.join(exprs[i:last + 1])}) and {f'({rest[0]})' if rest[1] else rest[0]}", False
+
+    def _prescan_inverted_chains(self) -> None:
+        """
+        3.12+: give a `while` whose condition has several clauses, and whose exit is a jump back
+        to an enclosing loop's head, one combined condition.
+
+        Every clause either jumps on (to the next clause or the body) or leaves by the jump after
+        it, so the condition is read off the targets: a clause that jumps straight to the body is
+        followed by `or`, one that leaves is followed by `and`.
+        """
+        instrs = self.instructions
+        index = {ins.offset: k for k, ins in enumerate(instrs)}
+        for guard, body_start in list(self.prescan.inverted_guards.items()):
+            body_entry = self._get_jump_target(instrs[index[guard]])
+            chain = self._inverted_chain(index[guard])
+            if len(chain) < 2:
+                continue
+            starts = [instrs[start].offset for _, start, _ in chain]
+            sub = _pick_decompiler_class(self)(self.code_obj, self.indent_level, self.beautification_level,
+                                               target_version=self.target_version)
+            self._share_diagnostics_with(sub)
+            exprs = []
+            for (jump, start, _) in chain:
+                for xi in instrs[start:jump]:
+                    if xi.opname not in _COMPOUND_SKIP:
+                        sub._handle_instruction(xi)
+                exprs.append(str(sub.stack.pop()) if sub.stack else None)
+            if None in exprs:
+                continue
+            targets = [self._chain_target(instrs[jump], starts, body_entry) for jump, _, _ in chain]
+            built = self._chain_condition(0, chain, exprs, targets)
+            if built is None:
+                continue
+            self.prescan.compound_cond_map[instrs[chain[-1][0]].offset] = built[0]
+            for jump, _, exit_jump in chain:
+                if jump != chain[-1][0]:
+                    self.prescan.compound_suppress.add(instrs[jump].offset)
+                if exit_jump is not None:
+                    self.prescan.loop_exit_jumps.add(instrs[exit_jump].offset)
+
     def _is_compound_cjump(self, opname: str) -> bool:
         """
         Identify conditional POP_JUMP_* opcode names that participate in compound boolean expressions.
@@ -2904,6 +3085,7 @@ class DecompilerGeneric(DecompilerBase):
         self.prescan.while_true_ends = set()     # end offsets of while-True (NOP-driven) loops
         self.prescan.inner_back_jumps = self._find_inner_back_jumps()
         self.prescan.dup_guard_exits = set()
+        self.prescan.inverted_guards = {}
 
         for jb_idx, jb in enumerate(self.instructions):
             if not (self._is_backward_instruction(jb) or self._is_conditional_back_jump(jb)):
@@ -3014,12 +3196,19 @@ class DecompilerGeneric(DecompilerBase):
                 # 3.9 and 3.14 test the condition at the loop head: for `while a and b:`
                 # every clause jumps out, and the last one is the guard that opens the body.
                 guard_offset = self._last_jump_of_condition(guard_offset, jb.offset)
+                if self.target_version >= (3, 14):
+                    guard_offset = self._last_inverted_clause(guard_offset, jb.offset)
             if guard_offset >= 0:
                 self.prescan.while_header_targets[body_start] = guard_offset
                 guard = next(i for i in self.instructions if i.offset == guard_offset)
+                late_guard = (self.target_version >= (3, 14) and guard_offset > body_start
+                              and self._exit_pair_jump(self.instructions.index(guard)) is not None)
+                if late_guard:
+                    self.prescan.inverted_guards[guard_offset] = body_start
                 if self._is_inverted_guard(guard, self._get_jump_target(guard), body_start):
                     # (the jump that follows it only leaves the loop: the enclosing loop goes on)
                     self.prescan.loop_exit_jumps.add(self.instructions[self.instructions.index(guard) + 1].offset)
+                    self.prescan.inverted_guards[guard_offset] = body_start
                 # 3.12/3.13 copy the loop condition to the bottom of the body.
                 # Suppress exactly that copy's exit jumps, never body-level ifs.
                 dup_jumps = self._dup_guard_jump_offsets(jb)
@@ -3055,12 +3244,14 @@ class DecompilerGeneric(DecompilerBase):
         instrs = self.instructions
         by_offset = {ins.offset: n for n, ins in enumerate(instrs)}
         last = jump_offset
+        first_target = self._get_jump_target(instrs[by_offset[jump_offset]])
         k = by_offset[jump_offset] + 1
         while k < len(instrs):
             ins = instrs[k]
             if ins.opname.startswith("POP_JUMP") and "_IF_" in ins.opname:
                 target = self._get_jump_target(ins)
-                if not (isinstance(target, int) and target > loop_end):
+                # (the exit may be a jump straight back to an enclosing loop's head: every clause then shares it)
+                if not (isinstance(target, int) and (target > loop_end or target == first_target)):
                     break
                 last = ins.offset
             elif ins.opname not in _COMPOUND_EXPR_OPS and ins.opname not in _COMPOUND_SKIP:
@@ -3334,21 +3525,36 @@ class DecompilerGeneric(DecompilerBase):
         True if the instructions in [start, end) are nothing but a loop's top
         condition: no statements, ending in a conditional jump that leaves the loop
         (target beyond the closing back-edge at `loop_end`).
+
+        3.12/3.13 write the condition of a `while` that ends a `for` body the other way
+        round: its jumps enter the body (at `end`) and the fall-through is a jump back to
+        the enclosing loop's head.
         """
         seq = [i for i in self.instructions if start <= i.offset < end and i.opname not in _WHILE_TRIVIAL_OPS]
         if not seq:
             return False
+        enters_body = False
+        if self._is_backward_instruction(seq[-1]) and self._get_jump_target(seq[-1]) < start:
+            seq = seq[:-1]
+            enters_body = True
+            if not seq:
+                return False
         last = seq[-1]
         if not last.opname.startswith("POP_JUMP_IF"):
             return False
-        t = self._get_jump_target(last)
-        if not (isinstance(t, int) and t > loop_end):
+
+        def leaves(target):
+            if not isinstance(target, int):
+                return False
+            return target == end if enters_body else target > loop_end
+
+        if not leaves(self._get_jump_target(last)):
             return False
         for k, ins in enumerate(seq):
             name = ins.opname
             if name.startswith("POP_JUMP_IF"):
                 tt = self._get_jump_target(ins)
-                if not (isinstance(tt, int) and tt > loop_end):
+                if not (leaves(tt) or (enters_body and isinstance(tt, int) and tt > loop_end)):
                     return False
             elif name.startswith("STORE_"):
                 if not (k > 0 and seq[k - 1].opname in ("COPY", "DUP_TOP")):
@@ -3429,6 +3635,10 @@ class DecompilerGeneric(DecompilerBase):
 
         def part_of_copy(ins):
             """A jump of the copied condition: it leaves the loop or (3.10/3.11) repeats the body."""
+            if self._exit_pair_jump(instrs.index(ins)) is not None:
+                return True  # (a clause that goes on, or leaves by a jump back to an enclosing loop)
+            if not closing_test and self._skips_jump_to(instrs.index(ins), body_start):
+                return True  # (the clause of an `or` that repeats the body)
             return exits_loop(ins) or (closing_test and self._get_jump_target(ins) == body_start)
 
         out = set()
@@ -3454,10 +3664,19 @@ class DecompilerGeneric(DecompilerBase):
                     if jb_target < ft <= jb.offset:
                         return set()
 
+        clause_exits: List[Tuple[int, set]] = []
         while k >= 0:
             ins = instrs[k]
             name = ins.opname
             if name in _WHILE_TRIVIAL_OPS:
+                k -= 1
+                continue
+            if not closing_test and self._is_clause_exit_jump(k, body_start):
+                # the exit half of a clause that leaves by jumping back to an enclosing loop's head;
+                # it belongs to the copy only if the jump it pairs with does (not a body-level `continue`)
+                pairs = {instrs[j].offset for j in range(max(k - 4, 0), k)
+                         if self._exit_pair_jump(j) == k or self._skips_jump_to(j, body_start)}
+                clause_exits.append((ins.offset, pairs))
                 k -= 1
                 continue
             if is_cond_jump(ins):
@@ -3470,6 +3689,9 @@ class DecompilerGeneric(DecompilerBase):
             elif name in _STATEMENT_BOUNDARY_OPS or name.startswith(("JUMP", "DELETE_")):
                 break
             k -= 1
+        for offset, pairs in clause_exits:
+            if pairs & out:
+                self.prescan.loop_exit_jumps.add(offset)
         return out
 
     def _find_jump_backward_end(self) -> int:
