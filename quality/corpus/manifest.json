@@ -1019,14 +1019,7 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "unsupported",
-      "limitations": [
-        {
-          "issue": 206,
-          "versions": "all",
-          "summary": "statement after a for loop with break in a while loop moves into else"
-        }
-      ]
+      "support": "supported"
     },
     {
       "id": "generated/cf_while_nested_continue",

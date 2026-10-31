@@ -810,6 +810,38 @@ class DecompilerGeneric(DecompilerBase):
                 end = target
         return end
 
+    def _is_break_to_enclosing_head(self, instr: BytecodeInstruction, prev: Optional[BytecodeInstruction],
+                                    jump_target: int) -> bool:
+        """3.9/3.10: *instr* drops the iterator of the innermost `for` loop and jumps back to the head of an enclosing loop."""
+        if instr.opname != "JUMP_ABSOLUTE" or prev is None or prev.opname != "POP_TOP":
+            return False
+        loop = next((b for b in reversed(self.blocks) if b[1] in ("for", "while")), None)
+        return loop is not None and loop[1] == "for" and jump_target < self._for_start(loop[0])
+
+    def _for_start(self, loop_end: int) -> int:
+        """Offset of the FOR_ITER of the loop that ends at *loop_end*, or -1."""
+        return max((x.offset for x in self.instructions
+                    if x.opname == "FOR_ITER" and x.offset < loop_end and loop_end == self._get_jump_target(x)),
+                   default=-1)
+
+    def _break_to_enclosing_head(self, loop_start: int, loop_end: int) -> Optional[int]:
+        """
+        3.9/3.10: a `break` in a `for` loop that ends its enclosing loop's body jumps (after dropping the iterator)
+        straight back to that loop's head. Returns the offset of the jump that closes the enclosing loop and ends
+        the `else` clause, or None when the loop has no such `break`.
+        """
+        instrs = self.instructions
+        for k, ins in enumerate(instrs):
+            if ins.offset <= loop_start or ins.offset >= loop_end:
+                continue
+            if (ins.opname == "JUMP_ABSOLUTE" and k > 0 and instrs[k - 1].opname == "POP_TOP"
+                    and self._get_jump_target(ins) < loop_start):
+                head = self._get_jump_target(ins)
+                closing = next((x.offset for x in instrs if x.offset >= loop_end and x.opname == "JUMP_ABSOLUTE"
+                                and self._get_jump_target(x) == head), None)
+                return closing
+        return None
+
     def _instruction_at(self, offset: int) -> Optional[BytecodeInstruction]:
         return next((ins for ins in self.instructions if ins.offset == offset), None)
 
@@ -835,10 +867,16 @@ class DecompilerGeneric(DecompilerBase):
             # A `for` or `while` loop has an `else` clause when a jump from inside it (a
             # `break`) lands beyond the point where its condition or iterator runs out.
             if block_type == "for":
+                # (only the jumps inside the loop: an enclosing loop's exit jump lands beyond this one too)
+                loop_start = self._for_start(block_end)
+                escape = self._break_to_enclosing_head(loop_start, block_end)
+                if escape is not None:
+                    # a `break` that jumps back to an enclosing loop's head: the clause runs up to the jump that closes it
+                    else_end, has_else = escape, True
                 for ins in self.instructions:
                     if ins.offset >= block_end:
                         break
-                    if "JUMP" in ins.opname:
+                    if ins.offset > loop_start and "JUMP" in ins.opname:
                         target = self._get_jump_target(ins)
                         if target > block_end and not self._is_backward_instruction(ins):
                             if else_end is None or target > else_end:
@@ -3285,6 +3323,45 @@ class DecompilerGeneric(DecompilerBase):
                 return False
         return True
 
+    def _same_code_at(self, first: int, second: int) -> bool:
+        """
+        Whether the code at the two offsets is the same up to where it ends (a return, raise or jump):
+        the compiler copies a short exit, such as `return None`, for each jump that leaves a loop.
+        """
+        if first == second:
+            return True
+        instrs = self.instructions
+        a = next((n for n, ins in enumerate(instrs) if ins.offset == first), None)
+        b = next((n for n, ins in enumerate(instrs) if ins.offset == second), None)
+        if a is None or b is None:
+            return False
+        for step in range(16):
+            if a + step >= len(instrs) or b + step >= len(instrs):
+                return False
+            x, y = instrs[a + step], instrs[b + step]
+            if (x.opname, x.argval) != (y.opname, y.argval):
+                return False
+            if x.opname.startswith(("RETURN", "RAISE", "JUMP", "RERAISE")):
+                return True
+        return True
+
+    def _loop_guard_exit(self, jb: BytecodeInstruction) -> Optional[int]:
+        """
+        Where the condition at the head of the loop that the backward jump *jb* belongs to leaves the loop,
+        or None when there is no such condition. The condition sits right before the loop body (3.12/3.13
+        re-enter after it) or at the head the jump goes back to (3.9-3.11).
+        """
+        head = self._get_jump_target(jb)
+        exits = [g for g in self.instructions
+                 if g.offset < jb.offset and g.opname.startswith("POP_JUMP_IF")
+                 and isinstance(self._get_jump_target(g), int) and self._get_jump_target(g) > jb.offset]
+        before = [g for g in exits if g.offset < head]
+        after = [g for g in exits if g.offset >= head]
+        if before and all(x.opname in _WHILE_TRIVIAL_OPS for x in self.instructions
+                          if before[-1].offset < x.offset < head):
+            return self._get_jump_target(before[-1])
+        return self._get_jump_target(after[0]) if after else None
+
     def _dup_guard_jump_offsets(self, jb: BytecodeInstruction) -> set:
         """
         Offsets of the jumps of a loop condition duplicated at the bottom of the loop
@@ -3330,6 +3407,9 @@ class DecompilerGeneric(DecompilerBase):
                 k -= 1
             if k < 0 or not (is_cond_jump(instrs[k]) and exits_loop(instrs[k])):
                 return set()
+            guard_exit = self._loop_guard_exit(jb)
+            if guard_exit is not None and not self._same_code_at(self._get_jump_target(instrs[k]), guard_exit):
+                return set()   # an `if c: continue` that repeats the loop's condition, not a copy of it
             # `jb` itself leaving a nested loop (back to an enclosing head) is that
             # loop's exit path, not a duplicated condition.
             jb_target = self._get_jump_target(jb)
@@ -6804,6 +6884,13 @@ class DecompilerGeneric(DecompilerBase):
         #   3. Drain spurious stack items pushed by the dup condition.
         if self._is_backward_instruction(instr):
             body_start = jump_target
+
+            # 3.9/3.10: `break` out of a `for` loop that ends an enclosing loop's body drops the iterator and
+            # jumps straight back to that loop's head
+            prev = self.instructions[self.pc - 2] if self.pc >= 2 else None
+            if self._is_break_to_enclosing_head(instr, prev, jump_target):
+                self._append_reconstructed("break")
+                return
 
             # JUMP_BACKWARD instructions that exit except/finally
             # handlers (they jump to a finally-merge label) must NOT be
