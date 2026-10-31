@@ -15,7 +15,7 @@
     "src/pycrefine/decompiler/generic.py::no-else-break::DecompilerGeneric._prescan_compound_conds": 1,
     "src/pycrefine/decompiler/generic.py::no-else-return::DecompilerGeneric._collection_mutator": 3,
     "src/pycrefine/decompiler/generic.py::self-assigning-variable::DecompilerGeneric._op_call": 1,
-    "src/pycrefine/decompiler/generic.py::superfluous-parens::<module>": 2,
+    "src/pycrefine/decompiler/generic.py::superfluous-parens::<module>": 1,
     "src/pycrefine/decompiler/generic.py::too-complex::DecompilerGeneric._close_blocks": 1,
     "src/pycrefine/decompiler/generic.py::too-complex::DecompilerGeneric._collection_mutator": 1,
     "src/pycrefine/decompiler/generic.py::too-complex::DecompilerGeneric._dup_guard_jump_offsets": 1,

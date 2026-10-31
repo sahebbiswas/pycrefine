@@ -2844,6 +2844,12 @@ class DecompilerGeneric(DecompilerBase):
         fall_through = return_at(jb.offset + 2)
         if fall_through is not None:
             self.prescan.dup_guard_exits.add(fall_through)
+            # The run of implicit returns goes on past the loop's own exits: the other ways out of
+            # the code the loop ends (the false branch of an `if` that holds the loop) have one each.
+            k = by_offset[jb.offset + 2]
+            while k + 1 < len(instrs) and return_at(instrs[k].offset) is not None:
+                self.prescan.dup_guard_exits.add(instrs[k + 1].offset)
+                k += 2
         for offset in condition | dup_jumps:
             target = self._get_jump_target(instrs[by_offset[offset]])
             ret = return_at(target) if isinstance(target, int) and target > jb.offset else None
@@ -5469,7 +5475,7 @@ class DecompilerGeneric(DecompilerBase):
         if instr.argval is None:
             # The exit path of a suppressed bottom-of-loop condition copy: the loop
             # simply ends here, there is nothing to emit.
-            if instr.offset in self.prescan.dup_guard_exits and not (getattr(self.code_obj, "co_flags", 0) & 0x1):
+            if instr.offset in self.prescan.dup_guard_exits:
                 return
             if self._module_level_return_none():
                 return

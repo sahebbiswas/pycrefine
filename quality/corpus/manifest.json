@@ -73,17 +73,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 161,
-          "versions": [
-            "3.12",
-            "3.13"
-          ],
-          "summary": "return None inside a while loop that ends a function"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "features/comp_list_dict_set",

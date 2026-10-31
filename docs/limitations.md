@@ -36,7 +36,6 @@ These change what the code does, or produce code that does not compile:
 | `try` / `except` / `else` whose `else` returns, with code after the `try` | 3.12, 3.14 (3.9 with `finally`) | the code after the `try` lands in the last `except` clause; invalid output with `finally` on 3.9 | [#162](https://github.com/sahebbiswas/pycrefine/issues/162) |
 | Empty `finally: pass` in a loop | 3.9 | the `finally:` block is lost | [#141](https://github.com/sahebbiswas/pycrefine/issues/141) |
 | `if c: continue` directly followed by `return` in a `while` loop | all | the `if` is dropped, so the loop returns on its first pass | [#160](https://github.com/sahebbiswas/pycrefine/issues/160) |
-| `while` loop that ends a function | 3.12 | a `return None` inside the loop body, so it runs once | [#161](https://github.com/sahebbiswas/pycrefine/issues/161) |
 | Some code in the test corpus | 3.12, 3.14 | output that does not parse | [#91](https://github.com/sahebbiswas/pycrefine/issues/91) |
 
 Whenever the decompiler knows it is guessing, it records a diagnostic instead of staying
