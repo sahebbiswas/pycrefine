@@ -261,7 +261,16 @@ def get_decompiler(filepath: str, beautification_level: str = 'core', strict: bo
         all_data = f.read()
 
     if len(all_data) < 16:
-        raise ValueError(f"Invalid .pyc file '{filepath}': too short (found {len(all_data)} bytes)")
+        raise ValueError(f"Invalid .pyc file '{filepath}': too short (found {len(all_data)} bytes); "
+                         f"a .pyc starts with a 16-byte header, so this file is truncated or is not a .pyc")
+
+    if all_data[2:4] != b"\r\n":
+        # Every CPython magic number ends in \r\n, so this is not a compiled file at all
+        # (source code, for example), and reading its first bytes as a version would mislead.
+        raise ValueError(
+            f"'{filepath}' is not a .pyc file: it does not start with a Python magic number. "
+            f"Give pycrefine the compiled file, such as the one in __pycache__."
+        )
 
     magic = struct.unpack("<I", all_data[0:4])[0]
     version_id = magic & 0xFFFF

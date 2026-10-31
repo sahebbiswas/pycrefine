@@ -117,6 +117,16 @@ number is rejected before any offset is tried, with its own message
 The file is shorter than a `.pyc` header, so it is truncated or not a `.pyc` file. Check
 that it was copied completely (binary mode, no line-ending conversion).
 
+### `Error: '...' is not a .pyc file`
+
+The file does not start with a Python magic number. Two things look like this:
+
+- It is the `.py` source. Give pycrefine the compiled file instead, which Python writes to
+  `__pycache__` next to the source (for example `__pycache__/report.cpython-312.pyc`).
+- It is compiled code without its header, such as a `marshal` dump or a file taken from a
+  PyInstaller archive. Add the header first, as described in
+  [Decompile a `.pyc` without a header](use-cases.md#decompile-a-pyc-without-a-header-pyinstaller-marshal-dumps).
+
 ### `Warning: Decompiler returned no source code for ...`
 
 The module has no code, for example an empty `__init__.py`. The exit status is 1 so that
@@ -133,7 +143,7 @@ kind, the function and the instruction; the source near it should not be trusted
 `--strict` found a diagnostic. Drop `--strict` to get the best-effort source with the
 diagnostics listed, or decompile under the Python version that wrote the file.
 
-### `Error: [Errno 2] No such file or directory: ...`
+### `Error: cannot read ...: No such file or directory`
 
 The input path is wrong or unreadable. Quote paths with spaces, and remember that shells
 do not expand `*` inside quotes.
