@@ -684,8 +684,9 @@ class DecompilerGeneric(DecompilerBase):
         self.blocks = []
         self.prescan.while_header_targets = {}
         self._prescan_while_loops()
-        self._prescan_try_structure()
+        self.prescan.with_exit_suppress_offsets = set()
         self._prescan_with_exits()
+        self._prescan_try_structure()
         self._prescan_ternaries()
         self._prescan_compound_conds()
         self._prescan_value_boolops()
@@ -909,6 +910,11 @@ class DecompilerGeneric(DecompilerBase):
                 self.blocks.append((else_end, "else"))
             elif block_type not in _NO_INDENT_TYPES:
                 self.indent_level -= 1
+                if (block_type == "with" and self.emit.except_header_indents
+                        and self.emit.except_header_indents[-1] == self.indent_level):
+                    # the header the with statement recorded (see _op_before_with) must not outlive it:
+                    # it would stand for the enclosing except clause's
+                    self.emit.except_header_indents.pop()
                 # If this try_body has a deferred except-only handler (loop case),
                 # emit it immediately — before outer loop blocks also pop at same offset.
                 if block_type in ("try_body", "exc_cleanup"):
@@ -3582,6 +3588,10 @@ class DecompilerGeneric(DecompilerBase):
                                 self.prescan.suppress_push_exc_offsets.add(ins.offset)
 
         # ── 2. Classify NOP instructions as try-entry vs. epilogue ──────
+        # The `pass` of a `with` body is a NOP too: the exit call comes right after it, and in an
+        # except clause the compiler leaves the NOP out of the with's protected range.
+        _with_body_nops = {ins.offset for k, ins in enumerate(instrs[:-1])
+                           if ins.opname == "NOP" and self._with_exit_call_at(k + 1) is not None}
         self.prescan.try_nop_offsets = set()
         for ins in instrs:
             if ins.opname != "NOP" or ins.offset == 2:
@@ -3590,7 +3600,7 @@ class DecompilerGeneric(DecompilerBase):
             # start of a try-covered range.
             next_off = ins.offset + 2
             if _try_covered_starts:
-                if next_off in _try_covered_starts:
+                if next_off in _try_covered_starts and ins.offset not in _with_body_nops:
                     self.prescan.try_nop_offsets.add(ins.offset)
             else:
                 # Fallback heuristic: NOP is a try-entry if the next instruction
@@ -3826,6 +3836,10 @@ class DecompilerGeneric(DecompilerBase):
                 # The handler ends with its own clean-up (`COPY 3; POP_EXCEPT; RERAISE 1`);
                 # what follows, in a loop, is the rest of the loop body.
                 end_off = min(end_off, self._wrapper_cleanup_end(pei_off, end_off))
+            elif pei_idx + 1 < len(instrs) and instrs[pei_idx + 1].opname == "WITH_EXCEPT_START":
+                # 3.12+: the exit handler of a `with` inside an except clause sits among the
+                # clause's code; what follows its clean-up is the rest of the clause.
+                end_off = min(end_off, self._wrapper_cleanup_end(pei_off, end_off))
             for ins in instrs:
                 if pei_off <= ins.offset < end_off:
                     self.prescan.wrapper_body_suppress.add(ins.offset)
@@ -3837,8 +3851,11 @@ class DecompilerGeneric(DecompilerBase):
                 # Handler section starts at push_off, ends at status of either the
                 # next real PUSH_EXC_INFO or the nearest suppress-wrapper PUSH_EXC_INFO
                 handler_end = instrs[-1].offset + 2
-                for ins in instrs:
-                    if ins.offset > push_off and ins.opname == "PUSH_EXC_INFO":
+                for k, ins in enumerate(instrs):
+                    # (the exit handler of a `with` in the clause is part of it: the clause goes on after it)
+                    if ins.offset > push_off and ins.opname == "PUSH_EXC_INFO" and not (
+                            ins.offset in self.prescan.wrapper_body_suppress and k + 1 < n
+                            and instrs[k + 1].opname == "WITH_EXCEPT_START"):
                         handler_end = ins.offset
                         break
                 # The code where the try's paths rejoin is not part of its handlers.
@@ -3850,6 +3867,7 @@ class DecompilerGeneric(DecompilerBase):
                     ins for ins in instrs
                     if push_off <= ins.offset < handler_end
                     and ins.offset not in self.prescan.finally_body_suppress
+                    and ins.offset not in self.prescan.wrapper_body_suppress
                 ]
                 for ins in handler_instrs:
                     self.prescan.handler_section_suppress.add(ins.offset)
@@ -4003,7 +4021,6 @@ class DecompilerGeneric(DecompilerBase):
         # The normal-exit epilogue for a `with` block is:
         #   LOAD_CONST None; LOAD_CONST None; LOAD_CONST None; CALL 2; POP_TOP
         # Suppress the LOAD_CONSTs and the CALL to prevent ``None(None, None)``.
-        self.prescan.with_exit_suppress_offsets = set()
         for i, ins in enumerate(instrs):
             if ins.opname != "BEFORE_WITH":
                 continue

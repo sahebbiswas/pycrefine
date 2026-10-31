@@ -607,18 +607,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 177,
-          "versions": [
-            "3.12",
-            "3.13",
-            "3.14"
-          ],
-          "summary": "code after a with block whose body never falls through is lost"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "generated/cf_for_finally_break",

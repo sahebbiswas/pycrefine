@@ -25,6 +25,9 @@ SHARED_WITH_HANDLER_SECTION = (
     "while_header_targets",
     "while_body_offsets",
     "dup_guard_exits",
+    "with_exit_suppress_offsets",
+    "with_body_end",
+    "with_exit_owner",
 )
 
 
