@@ -2973,7 +2973,8 @@ class DecompilerGeneric(DecompilerBase):
                 # back-edge. A jump that lands ON the back-edge itself is an
                 # `if` whose false branch skips to the loop head (e.g.
                 # `while True: ...; if x: break`), not the loop's guard.
-                if t <= jb.offset and not (
+                inverted = self._is_inverted_guard(ins, t, body_start)
+                if t <= jb.offset and not inverted and not (
                         ins.offset > body_start and (
                             self._falls_to_outer_back_jump(ins, body_start)
                             or t < body_start)):  # 3.9/3.10: exit jumps straight to an outer head
@@ -2983,7 +2984,7 @@ class DecompilerGeneric(DecompilerBase):
                 # instructions (NOP, NOT_TAKEN, RESUME, CACHE).  If there are
                 # real (store/load/call) instructions between the fall-through
                 # and body_start, this is an outer 'if' guard, not a while-guard.
-                if ins.offset < body_start:
+                if ins.offset < body_start and not inverted:
                     fall_through = ins.offset + 2
                     only_trivial = True
                     for scan in self.instructions:
@@ -3004,6 +3005,10 @@ class DecompilerGeneric(DecompilerBase):
                 guard_offset = self._last_jump_of_condition(guard_offset, jb.offset)
             if guard_offset >= 0:
                 self.prescan.while_header_targets[body_start] = guard_offset
+                guard = next(i for i in self.instructions if i.offset == guard_offset)
+                if self._is_inverted_guard(guard, self._get_jump_target(guard), body_start):
+                    # (the jump that follows it only leaves the loop: the enclosing loop goes on)
+                    self.prescan.loop_exit_jumps.add(self.instructions[self.instructions.index(guard) + 1].offset)
                 # 3.12/3.13 copy the loop condition to the bottom of the body.
                 # Suppress exactly that copy's exit jumps, never body-level ifs.
                 dup_jumps = self._dup_guard_jump_offsets(jb)
@@ -3208,6 +3213,18 @@ class DecompilerGeneric(DecompilerBase):
             if best is not None:
                 inner[j.offset] = best.offset
         return inner
+
+    def _is_inverted_guard(self, cond, target: int, body_start: int) -> bool:
+        """
+        Whether the conditional jump `cond` is a `while` guard written the other way round:
+        it jumps *into* the body when the condition holds and falls through into a jump
+        back to an enclosing loop's head (3.12/3.13 inner `while` as the last statement of
+        an outer loop body, where the exit is a backward jump no conditional can make).
+        """
+        if target != body_start or cond.offset >= body_start:
+            return False
+        return (cond.opname.startswith("POP_JUMP") and "IF_TRUE" in cond.opname
+                and self._falls_to_outer_back_jump(cond, body_start))
 
     def _falls_to_outer_back_jump(self, cond, body_start: int) -> bool:
         """
@@ -6880,6 +6897,8 @@ class DecompilerGeneric(DecompilerBase):
             instr (BytecodeInstruction): The disassembled jump instruction to handle.
         
         """
+        if instr.offset in self.prescan.loop_exit_jumps:
+            return
         opname = instr.opname
         jump_target = self._get_jump_target(instr)
 
