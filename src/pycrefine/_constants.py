@@ -53,6 +53,14 @@ _TERNARY_PURE = frozenset((
 )) | _TERNARY_SKIP | _TERNARY_TERM
 
 
+# Opcodes a conditional expression's branch can hold that the small branch evaluator does not
+# know (displays that extend, `*args` / `**kwargs` and keyword calls): a branch with one is
+# rendered by a sub-decompiler.
+_TERNARY_SUB_OPS = frozenset((
+    "LIST_EXTEND", "LIST_APPEND", "LIST_TO_TUPLE", "SET_UPDATE", "DICT_MERGE", "DICT_UPDATE", "MAP_ADD",
+    "CALL_FUNCTION_EX", "CALL_FUNCTION_KW", "CALL_KW", "KW_NAMES", "BUILD_CONST_KEY_MAP",
+))
+
 _COMPOUND_SKIP = frozenset(("CACHE", "RESUME", "NOT_TAKEN", "COPY_FREE_VARS", "PRECALL", "PUSH_NULL"))
 
 

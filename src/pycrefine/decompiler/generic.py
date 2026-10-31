@@ -23,6 +23,7 @@ from .._constants import (
     _NO_PASS_TYPES,
     _STATEMENT_BOUNDARY_OPS,
     _TERNARY_PURE,
+    _TERNARY_SUB_OPS,
     _TERNARY_SKIP,
     _TERNARY_STORES,
     _TRY_HANDLER_EXIT_OPS,
@@ -1191,6 +1192,162 @@ class DecompilerGeneric(DecompilerBase):
                 return self._get_jump_target(ins)
         return -1
 
+    _CHAIN_JUMPS = ("POP_JUMP_IF_FALSE", "POP_JUMP_FORWARD_IF_FALSE")
+
+    def _chain_link_at(self, i: int) -> Optional[int]:
+        """
+        Index just past the head of a link of a chained comparison used as a value (3.12+) that starts at
+        index *i*: ``SWAP 2; COPY 2; COMPARE_OP; COPY 1; [TO_BOOL]; POP_JUMP_IF_FALSE; [NOT_TAKEN]; POP_TOP``.
+        """
+        instrs = self.instructions
+        n = len(instrs)
+        if i + 3 >= n or [x.opname for x in instrs[i:i + 4]] != ["SWAP", "COPY", "COMPARE_OP", "COPY"]:
+            return None
+        if instrs[i].arg != 2 or instrs[i + 1].arg != 2 or instrs[i + 3].arg != 1:
+            return None
+        k = i + 4
+        while k < n and instrs[k].opname in ("TO_BOOL", "CACHE"):
+            k += 1
+        if k >= n or instrs[k].opname not in self._CHAIN_JUMPS:
+            return None
+        k += 1
+        while k < n and instrs[k].opname in ("NOT_TAKEN", "CACHE"):
+            k += 1
+        if k < n and instrs[k].opname == "POP_TOP":
+            return k + 1
+        return None
+
+    def _chain_operand_end(self, start: int) -> Optional[int]:
+        """Index where the operand that starts at *start* ends: the next link or the comparison that ends the chain."""
+        instrs = self.instructions
+        depth = 0
+        for m in range(start, len(instrs)):
+            ins = instrs[m]
+            if depth == 1 and (ins.opname == "COMPARE_OP" or self._chain_link_at(m) is not None):
+                return m
+            try:
+                depth += dis.stack_effect(ins.opcode, ins.arg if ins.opcode >= dis.HAVE_ARGUMENT else None, jump=False)
+            except (ValueError, TypeError):
+                return None
+            if depth < 0:
+                return None
+        return None
+
+    def _parse_chain(self, i: int) -> Optional[Tuple[List[str], list, int, int]]:
+        """
+        The chained comparison whose first link starts at index *i*: ``(operators, operands after the second,
+        index of the last comparison, offset the links jump to when one fails)``, or None.
+        """
+        instrs = self.instructions
+        ops: List[str] = []
+        operands: list = []
+        fail_target = None
+        j = i
+        while True:
+            after = self._chain_link_at(j)
+            if after is None:
+                return None
+            ops.append(self._compare_symbol(instrs[j + 2]))
+            jump = next(x for x in instrs[j + 4:after] if x.opname in self._CHAIN_JUMPS)
+            target = self._get_jump_target(jump)
+            if fail_target not in (None, target):
+                return None
+            fail_target = target
+            m = self._chain_operand_end(after)
+            if m is None:
+                return None
+            operands.append(list(instrs[after:m]))
+            if instrs[m].opname == "COMPARE_OP" and self._chain_link_at(m) is None:
+                ops.append(self._compare_symbol(instrs[m]))
+                return ops, operands, m, fail_target
+            j = m
+
+    def _prescan_chained_comparison_values(self) -> None:
+        """
+        Find chained comparisons used as values (3.12+): ``x = a < b < c``, ``return a < b < c``.
+
+        The links test each comparison and jump to a clean-up (``SWAP 2; POP_TOP``) when one fails. The
+        chain is replaced by the expression, and so are the clean-up and the copy of the code after
+        the chain that follows it. Without this, a conditional jump is written for every link.
+        """
+        self.prescan.chain_values = {}
+        if self.target_version < (3, 12):
+            self._prescan_chain_cleanups()
+            return
+        instrs = self.instructions
+        n = len(instrs)
+        for i in range(n):
+            if self._chain_link_at(i) is None or (i > 0 and self._chain_link_at(i - 1) is not None):
+                continue
+            chain = self._parse_chain(i)
+            if chain is None:
+                continue
+            ops, operands, end, fail_target = chain
+            t_idx = next((x for x, ins in enumerate(instrs) if ins.offset == fail_target), None)
+            if t_idx is None or t_idx + 1 >= n or [x.opname for x in instrs[t_idx:t_idx + 2]] != ["SWAP", "POP_TOP"]:
+                continue
+            # the code after the chain is copied after the clean-up when it is short: it ends in a return
+            tail_end = next((x for x in range(end + 1, n) if instrs[x].opname in ("RETURN_VALUE", "RETURN_CONST")), None)
+            drop = {x.offset for x in instrs[t_idx:t_idx + 2]}
+            if tail_end is not None:
+                tail = instrs[end + 1:tail_end + 1]
+                copy = instrs[t_idx + 2:t_idx + 2 + len(tail)]
+                if [(x.opname, x.argval) for x in tail] == [(x.opname, x.argval) for x in copy]:
+                    drop.update(x.offset for x in copy)
+            self.prescan.chain_values[instrs[i].offset] = (ops, operands, end)
+            self.prescan.ternary_suppress.update(drop)
+            self.prescan.ternary_suppress.update(x.offset for x in instrs[i + 1:end + 1])
+
+    def _prescan_chain_cleanups(self) -> None:
+        """
+        3.9-3.11: the failure path of a chained comparison used as a value drops the extra operand
+        (``ROT_TWO`` / ``SWAP 2``, ``POP_TOP``), and a `return` of the chain is copied after it.
+        The chain itself is written by the and/or code; the clean-up and the copy are suppressed.
+        """
+        instrs = self.instructions
+        n = len(instrs)
+        index = {ins.offset: k for k, ins in enumerate(instrs)}
+        for k, jump in enumerate(instrs):
+            if jump.opname != "JUMP_IF_FALSE_OR_POP" or k < 3:
+                continue
+            head = [x.opname for x in instrs[k - 3:k]]
+            if not (head in (["DUP_TOP", "ROT_THREE", "COMPARE_OP"], ) or
+                    (head[0] == "SWAP" and instrs[k - 3].arg == 2 and head[1:] == ["COPY", "COMPARE_OP"]
+                     and instrs[k - 2].arg == 2)):
+                continue
+            t_idx = index.get(self._get_jump_target(jump))
+            if t_idx is None or t_idx + 1 >= n or instrs[t_idx].opname not in ("ROT_TWO", "SWAP") \
+                    or instrs[t_idx + 1].opname != "POP_TOP":
+                continue
+            drop = {instrs[t_idx].offset, instrs[t_idx + 1].offset}
+            if instrs[t_idx - 1].opname in ("RETURN_VALUE", "RETURN_CONST"):
+                compare = max((x for x in range(k + 1, t_idx) if instrs[x].opname == "COMPARE_OP"), default=None)
+                if compare is not None:
+                    tail = instrs[compare + 1:t_idx]
+                    copy = instrs[t_idx + 2:t_idx + 2 + len(tail)]
+                    if [(x.opname, x.argval) for x in tail] == [(x.opname, x.argval) for x in copy]:
+                        drop.update(x.offset for x in copy)
+            self.prescan.ternary_suppress.update(drop)
+
+    def _compare_symbol(self, ins: BytecodeInstruction) -> str:
+        """The operator text of a COMPARE_OP instruction (3.13+ writes ``bool(<)``)."""
+        symbol = str(ins.argval)
+        match = re.search(r"\(([^)]+)\)", symbol)
+        return match.group(1) if match else symbol
+
+    def _push_chained_comparison(self, start: BytecodeInstruction) -> None:
+        """Replace the chained comparison that starts at *start* by the expression on the stack."""
+        ops, operands, end = self.prescan.chain_values[start.offset]
+        right = self._pop() if self.stack else self._unknown("chained comparison without operands")
+        left = self._pop() if self.stack else self._unknown("chained comparison without operands")
+        parts = [str(left), ops[0], str(right)]
+        for op, operand in zip(ops[1:], operands):
+            rendered = self._eval_branch_with_sub(operand) or self._eval_ternary_branch(operand)
+            parts += [op, rendered]
+        self.stack.append(" ".join(parts))
+        self.pc = next((x for x, ins in enumerate(self.instructions) if ins.offset > self.instructions[end].offset),
+                       len(self.instructions))
+
     def _prescan_ternaries(self) -> None:
         """
         Detect ternary (conditional) expressions encoded in the function bytecode and record them for later reconstruction.
@@ -1213,6 +1370,7 @@ class DecompilerGeneric(DecompilerBase):
 
         self.prescan.ternary_jumps = {}
         self.prescan.ternary_suppress = set()
+        self._prescan_chained_comparison_values()
 
         offset_to_idx = {ins.offset: i for i, ins in enumerate(self.instructions)}
 
@@ -1236,6 +1394,7 @@ class DecompilerGeneric(DecompilerBase):
             "LIST_APPEND", "SET_ADD", "MAP_ADD",
             "UNARY_NEGATIVE", "UNARY_POSITIVE", "UNARY_INVERT", "UNARY_NOT",
             "CALL_INTRINSIC_1", "TO_BOOL",
+            "FORMAT_VALUE", "FORMAT_SIMPLE", "FORMAT_WITH_SPEC", "CONVERT_VALUE", "CALL_FUNCTION_EX", "CALL_KW",
         ))
         for idx, ins in enumerate(self.instructions):
             if not self._is_compound_cjump(ins.opname):
@@ -1341,6 +1500,8 @@ class DecompilerGeneric(DecompilerBase):
                             actual_then_expr.pop()
                             else_instrs.pop()
 
+                    if not aug_op and self._has_inplace(actual_then_expr + else_instrs):
+                        continue    # `x //= 2` calls __ifloordiv__ and may mutate: not the same as `x = x // 2`
                     self.prescan.ternary_jumps[ins.offset] = store_name, actual_then_expr, else_instrs, is_true, aug_op
                     for x in then_raw:
                         self.prescan.ternary_suppress.add(x.offset)
@@ -1388,7 +1549,8 @@ class DecompilerGeneric(DecompilerBase):
                     # the ternary result is consumed by that op, not stored to
                     # a variable.  We still push the ternary onto the stack.
                     if (st_idx is not None
-                            and self.instructions[st_idx].opname in _STACKSINK_OPS):
+                            and (self.instructions[st_idx].opname in _STACKSINK_OPS
+                                 or self._loads_then_call(st_idx))):
                         is_stacksink = True
                         # else_raw = from t_idx up to (but NOT including) the join op
                         else_end_ss = st_idx
@@ -1450,6 +1612,8 @@ class DecompilerGeneric(DecompilerBase):
                         before_jf.pop()
                         else_instrs.pop()
 
+                if not aug_op and self._has_inplace(before_jf + else_instrs):
+                    continue
                 self.prescan.ternary_jumps[ins.offset] = store_name, before_jf, else_instrs, is_true, aug_op
                 for x in then_raw:
                     self.prescan.ternary_suppress.add(x.offset)
@@ -1475,7 +1639,8 @@ class DecompilerGeneric(DecompilerBase):
                 if xi.opname in _TERNARY_STORES:
                     else_store = xi
                     break
-                if xi.opname not in _TERNARY_PURE and xi.opname not in _BOOLOP_PARTS:
+                if xi.opname not in _TERNARY_PURE and xi.opname not in _TERNARY_SUB_OPS \
+                        and xi.opname not in _BOOLOP_PARTS:
                     break
 
             if else_store is None or else_store.argval != then_store.argval:
@@ -1515,11 +1680,19 @@ class DecompilerGeneric(DecompilerBase):
                     before_store.pop()
                     else_instrs.pop()
 
+            if not aug_op and self._has_inplace(before_store + else_instrs):
+                continue
             self.prescan.ternary_jumps[ins.offset] = store_name, before_store, else_instrs, is_true, aug_op
             for x in then_raw:
                 self.prescan.ternary_suppress.add(x.offset)
             for x in else_instrs:
                 self.prescan.ternary_suppress.add(x.offset)
+
+    @staticmethod
+    def _has_inplace(instrs: List[BytecodeInstruction]) -> bool:
+        """Whether any instruction is an in-place operator (``x //= 2``), which is not the same as ``x = x // 2``."""
+        return any(x.opname.startswith("INPLACE_") or (x.opname == "BINARY_OP" and x.arg is not None
+                                                       and 13 <= int(x.arg) <= 25) for x in instrs)
 
     def _has_newline_const(self, instrs: List[BytecodeInstruction]) -> bool:
         """Heuristic: Return True if any instruction loads a string constant containing a literal newline."""
@@ -2338,6 +2511,9 @@ class DecompilerGeneric(DecompilerBase):
         True if *seq* (one branch of a conditional expression, ending where its value is
         consumed at *end_offset*) is a pure expression, value-context `and`/`or` included.
         """
+        if any(ins.opname in _TERNARY_SUB_OPS for ins in seq) and self._eval_branch_with_sub(seq) is None:
+            return False        # the small evaluator does not know these opcodes: keep the statements
+
         def lands_in_branch(ins, target):
             return isinstance(target, int) and ins.offset < target <= end_offset
 
@@ -2358,7 +2534,7 @@ class DecompilerGeneric(DecompilerBase):
                 ok = lands_in_branch(seq[i], found[1]) and found[2] < len(seq)
                 i = found[2]
             else:
-                ok = seq[i].opname in _TERNARY_PURE
+                ok = seq[i].opname in _TERNARY_PURE or seq[i].opname in _TERNARY_SUB_OPS
                 i += 1
         return ok
 
@@ -2406,7 +2582,52 @@ class DecompilerGeneric(DecompilerBase):
         self._report(AMBIGUOUS_EXPRESSION, reason, instr)
         return str(self._unknown(reason))
 
+    def _loads_then_call(self, index: int) -> bool:
+        """
+        True if the instructions from *index* are plain loads (the arguments) and then the call that
+        uses the value before them as its callee: the join of `(f if c else g)(1, 2)`.
+        """
+        instrs = self.instructions
+        loads = 0
+        k = index
+        quiet = _TERNARY_SKIP | {"KW_NAMES", "PUSH_NULL", "PRECALL"}
+        while k < len(instrs) and (instrs[k].opname in quiet or instrs[k].opname.startswith("LOAD_")
+                                   and instrs[k].opname not in ("LOAD_ATTR", "LOAD_METHOD", "LOAD_BUILD_CLASS")):
+            loads += 0 if instrs[k].opname in quiet else 1
+            k += 1
+        return (k < len(instrs) and instrs[k].opname in ("CALL", "CALL_FUNCTION", "CALL_METHOD", "CALL_KW",
+                                                         "CALL_FUNCTION_KW")
+                and loads > 0 and (instrs[k].arg or 0) >= 0)
+
+    def _eval_branch_with_sub(self, instrs: list) -> Optional[str]:
+        """
+        The expression a branch of a conditional expression computes, rendered by a sub-decompiler
+        over its instructions (every opcode the main decompiler knows), or None when it emits statements.
+        """
+        dec_class = _pick_decompiler_class(self)
+        sub = dec_class.__new__(dec_class)
+        DecompilerGeneric.__init__(sub, self.code_obj, indent_level=0, beautification_level=self.beautification_level,
+                                   target_version=self.target_version)
+        self._share_diagnostics_with(sub)
+        sub.prescan = self.prescan.for_handler_section()
+        sub.emit = self.emit.for_handler_section()
+        sub._enclosing_locals = self._enclosing_locals
+        sub.instructions = instrs
+        sub.pc = 0
+        while sub.pc < len(sub.instructions):
+            instr = sub.instructions[sub.pc]
+            sub.pc += 1
+            sub._current_instr = instr
+            sub._handle_instruction(instr)
+        if any(line.strip() for line in sub.reconstructed) or len(sub.stack) != 1:
+            return None
+        return str(sub.stack[-1])
+
     def _eval_ternary_branch(self, instrs: list) -> str:
+        if any(ins.opname in _TERNARY_SUB_OPS for ins in instrs):
+            rendered = self._eval_branch_with_sub(instrs)
+            if rendered is not None:
+                return rendered
         mini_stack: list = []
         idx = 0
         while idx < len(instrs):
@@ -4475,6 +4696,9 @@ class DecompilerGeneric(DecompilerBase):
         Everything later (finally and handler bodies, with-exit calls) is checked by
         `_dispatch_instruction`, because those depend on the merge labels it handles first.
         """
+        if instr.offset in self.prescan.chain_values:
+            self._push_chained_comparison(instr)
+            return True
         if instr.offset in self.prescan.ternary_suppress:
             return True
         if instr.offset in self.prescan.compound_suppress:
@@ -6088,7 +6312,19 @@ class DecompilerGeneric(DecompilerBase):
         if func == "super" and not final_args:
             self.stack.append("super()")
         else:
-            self.stack.append(f"{func}({', '.join(final_args)})")
+            self.stack.append(f"{self._parenthesize_callee(func)}({', '.join(final_args)})")
+
+    @staticmethod
+    def _parenthesize_callee(func: Any) -> str:
+        """A callee that is a conditional expression or a lambda needs parentheses: ``(f if c else g)(1)``."""
+        text = str(func)
+        if " if " in text or text.startswith("lambda"):
+            try:
+                if isinstance(ast.parse(text, mode="eval").body, (ast.IfExp, ast.Lambda)):
+                    return f"({text})"
+            except SyntaxError:
+                pass
+        return text
 
     def _call_ex_arguments(self, args_tuple: Any, kwargs_dict: Any) -> Tuple[List[str], List[Any]]:
         """
