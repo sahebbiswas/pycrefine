@@ -99,6 +99,25 @@ class TestBreakInAnExceptClause(LoopBreakCase):
         )
         self.assert_same_results(src, "f([1, None, 0, 5])", "f([1, 2])", "f([None])")
 
+    def test_break_from_an_inner_loop_that_ends_the_outer_body(self):
+        """The jump out of the inner loop goes back to the outer loop's head, but it is still a break."""
+        src = (
+            "def f(rows, g):\n    out = []\n    for r in rows:\n        for x in r:\n"
+            "            try:\n                g(x)\n            except ValueError as e:\n                break\n"
+            "            out.append(x)\n    return out\n"
+            "def g(x):\n    if x == 'v':\n        raise ValueError\n"
+        )
+        self.assert_same_results(src, "f([['a', 'v', 'b'], ['c']], g)", "f([['a'], ['c']], g)")
+
+    def test_continue_and_break_in_different_clauses(self):
+        src = (
+            "def g(x):\n    if x == 'v':\n        raise ValueError\n    if x == 'k':\n        raise KeyError\n"
+            "def f(rows):\n    out = []\n    for r in rows:\n        try:\n            g(r)\n"
+            "        except ValueError as e:\n            continue\n"
+            "        except KeyError as k:\n            break\n        out.append(r)\n    return out\n"
+        )
+        self.assert_same_results(src, "f(['a', 'v', 'c', 'k', 'd'])")
+
 
 if __name__ == "__main__":
     unittest.main()

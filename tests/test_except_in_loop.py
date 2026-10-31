@@ -1,5 +1,8 @@
 """A try with several except clauses at the end of a loop body (#208)."""
 import ast
+import contextlib
+import io
+import re
 import sys
 import unittest
 
@@ -20,24 +23,30 @@ def _indent(text, by):
 class TestSeveralExceptClausesEndingALoopBody(unittest.TestCase):
 
     def assert_valid_and_same_behavior(self, source, call=None):
+        """The output parses, and prints and returns what the original does (`call` runs a function)."""
         out = decompile(source)
         ast.parse(out)   # the stray `continue` between the clauses was a syntax error
         results = []
         for code in (source, out):
             namespace = {}
-            exec(compile(code, "<t>", "exec"), namespace)  # pylint: disable=exec-used
-            results.append(eval(call, namespace) if call else None)  # pylint: disable=eval-used
+            printed = io.StringIO()
+            with contextlib.redirect_stdout(printed):
+                exec(compile(code, "<t>", "exec"), namespace)  # pylint: disable=exec-used
+                value = eval(call, namespace) if call else None  # pylint: disable=eval-used
+            results.append((printed.getvalue(), value))
         self.assertEqual(results[0], results[1], out)
+        self.assertTrue(results[0][0] or results[0][1] is not None, "nothing is printed or returned to compare")
         return out
 
     def test_module_level_loop(self):
         src = "for source in ('1', 'x'):\n" + _indent(HANDLERS, 4)
         out = self.assert_valid_and_same_behavior(src)
-        self.assertNotIn("\ncontinue\n    except", out)
+        # a `continue` level with the next `except` would end the try early (the bug); one inside a clause is fine
+        self.assertIsNone(re.search(r"\n( *)continue\n\1except", out), out)
 
     def test_loop_in_a_function(self):
         src = "def f(items):\n    for source in items:\n" + _indent(HANDLERS, 4)
-        self.assert_valid_and_same_behavior(src)
+        self.assert_valid_and_same_behavior(src, "f(['1', 'x'])")
 
     def test_the_clauses_stay_in_one_try(self):
         out = decompile("def f(items):\n    for source in items:\n" + _indent(HANDLERS, 4))
@@ -49,11 +58,13 @@ class TestSeveralExceptClausesEndingALoopBody(unittest.TestCase):
 
     def test_every_clause_binds_a_name(self):
         src = (
+            "class Boom:\n    def __int__(self):\n        raise IndexError('boom')\n"
             "def f(items):\n    for s in items:\n        try:\n            print(int(s))\n"
             "        except ValueError as e:\n            print('bad', e)\n"
             "        except IndexError as g:\n            print('i', g)\n"
         )
-        self.assert_valid_and_same_behavior(src)
+        # '1' succeeds, 'x' runs the first clause and Boom() runs the second
+        self.assert_valid_and_same_behavior(src, "f(['1', 'x', Boom()])")
 
     def test_three_clauses_and_code_after_the_loop(self):
         src = (

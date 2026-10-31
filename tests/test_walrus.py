@@ -128,6 +128,27 @@ class TestWalrus(unittest.TestCase):
         self.assertNotIn("global", out)
         self.assertNotIn("nonlocal", out)
 
+    def test_target_in_a_nested_comprehension_is_declared(self):
+        """A comprehension inside a comprehension is another code object before 3.12."""
+        for body in ("[[Z := x for x in r] for r in rows]", "list([Z := x for x in r] for r in rows)"):
+            with self.subTest(body=body):
+                src = f"def f(rows):\n    global Z\n    return {body}\n"
+                out = decompile(src)
+                self.assertIn("global Z", out)
+                original, rebuilt = _namespace(src), _namespace(out)
+                for ns in (original, rebuilt):
+                    ns["f"]([[1, 2], [3]])
+                self.assertEqual(rebuilt["Z"], original["Z"])
+
+    def test_nonlocal_target_in_a_nested_comprehension(self):
+        src = (
+            "def outer():\n    n = 0\n    def inner(rows):\n        nonlocal n\n"
+            "        return [[n := x for x in r] for r in rows]\n    inner([[4, 5], [6]])\n    return n\n"
+        )
+        out = decompile(src)
+        self.assertIn("nonlocal n", out)
+        self.assertEqual(_namespace(out)["outer"](), _namespace(src)["outer"]())
+
 
 if __name__ == "__main__":
     unittest.main()
