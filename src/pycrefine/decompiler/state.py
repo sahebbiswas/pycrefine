@@ -66,6 +66,7 @@ class PrescanState:  # pylint: disable=too-many-instance-attributes
     empty_try_handlers: Dict[int, Any] = field(default_factory=dict)  # try NOP -> handler of a `try: pass`
     empty_try_skip: Set[int] = field(default_factory=set)           # NOPs of such a statement
     else_starts: Dict[int, int] = field(default_factory=dict)       # else start offset -> else end offset
+    try_else: Dict[int, int] = field(default_factory=dict)          # 3.11+: where a try's else clause starts -> where it ends
     with_exit_suppress_offsets: Set[int] = field(default_factory=set)  # with-exit epilogue instructions
     with_exit_suppress: Set[int] = field(default_factory=set)       # 3.14
     with_body_end: Dict[int, int] = field(default_factory=dict)     # first protected offset of a with body -> where it ends
@@ -101,6 +102,7 @@ class EmissionState:  # pylint: disable=too-many-instance-attributes
     annotations: List[Any] = field(default_factory=list)            # 3.14: (number or None, name, text) of this body's annotations
     annotation_marks: List[Any] = field(default_factory=list)       # 3.14 class: (number, line index, indent) of annotations that ran before `__annotate__` was seen
     pei_indents: Dict[int, int] = field(default_factory=dict)
+    pending_else: List[Tuple[int, List[str]]] = field(default_factory=list)  # (indent of the try, rendered else clause) waiting for its handlers
     finally_wrapper_indent: Dict[int, int] = field(default_factory=dict)  # 3.9
     kw_names: Any = ()                                              # keyword names of the call being built
     tuple_assign: Optional[Tuple[int, bool, int]] = None            # open tuple assignment: (index in `reconstructed` of its first line, whether the stores run in reverse, index in `instructions` of its last store)
