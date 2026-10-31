@@ -1,6 +1,6 @@
 """Decompiler backend for CPython 3.13/3.14 bytecode."""
 from .._constants import _VALUE_OPS
-from ..expr import _UnpackAccessor
+from ..expr import _ChainedValue, _UnpackAccessor
 from .py311 import Decompiler311Plus
 from ..instructions import BytecodeInstruction
 
@@ -196,6 +196,15 @@ class Decompiler314(Decompiler311Plus):
             # Fall through to super()
 
         elif opname == "STORE_FAST_STORE_FAST":
+            names = instr.argval if isinstance(instr.argval, (tuple, list)) else ()
+            waiting = self.stack[-len(names):] if names else []
+            if (len(names) >= 2 and len(waiting) == len(names)
+                    and any(isinstance(v, _ChainedValue) for v in waiting)
+                    and all(isinstance(v, (_ChainedValue, _UnpackAccessor)) for v in waiting)):
+                # `a = b = value`: one value, kept on the stack once per target
+                for name in names:
+                    self._emit_assignment(str(name), self.stack.pop())
+                return
             # Python 3.14 combined store for tuple unpacking (after UNPACK_SEQUENCE)
             if (isinstance(instr.argval, (tuple, list)) and len(instr.argval) >= 2
                     and len(self.stack) >= len(instr.argval)

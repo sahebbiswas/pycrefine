@@ -34,7 +34,7 @@ from .._constants import (
 )
 from ..codeobj import _is_code
 from .base import DecompilerBase
-from ..expr import (StackNULL, UnknownExpression, _BoolExpr, _CollectionAccumSentinel, _ConvertedValue, _FString,
+from ..expr import (StackNULL, UnknownExpression, _BoolExpr, _ChainedValue, _CollectionAccumSentinel, _ConvertedValue, _FString,
                     _FStringField, _MergedDisplay, _UnpackAccessor, _unary_operand, is_unknown)
 from ..diagnostics import (AMBIGUOUS_EXPRESSION, INTERNAL_ERROR, STACK_UNDERFLOW, UNKNOWN_CONTROL_FLOW,
                            UNSUPPORTED_OPCODE, UNSUPPORTED_VERSION_CONSTRUCT, DecompilationError)
@@ -4435,14 +4435,14 @@ class DecompilerGeneric(DecompilerBase):
             elif val == name:
                 pass  # suppress redundant x = x
             else:
-                self._append_reconstructed(f"{name} = {val}", indent_multiline=False)
+                self._emit_assignment(name, val)
 
     def _op_store_attr(self, instr: BytecodeInstruction):
         opname = instr.opname
         if len(self.stack) >= 2:
             obj = self.stack.pop()
             val = self.stack.pop()
-            self._append_reconstructed(f"{obj}.{instr.argval} = {val}")
+            self._emit_assignment(f"{obj}.{instr.argval}", val)
 
         # STORE_SUBSCR (x[key] = val)
 
@@ -4465,7 +4465,7 @@ class DecompilerGeneric(DecompilerBase):
             if text is not None:
                 self._emit_annotation(ast.literal_eval(str(key)), text)
                 return
-            self._append_reconstructed(f"{self._receiver(container)}[{key}] = {val}")
+            self._emit_assignment(f"{self._receiver(container)}[{key}]", val)
 
     def _annotation_text(self, container: Any, key: Any, val: Any) -> Optional[str]:
         """The annotation ``name: text`` a store into ``__annotations__`` stands for, else None.
@@ -4558,14 +4558,26 @@ class DecompilerGeneric(DecompilerBase):
             targets, next_pc = [parsed[0]], parsed[2]
 
         if targets is not None and self.stack:
-            expr = str(self.stack.pop())
-            self._append_reconstructed(f"{targets[0]} = {expr}")
+            value = self.stack.pop()
+            self._emit_assignment(targets[0], value)
             self.pc = next_pc
         elif self.stack:
             # Fallback for complex un-matched structures:
             # discrete indexed extraction from the stack value
             val = self.stack.pop()
             val_str = str(val)
+            if isinstance(val, _ChainedValue):
+                # the other targets read the value too: bind it once, before it is taken apart
+                val.alias = self._fresh_accum_name("_chain")
+                row = val.row
+                if row is not None and self.reconstructed[row].endswith(f" = {val_str}"):
+                    # an earlier store already wrote the value: name it in that same statement
+                    line = self.reconstructed[row]
+                    body = line.lstrip()
+                    self.reconstructed[row] = f"{line[:len(line) - len(body)]}{val.alias} = {body}"
+                else:
+                    self._append_reconstructed(f"{val.alias} = {val_str}")
+                val_str = val.alias
             # Push discrete accessors onto the stack for subsequent STORE_*
             # to consume.  Since STOREs are processed sequentially, we push
             # item[n-1], then item[n-2], ..., item[0] so that the stack
@@ -5501,7 +5513,7 @@ class DecompilerGeneric(DecompilerBase):
             val = self.stack.pop()
             start = "" if str(start) == "None" else start
             stop = "" if str(stop) == "None" else stop
-            self._append_reconstructed(f"{self._receiver(container)}[{start}:{stop}] = {val}")
+            self._emit_assignment(f"{self._receiver(container)}[{start}:{stop}]", val)
 
     def _op_binary_slice(self, instr: BytecodeInstruction):
         # Python 3.11+ BINARY_SLICE pops: stop, start, container
@@ -5952,14 +5964,57 @@ class DecompilerGeneric(DecompilerBase):
                 self.stack[-1], self.stack[-n] = self.stack[-n], self.stack[-1]
         elif opname == "COPY":
             n = int(instr.arg) if instr.arg is not None else 0
-            if n >= 1 and len(self.stack) >= n:
+            if n == 1 and self.stack:
+                self._duplicate_top()
+            elif n >= 1 and len(self.stack) >= n:
                 # COPY n: push a copy of the n-th element to TOS
                 self.stack.append(self.stack[-n])
+
+    _CHAIN_STORE_OPS = ("UNPACK_SEQUENCE", "UNPACK_EX")
+    _CHAIN_OPERAND_OPS = ("BINARY_OP", "BINARY_SUBSCR", "BUILD_SLICE", "CACHE", "NOP", "PUSH_NULL", "PRECALL", "KW_NAMES",
+                          "CALL", "CALL_FUNCTION", "CALL_METHOD", "CALL_KW", "BUILD_TUPLE", "BUILD_LIST")
+
+    def _stored_next(self) -> bool:
+        """True when the instructions after this one, past the operands of a target, are a store."""
+        for ins in self.instructions[self.pc:]:
+            if ins.opname in self._STORE_OPS or ins.opname in self._CHAIN_STORE_OPS:
+                return True
+            if not (ins.opname.startswith("LOAD_") or ins.opname in self._CHAIN_OPERAND_OPS):
+                return False
+        return False
+
+    def _duplicate_top(self) -> None:
+        """
+        Push a second reference to the value on top. A value stored twice is a chained assignment:
+        it is marked, so the stores that take it write one ``a = b = value`` statement (the value
+        is computed once; writing it per target would run it once per target).
+        """
+        value = self.stack[-1]
+        if type(value) is str and self._stored_next():  # pylint: disable=unidiomatic-typecheck
+            value = _ChainedValue(value)
+            self.stack[-1] = value
+        self.stack.append(value)
+
+    def _emit_assignment(self, target: str, value: Any) -> None:
+        """Write ``target = value``, or add *target* to the statement an earlier store of the same
+        chained *value* wrote."""
+        if isinstance(value, _ChainedValue):
+            row = value.row
+            tail = f" = {value}"
+            if row is not None and row == len(self.reconstructed) - 1 and self.reconstructed[row].endswith(tail):
+                text = self.reconstructed[row]
+                self.reconstructed[row] = f"{text[:len(text) - len(value)]}{target} = {value}"
+                return
+            self._append_reconstructed(f"{target} = {value.alias or value}")
+            if value.alias is None:
+                value.row = len(self.reconstructed) - 1
+            return
+        self._append_reconstructed(f"{target} = {value}")
 
     def _op_dup_top(self, instr: BytecodeInstruction):
         opname = instr.opname
         if opname == "DUP_TOP" and self.stack:
-            self.stack.append(self.stack[-1])
+            self._duplicate_top()
         elif opname == "DUP_TOP_TWO" and len(self.stack) >= 2:
             self.stack.extend([self.stack[-2], self.stack[-1]])
 
