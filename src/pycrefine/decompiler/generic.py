@@ -115,6 +115,10 @@ _ASYNC_DEF_REASON = "async def is not decompiled and is written as a plain def (
 # Opcodes that reach `_op_unknown` and are correctly left out of the source: they set up
 # generators and wide operands, or (3.10's `POP_BLOCK`) belong to block-based exception
 # handling, which is reported once per code object by `_report_version_gaps`.
+# The instructions that can end the clean-up of an `as` name (`e = None; del e`), before a loop's iterator is dropped.
+_AS_CLEANUP_OPS = ("STORE_FAST", "DELETE_FAST", "STORE_NAME", "DELETE_NAME", "STORE_DEREF", "DELETE_DEREF",
+                   "STORE_GLOBAL", "DELETE_GLOBAL")
+
 _NO_SOURCE_OPS = frozenset(("RETURN_GENERATOR", "GEN_START", "EXTENDED_ARG", "LOAD_LOCALS", "POP_BLOCK"))
 
 
@@ -4806,6 +4810,13 @@ class DecompilerGeneric(DecompilerBase):
             ahead = self.pc
             if self._is_as_name_cleanup(ahead, self.emit.exc_bound_names):
                 ahead += 3  # `e = None; del e` for an `as` name sits between POP_EXCEPT and the jump
+            if (ahead + 1 < len(self.instructions) and self.instructions[ahead].opname == "POP_TOP"
+                    and self.instructions[ahead + 1].opname in ("JUMP_FORWARD", "JUMP_ABSOLUTE", "JUMP_BACKWARD")):
+                # `break`: the loop's iterator is dropped before the jump to the code after the loop
+                self._append_reconstructed("break")
+                self.pc = ahead + 2
+                self._close_except_clause()
+                return
             if ahead < len(self.instructions):
                 nxt = self.instructions[ahead]
                 if nxt.offset in self.prescan.exc_handler_jump_offsets:
@@ -4877,6 +4888,11 @@ class DecompilerGeneric(DecompilerBase):
                 k += 3
             else:
                 break
+        # A `break` that the compiler replaced by a copy of the `return` after the loop drops the
+        # loop's iterator first (POP_TOP), before the returned value is computed.
+        if (0 < k < len(instrs) and instrs[k].opname == "POP_TOP"
+                and instrs[k - 1].opname in ("POP_EXCEPT", *_AS_CLEANUP_OPS)):
+            k += 1
         resume = k
         targets = {self._get_jump_target(x) for x in instrs if "JUMP" in x.opname or x.opname == "FOR_ITER"}
         placed = self.prescan.finally_body_suppress
@@ -6472,9 +6488,24 @@ class DecompilerGeneric(DecompilerBase):
             self.indent_level -= 1
             self._append_reconstructed("else:")
             self.indent_level += 1
-            self.blocks.append((loop_end, "else"))
+            self.blocks.append((self._else_end_with_break_tail(instr, loop_end), "else"))
         elif not ends_if and has_more:
             self._append_reconstructed("continue")
+
+    def _else_end_with_break_tail(self, instr: BytecodeInstruction, loop_end: int) -> int:
+        """
+        Where the `else:` opened at the inner back-jump *instr* ends.
+
+        Normally at the loop's closing back-edge *loop_end*. A `break` (or the `return` that the
+        compiler copies in its place when the loop is the last thing in the function) sits after
+        that back-edge, still inside the loop: it belongs to the same branch, so the `else:`
+        runs on to the loop's exit.
+        """
+        head = next((i for i in self.instructions if i.offset == self._get_jump_target(instr)), None)
+        if head is None or head.opname != "FOR_ITER":
+            return loop_end
+        exit_offset = self._get_jump_target(head)
+        return exit_offset if isinstance(exit_offset, int) and exit_offset > loop_end + 2 else loop_end
 
     def _lowered_tail_if(self, instr: BytecodeInstruction, jump_target: int):
         """

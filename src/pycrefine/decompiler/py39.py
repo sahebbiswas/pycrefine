@@ -1251,6 +1251,22 @@ class Decompiler39(DecompilerGeneric):
                         _emitted_continue = True
 
                 if not _emitted_continue:
+                    # `break`: the loop's iterator is dropped (POP_TOP) before the jump forward to
+                    # the code after the loop.
+                    look = self.pc
+                    if self._is_as_name_cleanup(look, self.emit.exc_bound_names):
+                        look += 3
+                    if (look + 1 < len(self.instructions) and self.instructions[look].opname == "POP_TOP"
+                            and self.instructions[look + 1].opname == "JUMP_ABSOLUTE"
+                            and self._get_jump_target(self.instructions[look + 1]) > self.instructions[look + 1].offset):
+                        self._append_reconstructed("break")
+                        self.pc = look + 2
+                        dead = self.instructions[look + 2:look + 4]
+                        if [x.opname for x in dead] == ["POP_EXCEPT", "JUMP_ABSOLUTE"]:
+                            self.pc = look + 4   # the compiler's unreachable copy of the clause exit
+                        _emitted_continue = True
+
+                if not _emitted_continue:
                     # ── Python 3.9 return-inside-except ─────────────────────────
                     # CPython 3.9 emits: LOAD_FAST x → ROT_FOUR → POP_EXCEPT → RETURN_VALUE
                     # The return value is on the stack but POP_EXCEPT fires first.

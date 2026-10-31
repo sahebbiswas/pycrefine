@@ -43,7 +43,7 @@
     "generated/cf_for_nested_break": "equivalent",
     "generated/cf_for_nested_continue": "equivalent",
     "generated/cf_for_nested_return": "equivalent",
-    "generated/cf_for_try_break": "syntax_error",
+    "generated/cf_for_try_break": "equivalent",
     "generated/cf_for_try_continue": "equivalent",
     "generated/cf_for_try_return": "equivalent",
     "generated/cf_for_with_break": "equivalent",
