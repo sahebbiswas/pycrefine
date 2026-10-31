@@ -313,6 +313,16 @@ class Decompiler39(DecompilerGeneric):
                                 self.prescan.exc_handler_jump_offsets.add(kx.offset)
                                 self.prescan.exc_handler_continue_offsets.add(kx.offset)
 
+    def _skip_finally_copy(self, index: int) -> int:
+        """
+        Index of the first instruction at or after *index* that is not the `POP_BLOCK` and the copy of
+        a `finally` body (suppressed) that a `continue` or `break` in a handler runs on its way out.
+        """
+        instrs = self.instructions
+        while index < len(instrs) and instrs[index].offset in self.prescan.finally_body_suppress:
+            index += 1
+        return index
+
     def _elide_early_finally_copies(self, setup_idx: int, handler_idx: int, reraise_offset: int) -> None:
         """
         Suppress the copies of a `finally` body that the compiler inlines at early exits.
@@ -579,8 +589,11 @@ class Decompiler39(DecompilerGeneric):
             # re-enters the loop. It closes nothing; the jump emits the `continue`.
             if self.pc < len(self.instructions):
                 _nxt = self.instructions[self.pc]
+                _empty_finally = (self.pc + 1 < len(self.instructions) and self.blocks
+                                  and self.instructions[self.pc + 1].opname == "RERAISE"
+                                  and self.instructions[self.pc + 1].offset == self.blocks[-1][0])
                 if (_nxt.opname == "JUMP_ABSOLUTE" and _nxt.offset in self.prescan.inner_back_jumps
-                        and any(b[1] == "try_body" for b in self.blocks)):
+                        and not _empty_finally and any(b[1] == "try_body" for b in self.blocks)):
                     return
 
             # ── Early-exit: for-loop break inside if-within-try (Python 3.9) ──────
@@ -851,6 +864,11 @@ class Decompiler39(DecompilerGeneric):
                         )
                         if not is_handler_entry:
                             is_finally_pop = True
+                    elif (look + 1 < len(self.instructions) and self.instructions[look].opname == "JUMP_ABSOLUTE"
+                          and self.instructions[look + 1].offset == finally_target
+                          and self.instructions[look + 1].opname == "RERAISE"):
+                        # `finally: pass` leaves no copy after the POP_BLOCK, only the loop's jump back
+                        is_finally_pop = True
 
                 _closing_exc_cleanup = self.blocks[-1][1] == "exc_cleanup"
 
@@ -1235,6 +1253,7 @@ class Decompiler39(DecompilerGeneric):
                 look = self.pc
                 # `e = None; del e` for an `as` name sits before the jump
                 look += self._is_as_name_cleanup(look, self.emit.exc_bound_names)
+                look = self._skip_finally_copy(look)
                 if (look < len(self.instructions)
                         and self.instructions[look].opname in ("JUMP_ABSOLUTE", "JUMP_BACKWARD")
                         and isinstance(self.instructions[look].argval, int)
@@ -1256,6 +1275,7 @@ class Decompiler39(DecompilerGeneric):
                     # loop when the loop ended its body; a `continue` drops no iterator.
                     look = self.pc
                     look += self._is_as_name_cleanup(look, self.emit.exc_bound_names)
+                    look = self._skip_finally_copy(look)
                     if (look + 1 < len(self.instructions) and self.instructions[look].opname == "POP_TOP"
                             and self.instructions[look + 1].opname == "JUMP_ABSOLUTE"):
                         self._append_reconstructed("break")

@@ -3311,6 +3311,7 @@ class DecompilerGeneric(DecompilerBase):
         #   - O is NOT a FOR_ITER instruction (loop head, not a merge point)
         # The code at O..next_try_nop is the inlined finally body.
         self.prescan.finally_merge_offsets = set()
+        self.prescan.exit_only_finally = {}
         push_exc_offs = {ins.offset for ins in instrs if ins.opname == "PUSH_EXC_INFO"}
         # Build offset-to-index map for quick look-up
         off2idx = {ins.offset: i for i, ins in enumerate(instrs)}
@@ -3430,12 +3431,15 @@ class DecompilerGeneric(DecompilerBase):
         # and the code that follows the try. It is set aside to be written after the handlers, and
         # the try's normal path then ends where the clause does.
         self.prescan.try_else = {}
+        exit_only = self._prescan_exit_only_finally(_exc_entries, real_push_exc, _body_end_by_target)
         if self.target_version >= (3, 11):
             _body_start_by_target: Dict[int, int] = {}
             for e in _exc_entries:
                 if e.target in real_push_exc:
                     _body_start_by_target[e.target] = min(_body_start_by_target.get(e.target, e.start), e.start)
             for handler, end in list(_body_end_by_target.items()):
+                if handler in exit_only:
+                    continue
                 region = self._try_else_region(end, handler, _body_start_by_target.get(handler, 0))
                 if region is not None:
                     self.prescan.try_else[region[0]] = region[1]
@@ -3552,6 +3556,10 @@ class DecompilerGeneric(DecompilerBase):
             # This try's finally handler is the first re-raise wrapper after its except
             # handlers (3.11+ lays them out in that order).
             owner = min((w for w in self.prescan.suppress_push_exc_offsets if w > max(targets)), default=None)
+            if merge_off in self.prescan.exit_only_finally:
+                lines = self._render_finally_body(self._handler_copy_instrs(owner)) or ["pass"]
+                self.emit.deferred_finally_lines[merge_off] = lines
+                continue
             matched = self._match_finally_wrapper(merge_off, owner)
             body_end = None if matched is None else matched[0]
             if matched is not None:
@@ -3739,6 +3747,59 @@ class DecompilerGeneric(DecompilerBase):
             return index > 0 and instrs[index - 1].opname == "LOAD_CONST" and instrs[index - 1].argval is None
         return (ins.opname == "LOAD_CONST" and ins.argval is None and index + 1 < len(instrs)
                 and instrs[index + 1].opname == "RETURN_VALUE")
+
+    def _prescan_exit_only_finally(self, entries: list, real_push_exc: set, body_end_by_target: Dict[int, int]) -> set:
+        """
+        Find the try/except/finally statements that no path leaves normally (3.11+): the body ends in
+        `return`, so the `finally` body is only ever inlined where a path leaves the `try`.
+
+        The copy that precedes the return is not source, nor is any other copy, so they are all
+        suppressed. The `finally` clause is written where the handlers start, with the body of
+        the copy in the handler that re-raises. Returns the handlers of those statements.
+        """
+        found: set = set()
+        self.prescan.exit_only_finally = {}
+        if self.target_version < (3, 11):
+            return found
+        instrs = self.instructions
+        for handler in sorted(real_push_exc):
+            owner = min((w for w in self.prescan.suppress_push_exc_offsets if w > handler), default=None)
+            template = self._handler_copy_instrs(owner) if owner is not None else []
+            if not template:
+                continue
+            start = body_end_by_target.get(handler)
+            idx = next((n for n, ins in enumerate(instrs) if start is not None and ins.offset >= start), None)
+            label = None
+            if idx is not None and instrs[idx].opname == "JUMP_FORWARD":
+                # 3.11: the body jumps over the handlers to the `finally` body
+                label = self._get_jump_target(instrs[idx])
+                idx = next((n for n, ins in enumerate(instrs) if ins.offset >= label), None)
+            while idx is not None and idx < len(instrs) and instrs[idx].opname in ("NOP", "CACHE"):
+                idx += 1
+            if idx is None or idx >= len(instrs):
+                continue
+            end_idx = _match_finally_copy(instrs, idx, _copy_signature(template))
+            if end_idx is None:
+                continue
+            try_start = min((e.start for e in entries if e.target == handler), default=start)
+            copies = self._find_finally_copies(template, try_start, owner)
+            after_return = self._copy_precedes_final_return(end_idx)
+            if after_return == handler:
+                # the body ends in `return`: the copy before it is not source either
+                self._suppress_copies(copies)
+                self.prescan.exit_only_finally[after_return] = owner
+                self.prescan.finally_merge_offsets.add(after_return)
+                body_end_by_target[handler] = after_return
+                found.add(handler)
+            elif (label if label is not None else instrs[idx].offset) not in self.prescan.finally_merge_offsets \
+                    and after_return is None:
+                # no handler rejoins the normal path, which goes into the `finally` body
+                # and on to the code after the try: the copy here is the source, the others
+                # are at the `return` of a handler (or of the body)
+                self._suppress_copies([c for c in copies if instrs[c[0]].offset != instrs[idx].offset])
+                self.prescan.finally_merge_offsets.add(label if label is not None else instrs[idx].offset)
+                found.add(handler)
+        return found
 
     def _else_start(self, tail: List[BytecodeInstruction], before: List[BytecodeInstruction],
                     handler: int, body_start: int) -> Optional[int]:
