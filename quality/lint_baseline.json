@@ -82,7 +82,6 @@
     "src/pycrefine/decompiler/generic.py::too-many-statements::DecompilerGeneric.decompile": 1,
     "src/pycrefine/decompiler/generic.py::trailing-whitespace::<module>": 13,
     "src/pycrefine/decompiler/generic.py::unnecessary-pass::DecompilerGeneric._op_cleanup": 1,
-    "src/pycrefine/decompiler/generic.py::unused-argument::DecompilerGeneric._emit_inner_back_jump": 1,
     "src/pycrefine/decompiler/generic.py::unused-argument::DecompilerGeneric._loop_exit_break_index": 1,
     "src/pycrefine/decompiler/generic.py::unused-argument::DecompilerGeneric._op_binary_slice": 1,
     "src/pycrefine/decompiler/generic.py::unused-argument::DecompilerGeneric._op_push_null": 1,

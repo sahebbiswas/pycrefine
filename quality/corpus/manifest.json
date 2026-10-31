@@ -834,7 +834,7 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "unsupported",
+      "support": "partial",
       "limitations": [
         {
           "issue": 179,
@@ -842,23 +842,6 @@
             "3.10"
           ],
           "summary": "3.10 block-based exception handlers are not decompiled"
-        },
-        {
-          "issue": 193,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 break or continue in an except clause inside a loop is lost"
-        },
-        {
-          "issue": 207,
-          "versions": [
-            "3.9",
-            "3.12",
-            "3.13",
-            "3.14"
-          ],
-          "summary": "break in an except clause or elif branch becomes a return"
         }
       ]
     },
@@ -1334,18 +1317,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 207,
-          "versions": [
-            "3.12",
-            "3.13",
-            "3.14"
-          ],
-          "summary": "break in an except clause or elif branch becomes a return"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "realworld/text_stats",
@@ -1380,8 +1353,6 @@
           "issue": 265,
           "versions": [
             "3.9",
-            "3.12",
-            "3.13",
             "3.14"
           ],
           "summary": "else branch after an elif that ends in continue is moved out of the if chain"
