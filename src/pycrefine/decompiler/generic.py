@@ -922,11 +922,7 @@ class DecompilerGeneric(DecompilerBase):
                 self.blocks.append((else_end, "else"))
             elif block_type not in _NO_INDENT_TYPES:
                 self.indent_level -= 1
-                if (block_type == "with" and self.emit.except_header_indents
-                        and self.emit.except_header_indents[-1] == self.indent_level):
-                    # the header the with statement recorded (see _op_before_with) must not outlive it:
-                    # it would stand for the enclosing except clause's
-                    self.emit.except_header_indents.pop()
+                self._close_with_block(block_type, block_end)
                 # If this try_body has a deferred except-only handler (loop case),
                 # emit it immediately — before outer loop blocks also pop at same offset.
                 if block_type in ("try_body", "exc_cleanup"):
@@ -3344,6 +3340,24 @@ class DecompilerGeneric(DecompilerBase):
                         if instrs[n].opname == "RERAISE" and instrs[n].arg == 0), None)
         return None if reraise is None else (target, block, instrs[reraise].offset)
 
+    def _close_with_block(self, block_type: str, block_end: int) -> None:
+        """Finish a closed `with` block: write the code only its exit handler reaches, and drop its recorded header."""
+        if block_type not in ("with", "with_body"):
+            return
+        if self.prescan.after_with.get(block_end):
+            self._emit_after_with(self.prescan.after_with[block_end].pop(0))
+        if (block_type == "with" and self.emit.except_header_indents
+                and self.emit.except_header_indents[-1] == self.indent_level):
+            # the header the with statement recorded (see _op_before_with) must not outlive it:
+            # it would stand for the enclosing except clause's
+            self.emit.except_header_indents.pop()
+
+    def _emit_after_with(self, region: List[int]) -> None:
+        """Emit the code only a `with`'s exit handler reaches, right after the statement."""
+        offsets = set(region)
+        for line in self._render_finally_body([i for i in self.instructions if i.offset in offsets]):
+            self._append_reconstructed(line)
+
     def _emit_relocated_exit(self, offset: int) -> None:
         """Emit the loop-exit `return` that the compiler placed inside the loop's range, now that the loop has ended at *offset*."""
         relocated = self.prescan.relocated_exits.get(offset)
@@ -4785,6 +4799,7 @@ class DecompilerGeneric(DecompilerBase):
         """
         self.prescan.with_body_end = {}
         self.prescan.with_exit_owner = {}
+        self.prescan.after_with = {}
         instrs = self.instructions
         entries = self._exception_entries()
         if not entries:
@@ -4859,6 +4874,79 @@ class DecompilerGeneric(DecompilerBase):
             carries_value = instrs[last[0]].opname == "SWAP"
             end = handler if carries_value or last[1] >= len(instrs) else instrs[last[1]].offset
             self.prescan.with_body_end[body_start] = end
+        self._prescan_after_with(handlers, entries)
+
+    def _prescan_after_with(self, handlers: set, entries: list) -> None:
+        """
+        3.12+: find the code after a `with` whose body never falls through, which only the
+        jump that ends the with's exit handler reaches (the exit swallowed the exception).
+
+        The compiler lays it out after the handlers, so it would be written after the code that
+        follows the enclosing loop. It is rendered where the with block closes instead.
+        """
+        if self.target_version < (3, 12):
+            return
+        instrs = self.instructions
+        by_offset = {ins.offset: k for k, ins in enumerate(instrs)}
+        jump_targets = [(ins.offset, self._get_jump_target(ins)) for ins in instrs if "JUMP" in ins.opname]
+        for handler in sorted(handlers):
+            body_start = min((e.start for e in entries if e.target == handler), default=None)
+            end = self.prescan.with_body_end.get(body_start) if body_start is not None else None
+            jf = self._with_handler_jump(by_offset[handler])
+            if end is None or jf is None:
+                continue
+            target = self._get_jump_target(instrs[jf])
+            k = by_offset.get(target)
+            if not isinstance(target, int) or k is None or target < handler or k == 0:
+                continue
+            if instrs[k - 1].opname not in ("RERAISE", "RETURN_VALUE", "RETURN_CONST", "RAISE_VARARGS") \
+                    and not instrs[k - 1].opname.startswith("JUMP"):
+                continue   # (the code is reached by falling into it)
+            if any(src != instrs[jf].offset and tgt == target for src, tgt in jump_targets):
+                continue   # (other code jumps to it)
+            region = self._after_with_region(k)
+            if region is None:
+                continue
+            self.prescan.relocated_suppress.update(region)
+            self.prescan.after_with.setdefault(end, []).append(region)
+
+    def _with_handler_jump(self, push_idx: int) -> Optional[int]:
+        """Index of the `JUMP_FORWARD` that ends the exit handler opened by the PUSH_EXC_INFO at *push_idx*, or None."""
+        instrs = self.instructions
+        if push_idx + 1 >= len(instrs) or instrs[push_idx + 1].opname != "WITH_EXCEPT_START":
+            return None
+        k = next((n for n in range(push_idx + 2, min(push_idx + 10, len(instrs))) if instrs[n].opname == "POP_EXCEPT"), None)
+        if k is None:
+            return None
+        k += 1
+        while k < len(instrs) and instrs[k].opname == "POP_TOP":
+            k += 1
+        return k if k < len(instrs) and instrs[k].opname == "JUMP_FORWARD" else None
+
+    def _after_with_region(self, start: int) -> Optional[List[int]]:
+        """
+        Offsets of the straight run of code from index *start* to the jump back that ends the
+        loop body (not included) or to a `return`/`raise`, or None when it joins later code.
+        """
+        instrs = self.instructions
+        reach = instrs[start].offset
+        region: List[int] = []
+        for ins in instrs[start:]:
+            name = ins.opname
+            if name.startswith("JUMP_BACKWARD") and ins.offset + 2 > reach:
+                return region or None
+            if name in ("RETURN_VALUE", "RETURN_CONST", "RAISE_VARARGS", "RERAISE") and ins.offset + 2 > reach:
+                region.append(ins.offset)
+                return region
+            if name in ("PUSH_EXC_INFO", "FOR_ITER", "JUMP_FORWARD", "JUMP_BACKWARD_NO_INTERRUPT") \
+                    and ins.offset + 2 > reach:
+                return None
+            if "JUMP" in name:
+                target = self._get_jump_target(ins)
+                if isinstance(target, int) and target > reach:
+                    reach = target
+            region.append(ins.offset)
+        return None
 
     def _skip_nops(self, k: int) -> int:
         """The index of the first instruction at or after *k* that is not a NOP/CACHE."""
