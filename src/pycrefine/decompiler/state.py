@@ -31,6 +31,7 @@ class PrescanState:  # pylint: disable=too-many-instance-attributes
     # --- while loops (_prescan_while_loops) --------------------------------------------
     inverted_guards: Dict[int, int] = field(default_factory=dict)    # guard offset -> body start, for a while loop that leaves by jumping back to an enclosing loop
     relocated_exits: Dict[int, List[int]] = field(default_factory=dict)  # offset where a loop ends -> offsets of the exit block (a `return`) the compiler placed inside it
+    after_with: Dict[int, List[List[int]]] = field(default_factory=dict)  # end offset of a with block -> offsets of the code that only its exit handler reaches
     relocated_suppress: Set[int] = field(default_factory=set)        # offsets of exit blocks emitted after their loop instead of in place
     loop_exit_jumps: Set[int] = field(default_factory=set)          # jumps back to an enclosing loop that only leave a while loop
     while_body_offsets: Set[int] = field(default_factory=set)       # where a while body starts, to drop the repeated condition
