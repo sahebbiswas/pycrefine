@@ -1,15 +1,4 @@
 {
-  "3.11": [
-    {
-      "issue": 192,
-      "reason": "conditional expression inside a call argument of a comprehension is dropped",
-      "cases": {
-        "tests/test_basic.py::TestComprehensions::test_inlined_comprehension_shapes": [
-          "get_with_conditional"
-        ]
-      }
-    }
-  ],
   "3.10": [
     {
       "issue": 197,
