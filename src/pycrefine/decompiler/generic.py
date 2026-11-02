@@ -4267,7 +4267,7 @@ class DecompilerGeneric(DecompilerBase):
                     # Only the no-op that marks the end of the try body lies in between
                     # (a body ending in a loop leaves one before the inline finally).
                     merge = after_body
-                elif self.target_version >= (3, 12) and self._handlers_all_leave(e.target) \
+                elif self.target_version >= (3, 12) and self._handlers_all_leave(e.target, body_end) \
                         and self._body_falls_into(body_end, e.start):
                     # (3.12+ lays the handlers out after all ordinary code.) Every way out of them is a
                     # `continue` or a `return`, so nothing rejoins: they go right after the body.
@@ -5229,11 +5229,15 @@ class DecompilerGeneric(DecompilerBase):
                 return True
         return False
 
-    def _handlers_all_leave(self, handler: int) -> bool:
+    def _handlers_all_leave(self, handler: int, body_end: Optional[int] = None) -> bool:
         """
         True if the except clauses of the try whose first handler is at *handler* never rejoin the
         code after it: no forward jump leaves them, and the last clause ends in a jump back
         (`continue`) or `return`, before the re-raise for an exception no clause matches.
+
+        *body_end* is where the try body falls through to. A clause that ends in `return None`
+        counts as leaving only when it is its own `return`: the compiler also copies the end of
+        a function into a clause, and that copy is what the body falls into as well.
         """
         instrs = self.instructions
         start = next((n for n, ins in enumerate(instrs) if ins.offset == handler), None)
@@ -5247,8 +5251,21 @@ class DecompilerGeneric(DecompilerBase):
             return False
         end = instrs[reraise - 1]
         if end.opname == "RETURN_CONST":
-            return end.argval is not None   # (`return None` is also how a function ends: not a way out of its own)
+            if end.argval is not None:
+                return True
+            # (`return None` is also how a function ends: not a way out of its own, unless the
+            # body does not fall into that end, so the clause cannot be a copy of it)
+            return body_end is not None and not self._falls_into_function_end(body_end)
         return end.opname in ("RETURN_VALUE", "JUMP_BACKWARD")
+
+    def _falls_into_function_end(self, offset: int) -> bool:
+        """True if the code at *offset* is the implicit `return None` that ends a function."""
+        instrs = self.instructions
+        at = next((n for n, ins in enumerate(instrs) if ins.offset >= offset), None)
+        while at is not None and at < len(instrs) and instrs[at].opname in ("NOP", "CACHE"):
+            at += 1
+        return (at is not None and at < len(instrs)
+                and instrs[at].opname == "RETURN_CONST" and instrs[at].argval is None)
 
     def _body_falls_into(self, offset: int, start: int) -> bool:
         """

@@ -29,7 +29,6 @@ These change what the code does, or produce code that does not compile:
 | A conditional expression in a `while` condition | 3.12+ | a constant condition and empty `if`/`else` statements | [#292](https://github.com/sahebbiswas/pycrefine/issues/292) |
 | `except E: continue` in a `while` loop | 3.9, 3.11 | the `continue` lands after the `try`, or the statements after it join the `try` body | [#286](https://github.com/sahebbiswas/pycrefine/issues/286) |
 | A `return` in a handler inside a `with` in a loop | 3.9 | the `return` lands after the `try`, or the statements after it join the `try` body | [#286](https://github.com/sahebbiswas/pycrefine/issues/286) |
-| A `while` loop with code after it, whose `except` clause ends in an explicit `return None` | 3.12, 3.13 | the code after the loop is written inside the `try` body | [#293](https://github.com/sahebbiswas/pycrefine/issues/293) |
 | `try` nested at the very start of another `try` | 3.12, 3.14 | the outer `except` clauses attach to the inner `try` | [#169](https://github.com/sahebbiswas/pycrefine/issues/169) |
 | Some code in the test corpus | 3.12, 3.14 | output that does not parse | [#91](https://github.com/sahebbiswas/pycrefine/issues/91) |
 
