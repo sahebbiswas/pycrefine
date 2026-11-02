@@ -44,7 +44,6 @@ class TestExceptContinueInWith(unittest.TestCase):
             "                boom(v)\n            except ValueError:\n                break\n"
             "        log.append(i)\n    return log\n", "c([], 0)", "c([], 1)")
 
-    @unittest.skipIf(sys.version_info < (3, 11), "3.9: a return in a handler inside a with is tracked separately")
     def test_return_in_handler(self):
         self.assert_same_results(
             "def c(log, v):\n    for i in range(2):\n        with Ctx(log):\n            try:\n"
@@ -64,7 +63,6 @@ class TestExceptContinueInWith(unittest.TestCase):
             "            except ValueError:\n                continue\n        log.append(i)\n    return log\n",
             "c([], 0)", "c([], 1)", "c([], 2)")
 
-    @unittest.skipIf(sys.version_info < (3, 12), "3.9 and 3.11: a continue to a while condition from a handler is tracked separately")
     def test_while_loop(self):
         self.assert_same_results(
             "def c(log, v):\n    i = 0\n    while i < 2:\n        i += 1\n        with Ctx(log):\n            try:\n"
@@ -90,7 +88,6 @@ class TestExceptContinueInWith(unittest.TestCase):
             "c([], 0)", "c([], 1)")
         self.assertEqual(self._try_bodies(out), [1])
 
-    @unittest.skipIf(sys.version_info < (3, 12), "3.9 and 3.11: a continue to a while condition from a handler is tracked separately")
     def test_code_after_a_continuing_try_stays_after_it_in_while(self):
         out = self.assert_same_results(
             "def c(log, v):\n    i = 0\n    while i < 2:\n        i += 1\n        try:\n            boom(v)\n"

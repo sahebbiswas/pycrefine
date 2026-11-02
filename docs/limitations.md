@@ -25,10 +25,9 @@ These change what the code does, or produce code that does not compile:
 | `yield from`, and `x = yield` | 3.12, 3.14 | `yield None` and the value is lost | [#152](https://github.com/sahebbiswas/pycrefine/issues/152) |
 | Walrus (`:=`) inside a comprehension, or a comprehension variable captured by a `lambda` | 3.12+ | a broken explicit loop | [#99](https://github.com/sahebbiswas/pycrefine/issues/99) |
 | `try`/`except` around a `with` that always raises, inside another `with` | 3.12, 3.14 | the code after the outer `with` is misplaced | [#146](https://github.com/sahebbiswas/pycrefine/issues/146) |
-| `while` loop whose `try` body has an `except` that does `continue`, followed by code after the loop (or an `else:`) | 3.12, 3.13 | the code after the loop is written inside the `try` body and the `continue` is dropped | [#291](https://github.com/sahebbiswas/pycrefine/issues/291) |
+| `except E as e:` that ends in `continue`, in a `while` loop | 3.12, 3.13, 3.14 | the statements after the `try` join its body and the loop ends after one pass | [#297](https://github.com/sahebbiswas/pycrefine/issues/297) |
+| `with` whose `try` has `except E as e: return ...`, inside a loop | 3.12, 3.13, 3.14 | the statement after the `with` is written inside it | [#298](https://github.com/sahebbiswas/pycrefine/issues/298) |
 | A conditional expression in a `while` condition | 3.12+ | a constant condition and empty `if`/`else` statements | [#292](https://github.com/sahebbiswas/pycrefine/issues/292) |
-| `except E: continue` in a `while` loop | 3.9, 3.11 | the `continue` lands after the `try`, or the statements after it join the `try` body | [#286](https://github.com/sahebbiswas/pycrefine/issues/286) |
-| A `return` in a handler inside a `with` in a loop | 3.9 | the `return` lands after the `try`, or the statements after it join the `try` body | [#286](https://github.com/sahebbiswas/pycrefine/issues/286) |
 | `try` nested at the very start of another `try` | 3.12, 3.14 | the outer `except` clauses attach to the inner `try` | [#169](https://github.com/sahebbiswas/pycrefine/issues/169) |
 | Some code in the test corpus | 3.12, 3.14 | output that does not parse | [#91](https://github.com/sahebbiswas/pycrefine/issues/91) |
 
