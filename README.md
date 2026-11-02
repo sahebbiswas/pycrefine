@@ -30,7 +30,7 @@ def summarize(rows, limit=10):
 | Python 3.9 | supported, tested in CI | any Python 3.9 or later |
 | Python 3.12, 3.13, 3.14 | supported, tested in CI | the same minor version (3.12 for 3.12 bytecode) |
 | Python 3.11 | partial, tested in CI: keyword-argument calls, `try`/`finally` and some loops come out wrong ([known failures](https://github.com/sahebbiswas/pycrefine/blob/main/tests/known_failures.json)) | Python 3.11 |
-| Python 3.10 | partial, tested in CI: `try`/`except`, `while` loops and some `if`/`else` shapes come out wrong ([known failures](https://github.com/sahebbiswas/pycrefine/blob/main/tests/known_failures.json)) | Python 3.10 |
+| Python 3.10 | partial, tested in CI: `async with` is not decompiled and some `if`/`else` and `try` shapes come out wrong ([known failures](https://github.com/sahebbiswas/pycrefine/blob/main/tests/known_failures.json)) | Python 3.10 |
 | Python 3.8 and older | not supported | |
 
 Bytecode from 3.10 onwards can only be decompiled by the Python version that wrote it

@@ -2,10 +2,12 @@
 from .generic import DecompilerGeneric
 from ..diagnostics import AMBIGUOUS_EXPRESSION, INCOMPLETE_EXCEPTION
 from ..instructions import BytecodeInstruction
+from .block_handlers import has_block_handlers, normalise_block_handlers
 
 # 3.10 sets up try, with and finally with block-stack instructions (3.11 replaced them
-# with an exception table), and no backend rebuilds them yet (#179).
-_BLOCK_SETUP_OPS = frozenset(("SETUP_FINALLY", "SETUP_WITH", "SETUP_ASYNC_WITH"))
+# with an exception table). block_handlers reads them into the 3.11 form (#179), except the
+# handlers of `async with`, which stay as they were.
+_BLOCK_SETUP_OPS = frozenset(("SETUP_ASYNC_WITH",))
 
 
 # ---------------------------------------------------------------------------
@@ -14,13 +16,18 @@ _BLOCK_SETUP_OPS = frozenset(("SETUP_FINALLY", "SETUP_WITH", "SETUP_ASYNC_WITH")
 
 class Decompiler311Plus(DecompilerGeneric):
 
+    def _disassemble(self):
+        super()._disassemble()
+        if tuple(self.target_version) == (3, 10) and has_block_handlers(self.instructions):
+            self.instructions, self._block_entries = normalise_block_handlers(self.instructions)
+
     def _report_version_gaps(self) -> None:
         if self.target_version < (3, 11):
             first = next((ins for ins in self.instructions if ins.opname in _BLOCK_SETUP_OPS), None)
             if first is not None:
                 self._report(
                     INCOMPLETE_EXCEPTION,
-                    "try, except, finally and with are not decompiled on Python 3.10 "
+                    "async with is not decompiled on Python 3.10 "
                     "(block-based exception handlers, issue #179)", first)
 
     def _dispatch_instruction(self, instr: BytecodeInstruction):

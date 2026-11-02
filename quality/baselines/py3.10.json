@@ -6,7 +6,7 @@
   "entries": {
     "corpus/comprehensive.py": {
       "kind": "source",
-      "status": "syntax_error",
+      "status": "compiles",
       "units": {
         "Assign: VERSION = \"1.0.0\"": "compiles",
         "Expr: \"\"\"": "compiles",
@@ -21,22 +21,11 @@
         "class DataProcessor/Expr: \"\"\"Derived class with more logic.\"\"\"": "compiles",
         "class DataProcessor/def __init__": "compiles",
         "class DataProcessor/def add_item": "compiles",
-        "class DataProcessor/def process": "syntax_error",
+        "class DataProcessor/def process": "compiles",
         "def complex_logic": "compiles",
         "def member_decorator": "compiles",
-        "def run_test": "syntax_error",
+        "def run_test": "compiles",
         "def some_decorator": "compiles"
-      },
-      "unit_diagnostics": {
-        "class DataProcessor/def process": {
-          "incomplete_exception_reconstruction": 1
-        },
-        "def run_test": {
-          "incomplete_exception_reconstruction": 1
-        }
-      },
-      "diagnostics": {
-        "incomplete_exception_reconstruction": 2
       }
     },
     "corpus/indent2.py": {
@@ -90,14 +79,6 @@
         "Import: import py_compile": "compiles",
         "Import: import pycrefine": "compiles",
         "With: with open(\"temp.py\", \"w\") as f:": "compiles"
-      },
-      "unit_diagnostics": {
-        "With: with open(\"temp.py\", \"w\") as f:": {
-          "incomplete_exception_reconstruction": 1
-        }
-      },
-      "diagnostics": {
-        "incomplete_exception_reconstruction": 1
       }
     },
     "corpus/simple_runner.py": {
@@ -111,25 +92,25 @@
     },
     "corpus/verify_scenes.py": {
       "kind": "source",
-      "status": "syntax_error",
+      "status": "compiles",
       "units": {
         "Assign: my_map = {": "compiles",
         "def api_1": "compiles",
         "def api_10": "compiles",
         "def api_11": "compiles",
-        "def api_12": "syntax_error",
+        "def api_12": "compiles",
         "def api_20": "compiles",
         "def api_21": "compiles",
         "def api_22": "compiles",
         "def api_23": "compiles",
         "def api_24": "compiles",
         "def api_25": "compiles",
-        "def api_26": "syntax_error",
+        "def api_26": "compiles",
         "def api_3": "compiles",
         "def api_30": "compiles",
         "def api_31": "compiles",
         "def api_32": "compiles",
-        "def api_4": "syntax_error",
+        "def api_4": "compiles",
         "def api_40": "compiles",
         "def api_41": "compiles",
         "def api_5": "compiles",
@@ -139,30 +120,7 @@
         "def issue_2": "compiles",
         "def issue_3": "compiles",
         "def issue_4": "compiles",
-        "def issue_5": "syntax_error"
-      },
-      "unit_diagnostics": {
-        "def api_12": {
-          "incomplete_exception_reconstruction": 1
-        },
-        "def api_26": {
-          "incomplete_exception_reconstruction": 1
-        },
-        "def api_30": {
-          "incomplete_exception_reconstruction": 1
-        },
-        "def api_4": {
-          "incomplete_exception_reconstruction": 1
-        },
-        "def issue_3": {
-          "incomplete_exception_reconstruction": 1
-        },
-        "def issue_5": {
-          "incomplete_exception_reconstruction": 1
-        }
-      },
-      "diagnostics": {
-        "incomplete_exception_reconstruction": 6
+        "def issue_5": "compiles"
       }
     },
     "tests/fixtures/foreign_pyc/comprehensive.cpython-312.pyc": {

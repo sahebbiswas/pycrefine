@@ -29,6 +29,8 @@ class DecompilerBase:
         self._current_instr: Optional[BytecodeInstruction] = None
         # Exception table, filled in on first use by _exception_entries(); False = not yet read.
         self._exception_entries_cache: Any = False
+        # 3.10: the exception table read from the block-based handlers (block_handlers)
+        self._block_entries: Optional[list] = None
         self.instructions: List[BytecodeInstruction] = []
         # The instructions as compiled, kept as `decompile()` starts: `instructions` is rewritten
         # as comprehensions are rebuilt inline, and `_scope_accesses` needs what the compiler wrote.
@@ -293,6 +295,10 @@ class DecompilerBase:
             self._append_reconstructed("break")
         return True
 
+    def _has_exception_table(self) -> bool:
+        """True if the code has an exception table: 3.11+, or 3.10 handlers read into one (block_handlers)."""
+        return self._exception_entries() is not None
+
     def _exception_entries(self) -> Optional[list]:
         """
         The code object's exception table (3.11+), computed once; None before 3.11, whose
@@ -301,7 +307,10 @@ class DecompilerBase:
         cached = self._exception_entries_cache
         if cached is False:
             cached = None
-            if tuple(self.target_version) >= (3, 11):
+            if tuple(self.target_version) == (3, 10):
+                # computed from the block stack when the instructions were read (block_handlers)
+                cached = self._block_entries
+            elif tuple(self.target_version) >= (3, 11):
                 try:
                     cached = list(dis.Bytecode(self.code_obj).exception_entries)
                 except (AttributeError, TypeError, ValueError, IndexError) as exc:

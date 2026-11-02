@@ -111,11 +111,11 @@ class TestExceptions(unittest.TestCase):
         out = decompile(src)
         compile(out, "<decompiled>", "exec")
         self.assertIn("with open('f'):", out)
-        if sys.version_info < (3, 11):
+        if sys.version_info < (3, 10):
             self.assertIn("return None", out)
-        # On 3.11+ a final `return None` inside the `with` compiles to exactly the
+        # On 3.10+ a final `return None` inside the `with` compiles to exactly the
         # bytecode of `pass` (the implicit return follows the block either way), so
-        # both renderings are correct; the implicit one is dropped (#140).
+        # both renderings are correct; the implicit one is dropped (#140). 3.10 is read the same way (#179).
 
     def test_with_try_except_finally(self):
         src = (
@@ -231,7 +231,7 @@ class TestDottedExceptionTypes(unittest.TestCase):
         self.assertNotIn("except:", out.splitlines())
 
 
-@unittest.skipIf(sys.version_info >= (3, 11), "Python 3.11+ compiler optimizes away this try/break structure")
+@unittest.skipIf(sys.version_info >= (3, 10), "Python 3.10+ compiler optimizes away this try/break structure")
 class TestBreakInTryInsideWhile(unittest.TestCase):
     def test_break_is_emitted(self):
         src = "def f(a):\n    import socket\n    while a:\n        try:\n            break\n        except socket.error as e:\n            raise\n"
@@ -283,7 +283,7 @@ class TestBreakInTryInsideWhile(unittest.TestCase):
         self.assertNotIn("del e", out)
 
 
-@unittest.skipIf(sys.version_info >= (3, 11), "Python 3.11+ uses zero-cost exception tables, no POP_BLOCK")
+@unittest.skipIf(sys.version_info >= (3, 10), "Python 3.10+ compiles a `break` that ends the function to `return None` inside the try")
 class TestBreakInTryInsideFor(unittest.TestCase):
     """Regression tests for break inside an if inside a try inside a for loop (Python 3.9).
 

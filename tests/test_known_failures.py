@@ -84,12 +84,17 @@ class TestKnownFailures(unittest.TestCase):
 
     def test_expected_failing_cases_are_found_by_short_id(self):
         """The subTest hook looks cases up by (module, class, method)."""
-        from .conftest import expected_failing_cases
+        from unittest import mock
 
-        cases = expected_failing_cases("3.10")
-        self.assertIn("R_for_try_if",
-                      cases[("test_control_flow", "TestLoopContinueAndTailIf", "test_behavior_is_preserved")])
-        self.assertEqual(expected_failing_cases("3.99"), {})
+        from . import conftest
+
+        known = {"3.10": [{"issue": 1, "reason": "r", "cases": {
+            "tests/test_control_flow.py::TestLoopContinueAndTailIf::test_behavior_is_preserved": ["R_for_try_if"]}}]}
+        with mock.patch.object(conftest, "load_known_failures", return_value=known):
+            cases = conftest.expected_failing_cases("3.10")
+            self.assertIn("R_for_try_if",
+                          cases[("test_control_flow", "TestLoopContinueAndTailIf", "test_behavior_is_preserved")])
+            self.assertEqual(conftest.expected_failing_cases("3.99"), {})
 
 
 if __name__ == "__main__":
