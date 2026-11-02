@@ -791,26 +791,44 @@ class DecompilerGeneric(DecompilerBase):
         body count: the condition's own exits (and the copy of it below the body) may land
         on several copies of the same exit block.
         """
-        guard = None
-        for go in self.prescan.while_header_targets.values():
+        guard = body_start = None
+        for start, go in self.prescan.while_header_targets.items():
             ins = self._instruction_at(go) if go >= 0 else None
             if ins is not None and self._get_jump_target(ins) == block_end:
-                guard = go
+                guard, body_start = go, start
                 break
         if guard is None:
             return None
         end = None
+        threaded_break = False
         for ins in self.instructions:
             if ins.offset >= block_end:
                 break
             if (ins.offset <= guard or ins.offset in self.prescan.while_body_offsets
-                    or "JUMP" not in ins.opname or self._is_backward_instruction(ins)
-                    or ins.offset in self.prescan.compound_suppress):
+                    or "JUMP" not in ins.opname or ins.offset in self.prescan.compound_suppress):
                 continue
             target = self._get_jump_target(ins)
+            if self._is_backward_instruction(ins):
+                # A `break` the compiler threaded on to the head of the loop around this one
+                threaded_break = threaded_break or (
+                    ins.offset in self.prescan.inner_back_jumps and isinstance(target, int)
+                    and self._is_threaded_break(ins.offset, target, body_start))
+                continue
             if isinstance(target, int) and target > block_end and (end is None or target > end):
                 end = target
+        if threaded_break:
+            # (the clause runs to the end of the branch the loop ends)
+            past_everything = self.instructions[-1].offset + 2
+            clipped = self._clip_else_end(block_end, past_everything if end is None else end)
+            end = None if clipped == past_everything else clipped
         return end
+
+    def _clip_else_end(self, start: int, else_end: int) -> int:
+        """An `else:` that starts at *start* cannot run past the `if` or `else` branch it sits in."""
+        if (self.blocks and self.blocks[-1][1] in ("if", "else") and isinstance(else_end, int)
+                and start < self.blocks[-1][0] < else_end):
+            return self.blocks[-1][0]
+        return else_end
 
     def _is_break_to_enclosing_head(self, instr: BytecodeInstruction, prev: Optional[BytecodeInstruction],
                                     jump_target: int) -> bool:
@@ -919,6 +937,9 @@ class DecompilerGeneric(DecompilerBase):
                 self.indent_level -= 1
                 self._append_reconstructed("else:")
                 self.indent_level += 1
+                # (a loop's `else:` cannot run past the `if` or `else` branch the loop ends: a `break`
+                # jumps to the end of that whole chain, threaded past the branches that follow)
+                else_end = self._clip_else_end(block_end, else_end)
                 self.blocks.append((else_end, "else"))
             elif block_type not in _NO_INDENT_TYPES:
                 self.indent_level -= 1
@@ -3174,6 +3195,12 @@ class DecompilerGeneric(DecompilerBase):
                 # `if` whose false branch skips to the loop head (e.g.
                 # `while True: ...; if x: break`), not the loop's guard.
                 inverted = self._is_inverted_guard(ins, t, body_start)
+                # 3.9 and 3.14 test the condition at the head of the loop, so its guard
+                # never lies above `body_start`: a conditional jump there belongs to an
+                # enclosing `if`, as in `if a: while b: ...` (the `if` jump is the closest).
+                if (ins.offset < body_start and not inverted
+                        and (self.target_version < (3, 10) or self.target_version >= (3, 14))):
+                    continue
                 if t <= jb.offset and not inverted and not (
                         exit_block is not None and t == exit_block[0]) and not (
                         ins.offset > body_start and (
@@ -3623,6 +3650,38 @@ class DecompilerGeneric(DecompilerBase):
         if last is None:
             return instrs[-1].offset + 2
         return instrs[last + 1].offset if last + 1 < len(instrs) else instrs[last].offset + 2
+
+    def _jump_chain_end(self, offset: int) -> int:
+        """Where control ends up from `offset`, following unconditional jumps."""
+        by_offset = {ins.offset: ins for ins in self.instructions}
+        seen = set()
+        while offset in by_offset and offset not in seen:
+            seen.add(offset)
+            ins = by_offset[offset]
+            if ins.opname not in ("JUMP_FORWARD", "JUMP_ABSOLUTE", "JUMP_BACKWARD"):
+                break
+            offset = self._get_jump_target(ins)
+        return offset
+
+    def _while_block_end(self, body_start: int, exit_target: int) -> int:
+        """
+        Offset where the `while` block headed at `body_start` ends.
+
+        That is the guard's exit target, except when the compiler threaded the exit past
+        the rest of an enclosing `if`/`elif`/`else`: in `if a: while c: ... else: x` the
+        guard jumps to the end of the whole `if`, beyond the `else:` code. The loop then
+        ends at its closing back-edge when the jump that follows it (the end of the `if`
+        branch) leads to the same place as the guard.
+        """
+        end = self._loop_end_after(body_start)
+        if end >= exit_target:
+            return exit_target
+        after = next((ins for ins in self.instructions if ins.offset == end), None)
+        if (after is not None
+                and after.opname in ("JUMP_FORWARD", "JUMP_ABSOLUTE", "JUMP_BACKWARD")
+                and self._jump_chain_end(after.offset) == self._jump_chain_end(exit_target)):
+            return end
+        return exit_target
 
     def _is_loop_head(self, offset: int) -> bool:
         """True if `offset` is a loop head: a FOR_ITER/iterator head, or a target reached by a non-handler back-jump."""
@@ -5148,12 +5207,15 @@ class DecompilerGeneric(DecompilerBase):
             for k in range(start, end):
                 self.prescan.finally_body_suppress.add(self.instructions[k].offset)
 
-    def _is_while_head(self, offset: int) -> bool:
+    def _is_while_head(self, offset: int, only: Optional[set] = None) -> bool:
         """
         True if *offset* is where a `continue` re-enters a `while` loop: the loop's first body
-        instruction, or (3.12/3.13) the start of the condition ahead of it.
+        instruction, or (3.12/3.13) the start of the condition ahead of it. With *only*, just the
+        loops whose body starts at one of those offsets count.
         """
         for body_start, guard in self.prescan.while_header_targets.items():
+            if only is not None and body_start not in only:
+                continue
             if guard < 0:
                 if offset == body_start:
                     return True
@@ -7556,7 +7618,11 @@ class DecompilerGeneric(DecompilerBase):
                     self._append_reconstructed("else:")
                     self.indent_level += 1
                     self.blocks.pop(matched_bi)  # pop the matched 'if' block
-                    self.blocks.append((jump_target, "else"))
+                    # (when this `if`/`else` is the last statement of an enclosing branch, the
+                    # jump is threaded past the code that follows that branch: the `else:` still
+                    # ends where the branch does)
+                    else_end = self._clip_else_end(instr.offset, jump_target)
+                    self.blocks.append((else_end, "else"))
             return
         # detect while loop.
         # 3.11+ CPython compiles `while cond: body` as:
@@ -7805,6 +7871,12 @@ class DecompilerGeneric(DecompilerBase):
             instr: the inner backward jump.
             loop_end: offset of the back-edge that closes the loop.
         """
+        # A jump out of a `while` body to the head of the loop around it is a `break`: the
+        # compiler threads the loop's exit on to that head when nothing follows the loop.
+        target = self._get_jump_target(instr)
+        if isinstance(target, int) and self._is_break_out_of_while(instr, target):
+            self._append_reconstructed("break")
+            return
         nxt_off = self.instructions[self.pc].offset if self.pc < len(self.instructions) else -1
         k = self.pc
         while k < len(self.instructions) and self.instructions[k].opname in _WHILE_TRIVIAL_OPS:
@@ -7818,16 +7890,94 @@ class DecompilerGeneric(DecompilerBase):
         body_empty = last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":")
 
         ends_if = bool(self.blocks) and self.blocks[-1][1] == "if" and self.blocks[-1][0] == nxt_off
-        if ends_if and body_empty:
+        # An `if`/`else` that is the last statement of this `if` branch ends here too: its
+        # `else:` blocks close with the branch, and the jump ends the enclosing `if` body.
+        nested_elses = 0
+        while (not ends_if and nested_elses < len(self.blocks) - 1
+               and self.blocks[-1 - nested_elses][1] == "else"
+               and self.blocks[-1 - nested_elses][0] == nxt_off):
+            nested_elses += 1
+            outer = self.blocks[-1 - nested_elses]
+            ends_if = outer[1] == "if" and outer[0] == nxt_off
+        if ends_if and body_empty and not nested_elses:
             self._append_reconstructed("continue")
         elif ends_if and has_more:
+            if body_empty:
+                # (an `else:` that is still empty is the one this jump is the body of: a `continue`)
+                self._append_reconstructed("continue")
+            for _ in range(nested_elses):
+                self.blocks.pop()
+                self.indent_level -= 1
             self.blocks.pop()
             self.indent_level -= 1
             self._append_reconstructed("else:")
             self.indent_level += 1
-            self.blocks.append((self._else_end_with_break_tail(instr, loop_end), "else"))
+            else_end = self._else_end_with_break_tail(instr, loop_end)
+            if nested_elses:
+                # The branch ended in an inner `if`/`else`: the `then` branches of the chain jump to the
+                # code after it, which is where this `else:` ends.
+                chain_end = min((t for t in (self._get_jump_target(x) for x in self.instructions
+                                             if x.offset < instr.offset and "JUMP" in x.opname
+                                             and not self._is_backward_instruction(x))
+                                 if isinstance(t, int) and nxt_off < t < else_end), default=None)
+                if chain_end is not None:
+                    else_end = chain_end
+            # (an `else:` cannot run past the `if` or `else` branch it sits in)
+            else_end = self._clip_else_end(instr.offset, else_end)
+            self.blocks.append((else_end, "else"))
         elif not ends_if and has_more:
             self._append_reconstructed("continue")
+
+    def _is_for_head(self, offset: int) -> bool:
+        """Whether *offset* is where a `for` loop's FOR_ITER (with its EXTENDED_ARG prefixes) starts."""
+        instrs = self.instructions
+        index = next((k for k, i in enumerate(instrs) if i.offset == offset), None)
+        while index is not None and index + 1 < len(instrs) and instrs[index].opname == "EXTENDED_ARG":
+            index += 1
+        return index is not None and instrs[index].opname == "FOR_ITER"
+
+    def _is_threaded_break(self, offset: int, target: int, body_start: int) -> bool:
+        """
+        Whether the backward jump at *offset* to *target*, made from the body of the `while` loop whose
+        body starts at *body_start*, goes to the head of a loop around it (a `for`, or an enclosing
+        `while`) and so is a `break`; inside the loop a jump back is a `continue`.
+        """
+        if target >= body_start:
+            return False
+        if self._is_for_head(target):
+            return True
+        heads = self.prescan.while_header_targets
+        # (3.11 may list one loop under two offsets, with the same guard)
+        around = {bs for bs, guard in heads.items()
+                  if bs < body_start and guard != heads.get(body_start) and offset < self._loop_end_after(bs)}
+        return bool(around) and self._is_while_head(target, only=around)
+
+    def _is_break_out_of_while(self, instr: BytecodeInstruction, target: int) -> bool:
+        """
+        Whether the backward jump *instr* to *target* is a `break` out of the `while` loop it sits in
+        (see `_is_threaded_break`), as opposed to one that ends the branch the loop ends.
+        """
+        for body_start, guard in self.prescan.while_header_targets.items():
+            if not body_start < instr.offset:
+                continue
+            guard_ins = self._instruction_at(guard) if guard >= 0 else None
+            exit_to = self._get_jump_target(guard_ins) if guard_ins is not None else None
+            # (an inverted guard jumps into the body: the loop's exit is the code after its back-edge)
+            if isinstance(exit_to, int) and body_start < exit_to <= instr.offset:
+                continue
+            if not self._is_threaded_break(instr.offset, target, body_start):
+                continue
+            # (past the loop's closing back-edge only a jump that the body's own `if` reaches is a break)
+            loop_end = self._loop_end_after(body_start)
+            if instr.offset < loop_end:
+                return True
+            if instr.offset == loop_end and any(
+                    body_start <= x.offset < loop_end and x.offset != guard
+                    and x.offset not in self.prescan.while_body_offsets
+                    and "JUMP" in x.opname and self._get_jump_target(x) == instr.offset
+                    for x in self.instructions):
+                return True
+        return False
 
     def _else_end_with_break_tail(self, instr: BytecodeInstruction, loop_end: int) -> int:
         """
@@ -8062,7 +8212,7 @@ class DecompilerGeneric(DecompilerBase):
                     self.indent_level += 1
                     # (a guard that leaves to a `return` placed inside the loop's range: the loop ends at its back-edge)
                     in_range = jump_target in self.prescan.relocated_suppress
-                    end = jump_target
+                    end = self._while_block_end(bs, jump_target)
                     if in_range:
                         end = next(at for at, block in self.prescan.relocated_exits.items() if block[0] == jump_target)
                         self.emit.relocated_indent[end] = self.indent_level - 1
