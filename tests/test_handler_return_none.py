@@ -63,13 +63,17 @@ class TestExplicitReturnNoneInHandler(unittest.TestCase):
         src = ("def e(items, log):\n    out = []\n    for x in items:\n        try:\n            out.append(int(x))\n"
                "        except ValueError:\n            log.append(x)\n            return None\n"
                "        except TypeError:\n            return None\n    out.append('end')\n    return out\n")
-        self.assert_same_results(src, "e(['1'], [])", "e(['1', 'x'], [])", "e([1, None], [])")
+        out = self.assert_same_results(src, "e(['1'], [])", "e(['1', 'x'], [])", "e([1, None], [])")
+        log_original, log_rebuilt = [], []
+        _namespace(src)["e"](["1", "x"], log_original)
+        _namespace(out)["e"](["1", "x"], log_rebuilt)
+        self.assertEqual(log_rebuilt, log_original)
 
     def test_while_loop_with_an_else_clause(self):
         src = ("def g(n, o):\n    while n > 0:\n        n -= 1\n        try:\n"
                "            o.append(int('x') if n == 1 else n)\n        except ValueError:\n"
                "            return None\n    else:\n        o.append('else')\n    o.append('end')\n    return o\n")
-        self.assert_same_results(src, "g(0, [])", "g(3, [])")
+        self.assert_same_results(src, "g(0, [])", "g(3, [])", "g(1, [])")
 
     def test_a_handler_that_passes_rejoins_the_loop(self):
         src = ("def h(n, o):\n    while n > 0:\n        n -= 1\n        try:\n"

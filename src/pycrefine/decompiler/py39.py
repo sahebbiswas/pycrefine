@@ -1246,7 +1246,7 @@ class Decompiler39(DecompilerGeneric):
             _deferred = False
             if self.emit.except_header_indents:
                 # Peek ahead: if the next instruction is a backward JUMP_ABSOLUTE
-                # to a FOR_ITER loop head, this POP_EXCEPT is the exit from an
+                # to a loop head (FOR_ITER, or a `while`'s condition), this POP_EXCEPT is the exit from an
                 # exception handler whose only action is 'continue'.
                 # Emit 'continue' instead of 'pass' in that case.
                 _emitted_continue = False
@@ -1260,13 +1260,18 @@ class Decompiler39(DecompilerGeneric):
                         and self.instructions[look].argval < self.instructions[look].offset):
                     jmp = self.instructions[look]
                     jt = self._get_jump_target(jmp)
-                    # Check if the target is a FOR_ITER instruction offset
+                    # Check if the target is a loop head
                     _for_iter_offsets = {
                         fi.offset for fi in self.instructions if fi.opname == "FOR_ITER"
                     }
-                    if isinstance(jt, int) and jt in _for_iter_offsets:
+                    if isinstance(jt, int) and (jt in _for_iter_offsets or self._is_innermost_while_head(jt, jmp.offset)):
                         self._append_reconstructed("continue")
                         self.pc = look + 1   # consume the JUMP_ABSOLUTE
+                        _emitted_continue = True
+                    elif isinstance(jt, int) and self._is_while_head(jt):
+                        # back to the head of an enclosing `while` that the inner loop ended: it leaves the inner loop
+                        self._append_reconstructed("break")
+                        self.pc = look + 1
                         _emitted_continue = True
 
                 if not _emitted_continue:

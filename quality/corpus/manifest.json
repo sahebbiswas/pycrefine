@@ -1110,20 +1110,6 @@
             "3.10"
           ],
           "summary": "3.10 block-based exception handlers are not decompiled"
-        },
-        {
-          "issue": 193,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 break or continue in an except clause inside a loop is lost"
-        },
-        {
-          "issue": 286,
-          "versions": [
-            "3.9"
-          ],
-          "summary": "except E: continue in a while loop decompiles wrongly on 3.9"
         }
       ]
     },

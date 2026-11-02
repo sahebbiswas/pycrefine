@@ -3768,7 +3768,8 @@ class DecompilerGeneric(DecompilerBase):
             if not seq:
                 return False
         last = seq[-1]
-        if not last.opname.startswith("POP_JUMP_IF"):
+        # (3.11 spells the conditional jumps POP_JUMP_FORWARD_IF_* / POP_JUMP_BACKWARD_IF_*)
+        if not (last.opname.startswith("POP_JUMP") and "_IF_" in last.opname):
             return False
 
         def leaves(target):
@@ -3780,7 +3781,7 @@ class DecompilerGeneric(DecompilerBase):
             return False
         for k, ins in enumerate(seq):
             name = ins.opname
-            if name.startswith("POP_JUMP_IF"):
+            if name.startswith("POP_JUMP") and "_IF_" in name:
                 tt = self._get_jump_target(ins)
                 if not (leaves(tt) or (enters_body and isinstance(tt, int) and tt > loop_end)):
                     return False
@@ -4150,7 +4151,8 @@ class DecompilerGeneric(DecompilerBase):
             if count >= 1 and target_off not in push_exc_offs:
                 t_idx = off2idx.get(target_off)
                 t_ins = instrs[t_idx] if t_idx is not None else None
-                if t_ins and t_ins.is_jump_target and t_ins.opname not in _TRY_LOOP_HEADS:
+                if (t_ins and t_ins.is_jump_target and t_ins.opname not in _TRY_LOOP_HEADS
+                        and not self._is_while_head(target_off)):   # (`except E: continue` in a `while`)
                     self.prescan.finally_merge_offsets.add(target_off)
                     if not self._has_exceptional_finally_copy(target_off):
                         # Handlers return to ordinary code after the `try`: there is
@@ -4291,6 +4293,10 @@ class DecompilerGeneric(DecompilerBase):
                     rejoin = self._try_rejoin_offset(body_end, e.target)
                     if merge is not None and rejoin is not None and rejoin < merge:
                         merge = rejoin
+                    elif (merge is None and rejoin is not None
+                          and any(bs < e.start < self._loop_end_after(bs) and rejoin < self._loop_end_after(bs)
+                              for bs in self.prescan.while_header_targets)):
+                        merge = rejoin   # (a `while` body: there is no FOR_ITER to bound it)
                 if merge is not None:
                     target = e.target
                     if merge not in self.prescan.push_exc_to_finally_merge:
@@ -5228,6 +5234,21 @@ class DecompilerGeneric(DecompilerBase):
                     and self._is_loop_top_condition(offset, body_start, exit_to - 2):
                 return True
         return False
+
+    def _is_innermost_while_head(self, target: int, at: int) -> bool:
+        """
+        True if a jump at *at* to *target* re-enters the `while` loop it is in. A jump to the head of
+        an enclosing loop leaves the inner one (`break`), even when the inner loop is a `while` too.
+        """
+        inner = None
+        for body_start in self.prescan.while_header_targets:
+            if body_start <= at < self._loop_end_after(body_start) and (inner is None or body_start > inner):
+                inner = body_start
+        for ins in self.instructions:
+            if (ins.opname == "FOR_ITER" and ins.offset < at < self._get_jump_target(ins)
+                    and (inner is None or ins.offset > inner)):
+                return False        # the innermost loop is a `for`: its own check applies
+        return inner is not None and self._is_while_head(target, only={inner})
 
     def _handlers_all_leave(self, handler: int, body_end: Optional[int] = None) -> bool:
         """
@@ -6421,7 +6442,14 @@ class DecompilerGeneric(DecompilerBase):
             seq = instrs[m:m + len(exit_call)]
             if (tuple(x.opname for x in seq) == exit_call and seq[0].argval is None
                     and seq[3].arg == 3):
-                hidden.update(x.offset for x in instrs[k:m + len(exit_call)])
+                end = m + len(exit_call)
+                # A `return` in an except clause leaves the clause first (POP_EXCEPT), and the exit
+                # function it leaves on the stack is dropped before the returned value is computed.
+                # (a `break` also leaves one, but jumps right after it)
+                if (instrs[k - 1].opname == "POP_EXCEPT" and end + 1 < len(instrs) and instrs[end].opname == "POP_TOP"
+                        and "JUMP" not in instrs[end + 1].opname):
+                    end += 1
+                hidden.update(x.offset for x in instrs[k:end])
         if not 0 <= handler_idx < len(instrs) or instrs[handler_idx].opname != "WITH_EXCEPT_START":
             return
         end = next((n for n in range(handler_idx, len(instrs)) if instrs[n].opname == "POP_EXCEPT"), None)
