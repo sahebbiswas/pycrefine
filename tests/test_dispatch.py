@@ -97,7 +97,7 @@ OPCODES_OF_OTHER_VERSIONS = frozenset((
     "YIELD_FROM",
 ))
 # Instructions the decompiler builds itself (opcode -1), not read from bytecode.
-SYNTHETIC_OPCODES = frozenset(("INLINED_COMPREHENSION",))
+SYNTHETIC_OPCODES = frozenset(("INLINED_COMPREHENSION", "YIELD_FROM_EXPR"))
 
 
 class TestDispatchTable(unittest.TestCase):
