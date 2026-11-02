@@ -1278,14 +1278,6 @@
       "support": "partial",
       "limitations": [
         {
-          "issue": 265,
-          "versions": [
-            "3.9",
-            "3.14"
-          ],
-          "summary": "else branch after an elif that ends in continue is moved out of the if chain"
-        },
-        {
           "issue": 179,
           "versions": [
             "3.10"
