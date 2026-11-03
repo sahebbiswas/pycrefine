@@ -157,6 +157,32 @@ class _FString(str):
         return self
 
 
+class _TInterpolation(str):
+    """One replacement field of a t-string (``{x!r:>5}``), as the source text of a template with that one field.
+
+    ``BUILD_INTERPOLATION`` builds it; ``BUILD_TUPLE`` gathers the fields and ``BUILD_TEMPLATE`` joins them with the
+    strings between them, reading :attr:`piece`, the bare ``{...}`` text.
+    """
+
+    piece: str
+
+    def __new__(cls, text: str, piece: str) -> "_TInterpolation":
+        self = super().__new__(cls, text)
+        self.piece = piece
+        return self
+
+
+class _TInterpolations(str):
+    """The tuple of :class:`_TInterpolation` fields that ``BUILD_TEMPLATE`` takes, as source text; :attr:`pieces` are the fields."""
+
+    pieces: List[str]
+
+    def __new__(cls, text: str, pieces: List[str]) -> "_TInterpolations":
+        self = super().__new__(cls, text)
+        self.pieces = pieces
+        return self
+
+
 class _ConvertedValue(str):
     """The value a 3.13+ ``CONVERT_VALUE`` converts, waiting for the ``FORMAT_*`` that writes the field.
 

@@ -37,7 +37,7 @@ from .._constants import (
 from ..codeobj import _is_code
 from .base import DecompilerBase
 from ..expr import (StackNULL, UnknownExpression, _YieldExpr, _BoolExpr, _ChainedValue, _CollectionAccumSentinel, _ConvertedValue, _FString,
-                    _FStringField, _MergedDisplay, _UnpackAccessor, _unary_operand, is_unknown)
+                    _FStringField, _MergedDisplay, _TInterpolation, _TInterpolations, _UnpackAccessor, _unary_operand, is_unknown)
 from ..diagnostics import (AMBIGUOUS_EXPRESSION, INTERNAL_ERROR, STACK_UNDERFLOW, UNKNOWN_CONTROL_FLOW,
                            UNSUPPORTED_OPCODE, UNSUPPORTED_VERSION_CONSTRUCT, DecompilationError)
 from .state import DocState, EmissionState, PrescanState
@@ -184,6 +184,7 @@ _BASE_DISPATCH: Dict[str, str] = {
     "FORMAT_VALUE": "_op_fstring", "FORMAT_SIMPLE": "_op_fstring", "FORMAT_WITH_SPEC": "_op_fstring",
     "CONVERT_VALUE": "_op_convert_value",
     "BUILD_STRING": "_op_build_string",
+    "BUILD_INTERPOLATION": "_op_build_interpolation", "BUILD_TEMPLATE": "_op_build_template",
 
     # Jumps
     "JUMP_FORWARD": "_op_jump", "JUMP_BACKWARD": "_op_jump",
@@ -2921,7 +2922,7 @@ class DecompilerGeneric(DecompilerBase):
             k += 1
         return (k < len(instrs) and loads > 0 and (instrs[k].arg or 0) >= 0
                 and (instrs[k].opname in ("CALL", "CALL_FUNCTION", "CALL_METHOD", "CALL_KW", "CALL_FUNCTION_KW",
-                                          "COMPARE_OP", "IS_OP", "CONTAINS_OP", "BINARY_SUBSCR")
+                                          "COMPARE_OP", "IS_OP", "CONTAINS_OP", "BINARY_SUBSCR", "BUILD_INTERPOLATION")
                      or (instrs[k].opname == "BINARY_OP" and instrs[k].arg is not None and int(instrs[k].arg) < 13)))
 
     def _eval_branch_with_sub(self, instrs: list) -> Optional[str]:
@@ -7668,6 +7669,48 @@ class DecompilerGeneric(DecompilerBase):
             conversion = value.conversion
         self.stack.append(self._make_fstring_field(value, conversion, spec))
 
+    def _op_build_interpolation(self, instr: BytecodeInstruction):
+        """3.14: ``BUILD_INTERPOLATION`` takes the value, its source text and (arg & 1) a format spec; arg >> 2 is the conversion."""
+        arg = int(instr.arg) if instr.arg is not None else 0
+        spec = self._pop() if arg & 1 else None
+        written = self._pop()
+        value = self._pop()
+        if isinstance(value, _ConvertedValue):
+            value = str(value)
+        text = str(value)
+        try:
+            literal = ast.literal_eval(str(written))
+            if isinstance(literal, str) and ast.dump(ast.parse(literal, mode="eval")) == ast.dump(ast.parse(text, mode="eval")):
+                text = literal      # (the expression as it was written)
+        except (ValueError, SyntaxError):
+            pass
+        if text.startswith("{"):
+            text = f" {text} "
+        piece = "{" + text + self._FSTRING_CONVERSIONS.get(arg >> 2, "") + (f":{self._fstring_spec(spec)}" if spec is not None else "") + "}"
+        quote = self._fstring_quote(piece)
+        self.stack.append(_TInterpolation(f"t{quote}{piece}{quote}", piece))
+
+    def _op_build_template(self, instr: BytecodeInstruction):
+        """3.14: ``BUILD_TEMPLATE`` takes the tuple of strings and the tuple of interpolations."""
+        fields = self._pop()
+        strings = self._pop()
+        try:
+            texts = ast.literal_eval(str(strings))
+        except (ValueError, SyntaxError):
+            texts = None
+        pieces = fields.pieces if isinstance(fields, _TInterpolations) else ([] if str(fields) == "()" else None)
+        if not isinstance(texts, tuple) or pieces is None or len(texts) != len(pieces) + 1:
+            self._report(AMBIGUOUS_EXPRESSION, "a template string whose parts could not be read", instr)
+            self.stack.append(self._unknown("a template string whose parts could not be read", "t''"))
+            return
+        parts = [self._format_fstring_part(repr(texts[0]))]
+        for piece, text in zip(pieces, texts[1:]):
+            parts.append(piece)
+            parts.append(self._format_fstring_part(repr(text)))
+        body = "".join(parts)
+        quote = self._fstring_quote(body)
+        self.stack.append(f"t{quote}{body}{quote}")
+
     def _op_build_string(self, instr: BytecodeInstruction):
         count = int(instr.arg) if instr.arg is not None else 0
         parts = []
@@ -8784,12 +8827,18 @@ class DecompilerGeneric(DecompilerBase):
     def _op_build_collection(self, instr: BytecodeInstruction):
         opname = instr.opname
         items = []
+        popped: list = []
         num = int(instr.arg) if instr.arg is not None else 0
         for _ in range(num):
             if self.stack:
-                items.insert(0, str(self.stack.pop()))
+                top = self.stack.pop()
+                popped.insert(0, top)
+                items.insert(0, str(top))
 
         if opname == "BUILD_TUPLE":
+            if num and len(parts_t := [p for p in popped if isinstance(p, _TInterpolation)]) == num:
+                self.stack.append(_TInterpolations(f"({', '.join(items)},)", [p.piece for p in parts_t]))
+                return
             # A one-item tuple needs its comma, or it is the item itself.
             self.stack.append(f"({items[0]},)" if len(items) == 1 else f"({', '.join(items)})")
         elif opname == "BUILD_LIST":
