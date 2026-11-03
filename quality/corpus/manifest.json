@@ -496,6 +496,21 @@
       ]
     },
     {
+      "id": "features/modern_tstring",
+      "category": "feature",
+      "path": "features/modern_tstring.py",
+      "summary": "PEP 750 template strings (t-strings)",
+      "source_python": {
+        "min": "3.14"
+      },
+      "compile": {
+        "optimize": 0
+      },
+      "equivalence": "required",
+      "support": "supported",
+      "limitations": []
+    },
+    {
       "id": "features/modern_walrus",
       "category": "feature",
       "path": "features/modern_walrus.py",
