@@ -5744,6 +5744,7 @@ class DecompilerGeneric(DecompilerBase):
         # Install the same prescan results so sentinel detection works
         sub.prescan = self.prescan.for_handler_section()
         sub.emit = self.emit.for_handler_section()
+        sub.emit.annotations = self._body_annotations()    # (3.14: an annotation in a handler is written where it ran)
         self._mark_nested_tries(sub, handler_instrs)
         sub._enclosing_locals = self._enclosing_locals
         # Install only the handler instructions
@@ -7039,6 +7040,7 @@ class DecompilerGeneric(DecompilerBase):
             if val_str == "None" and instr.offset in self.prescan.dup_guard_exits:
                 return  # the repeated implicit return at the end of a `while cond:` loop (3.10/3.11)
             if val_str == "None" and self._module_level_return_none():
+                self._leave_branch_at_return()
                 return
             # Use the new predicate for smarter suppression
             is_compiler_gen = val_str == "None" and self.is_compiler_generated_return(self.pc - 1)
@@ -7062,6 +7064,19 @@ class DecompilerGeneric(DecompilerBase):
                 # There is no need, the blocks will be closed by _close_blocks at their
                 # targets, or they will be skipped if unreachable.
                 # Actually, let's just leave it, maybe the bug is in _render_finally_body or try_ret block handling.
+    def _leave_branch_at_return(self) -> None:
+        """
+        A copied `return None` that ends a branch of an `if` in a module or class body is the branch's jump to the
+        end of the body: `else:` starts after it. Without that the `else` clause ran unconditionally.
+        """
+        here = self.instructions[self.pc - 1].offset
+        last = self.instructions[-1]
+        if here >= last.offset or last.opname not in ("RETURN_CONST", "RETURN_VALUE") \
+                or any(btype in ("for", "while") and end > here for end, btype in self.blocks):
+            return
+        self._op_jump(BytecodeInstruction(dis.opmap.get("JUMP_FORWARD", 110), "JUMP_FORWARD", 0, last.offset,
+                                          here, None, False))
+
     def _op_return_const(self, instr: BytecodeInstruction):
         opname = instr.opname
         # RETURN_CONST None has two meanings:
@@ -7073,6 +7088,7 @@ class DecompilerGeneric(DecompilerBase):
             if instr.offset in self.prescan.dup_guard_exits:
                 return
             if self._module_level_return_none():
+                self._leave_branch_at_return()
                 return
             in_while_true = any(
                 b[1] == "while" and b[0] in self.prescan.while_true_ends
@@ -9284,8 +9300,11 @@ class DecompilerGeneric(DecompilerBase):
                 lines[at] = f"{where}{name}: {text} = {lines[at][len(where) + len(name) + 3:]}"
             else:
                 lines.insert(at + 1, f"{where}{name}: {text}")
+                if at + 2 < len(lines) and lines[at + 2] == f"{where}pass":
+                    del lines[at + 2]            # (the body of an `if` that only held the annotation)
         self.emit.annotation_marks.clear()
         prefix = "    " * self.indent_level
+        ordered = list(self.emit.annotations)
         pending = [(name, text) for index, name, text in self.emit.annotations if index is None]
         self.emit.annotations = [a for a in self.emit.annotations if a[0] is not None]
         slots = []                       # per annotation: index of its assignment line, or None
@@ -9299,12 +9318,44 @@ class DecompilerGeneric(DecompilerBase):
                 lines[at] = f"{prefix}{name}: {text} = {lines[at][len(prefix) + len(name) + 3:]}"
         # Bare annotations go in front of the next annotated assignment, else at the end.
         inserts = []
+        bare_at = [i for i, (index, _, _) in enumerate(ordered) if index is None]     # each one's place in `ordered`
         for k, ((name, text), at) in enumerate(zip(pending, slots)):
             if at is None:
-                following = next((slots[j] for j in range(k + 1, len(slots)) if slots[j] is not None), None)
+                following = self._next_annotation_line(ordered, bare_at[k] + 1, pending, slots, prefix)
                 inserts.append((len(lines) if following is None else following, k, f"{prefix}{name}: {text}"))
         for position, _, line in sorted(inserts, key=lambda t: (-t[0], -t[1])):
             lines.insert(position, line)
+
+    def _body_annotations(self) -> list:
+        """The annotations of a 3.14 module or class body, read from its `__annotate__` code (empty otherwise)."""
+        if self.target_version < (3, 14):
+            return []
+        # The compiler emits its `__annotate__` after the body's statements, so a user-defined function of that
+        # name comes earlier in `co_consts`.
+        for const in reversed(getattr(self.code_obj, "co_consts", ())):
+            if getattr(const, "co_name", None) == "__annotate__":
+                return list(self._parse_annotate_code(const) or [])
+        return []
+
+    def _next_annotation_line(self, ordered: list, start: int, pending: list, slots: list,
+                              prefix: str) -> Optional[int]:
+        """
+        The line a bare annotation goes in front of: the first line of the next annotation in ``__annotate__``
+        order, which is its assignment, or the statement that holds it (an `if` around ``y: str``).
+        """
+        lines = self.reconstructed
+        entries = [(name, text) for _, name, text in ordered]
+        slot_of = dict(zip(pending, slots))
+        for later in entries[start:]:
+            at = slot_of.get(later)
+            if at is None:
+                at = next((k for k, line in enumerate(lines) if line.strip() == f"{later[0]}: {later[1]}"), None)
+                while at is not None and at > 0 and (lines[at].startswith(prefix + " ")
+                                                     or lines[at].lstrip().startswith(("else", "elif", "except", "finally"))):
+                    at -= 1                  # up to the `if`/`try` that holds it
+            if at is not None:
+                return at
+        return None
 
     def _parse_annotate_code(self, code) -> Optional[List[Tuple[Optional[int], str, str]]]:
         """
