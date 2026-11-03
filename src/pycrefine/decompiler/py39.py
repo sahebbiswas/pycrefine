@@ -506,7 +506,7 @@ class Decompiler39(DecompilerGeneric):
 
             if (jump_target <= instr.offset  # backward target → inside while-True
                     and instr.offset not in self.prescan.while_header_targets.values()
-                    and any(b[1] == "while" for b in self.blocks)):
+                    and next((b[1] for b in reversed(self.blocks) if b[1] in ("while", "for")), None) == "while"):
                 # This is the break-guard inside a while-True.
                 if self.stack:
                     cond = self.stack.pop()
