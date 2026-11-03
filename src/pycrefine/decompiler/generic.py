@@ -1337,6 +1337,7 @@ class DecompilerGeneric(DecompilerBase):
         return -1
 
     _CHAIN_JUMPS = ("POP_JUMP_IF_FALSE", "POP_JUMP_FORWARD_IF_FALSE")
+    _CHAIN_TESTS = ("COMPARE_OP", "IS_OP", "CONTAINS_OP")
 
     def _chain_link_at(self, i: int) -> Optional[int]:
         """
@@ -1415,6 +1416,7 @@ class DecompilerGeneric(DecompilerBase):
         the chain that follows it. Without this, a conditional jump is written for every link.
         """
         self.prescan.chain_values = {}
+        self._suppress_condition_chain_cleanups()
         if self.target_version < (3, 12):
             self._prescan_chain_cleanups()
             return
@@ -1441,6 +1443,41 @@ class DecompilerGeneric(DecompilerBase):
             self.prescan.chain_values[instrs[i].offset] = (ops, operands, end)
             self.prescan.ternary_suppress.update(drop)
             self.prescan.ternary_suppress.update(x.offset for x in instrs[i + 1:end + 1])
+
+    def _suppress_condition_chain_cleanups(self) -> None:
+        """
+        3.10 and 3.12+: a link of a chained comparison used as a condition (`if a < b < c:`) that fails jumps to a
+        `POP_TOP` which drops the middle operand it left on the stack, and the code after the `if` follows it
+        (or is copied there, when it is a short `return`). That path is the same as the one the last link takes
+        when it fails, so the jump is sent there and the clean-up and the copy are dropped. Left alone, the
+        `POP_TOP` was written as an expression statement, and the copy as a second `return`.
+        """
+        instrs = self.instructions
+        index = {ins.offset: k for k, ins in enumerate(instrs)}
+        for k in range(3, len(instrs)):
+            jump = instrs[k]
+            if jump.opname != "POP_JUMP_IF_FALSE" or instrs[k - 1].opname not in self._CHAIN_TESTS or [
+                    x.opname for x in instrs[k - 3:k - 1]] not in (["SWAP", "COPY"], ["DUP_TOP", "ROT_THREE"]):
+                continue
+            at = index.get(self._get_jump_target(jump))
+            last = next((x for x in range(k + 1, len(instrs))
+                         if instrs[x].opname == "POP_JUMP_IF_FALSE" and instrs[x - 1].opname in self._CHAIN_TESTS
+                         and instrs[x - 2].opname not in ("COPY", "ROT_THREE")), None)
+            if at is None or at == 0 or last is None or instrs[at].opname != "POP_TOP":
+                continue
+            final = self._get_jump_target(instrs[last])
+            f_idx = index.get(final)
+            if f_idx is None:
+                continue
+            drop = {instrs[at].offset}
+            if instrs[at + 1].offset != final:
+                size = next((n + 1 for n, x in enumerate(instrs[f_idx:]) if x.opname in ("RETURN_VALUE", "RETURN_CONST")), None)
+                copy = instrs[at + 1:at + 1 + (size or 0)]
+                if not size or [(x.opname, x.argval) for x in copy] != [(x.opname, x.argval) for x in instrs[f_idx:f_idx + size]]:
+                    continue
+                drop.update(x.offset for x in copy)
+            jump.argval = final
+            self.prescan.ternary_suppress.update(drop)
 
     def _prescan_chain_cleanups(self) -> None:
         """
