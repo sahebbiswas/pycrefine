@@ -4269,6 +4269,25 @@ class DecompilerGeneric(DecompilerBase):
                 if target in loop_heads or self._is_while_head(target):
                     self.prescan.exc_handler_continue_offsets.add(jb.offset)
 
+        # A jump out of a handler to the end of the `while` it is in, or past it (3.12 puts the code after the loop
+        # ahead of the handlers, so that jump can go back), is a `break`.
+        self.prescan.exc_handler_break_offsets = set()
+        for k, jf in enumerate(instrs):
+            if not (jf.opname in ("JUMP_FORWARD", "JUMP_ABSOLUTE") or jf.opname.startswith("JUMP_BACKWARD")) or k == 0:
+                continue
+            # (the inlined exit call of a `with` that the `break` leaves sits between POP_EXCEPT and the jump)
+            ahead = self._before_with_exit(k) - 1
+            while ahead > 0 and instrs[ahead].opname in ("STORE_FAST", "STORE_NAME", "STORE_DEREF", "STORE_GLOBAL",
+                                                          "DELETE_FAST", "DELETE_NAME", "DELETE_DEREF", "DELETE_GLOBAL",
+                                                          "LOAD_CONST"):
+                ahead -= 1   # (the clean-up of an `as` name sits between POP_EXCEPT and the jump)
+            if instrs[ahead].opname != "POP_EXCEPT":
+                continue
+            loop_end = self._innermost_while_end(self._protected_offset(jf.offset))
+            if loop_end is not None and self._get_jump_target(jf) >= loop_end:
+                self.prescan.exc_handler_jump_offsets.add(jf.offset)
+                self.prescan.exc_handler_break_offsets.add(jf.offset)
+
         # ── 6. Build deferred-finally mappings ───────────────────────────
         # For try/except/finally patterns, the inlined finally code sits
         # physically between the try body and the except handlers in the
@@ -5101,6 +5120,23 @@ class DecompilerGeneric(DecompilerBase):
                     break
         return idx
 
+    def _before_with_exit(self, idx: int) -> int:
+        """
+        The index *idx* moved back over the inlined exit call of a `with` that ends right before it: the call of
+        3.11 and later (`_before_exit_calls`), or 3.9's `POP_BLOCK; LOAD_CONST None; DUP_TOP; DUP_TOP;
+        CALL_FUNCTION 3; POP_TOP`.
+        """
+        instrs = self.instructions
+        idx = self._before_exit_calls(idx)
+        while idx >= 6 and [x.opname for x in instrs[idx - 5:idx]] == [
+                "LOAD_CONST", "DUP_TOP", "DUP_TOP", "CALL_FUNCTION", "POP_TOP"] \
+                and instrs[idx - 5].argval is None and instrs[idx - 2].arg == 3:
+            idx -= 5
+            if instrs[idx - 1].opname == "POP_BLOCK":
+                idx -= 1
+            idx = self._before_exit_calls(idx)      # (a `break` can leave several `with` blocks)
+        return idx
+
     def _handler_exit_before(self, jb_idx: int) -> bool:
         """
         Whether the jump at *jb_idx* leaves an exception handler: POP_EXCEPT (or other
@@ -5319,6 +5355,30 @@ class DecompilerGeneric(DecompilerBase):
                     and (inner is None or ins.offset > inner)):
                 return False        # the innermost loop is a `for`: its own check applies
         return inner is not None and self._is_while_head(target, only={inner})
+
+    def _protected_offset(self, offset: int) -> int:
+        """
+        Where the `try` body that the except clause containing *offset* belongs to starts; *offset* itself
+        when it is not in a clause. (3.12 and later move the handlers to the end of the code, away from their loop.)
+        """
+        entries = self._exception_entries() or []
+        head = next((ins.offset for ins in reversed(self.instructions)
+                     if ins.offset <= offset and ins.opname == "PUSH_EXC_INFO"), None)
+        starts = [e.start for e in entries if e.target == head and not e.lasti]
+        return min(starts) if starts else offset
+
+    def _innermost_while_end(self, at: int) -> Optional[int]:
+        """The offset just past the innermost loop that contains *at*, when that loop is a `while`; otherwise None."""
+        inner = None
+        for body_start in self.prescan.while_header_targets:
+            if body_start <= at < self._loop_end_after(body_start) and (inner is None or body_start > inner):
+                inner = body_start
+        if inner is None:
+            return None
+        for ins in self.instructions:
+            if ins.opname == "FOR_ITER" and inner < ins.offset < at < self._get_jump_target(ins):
+                return None
+        return self._loop_end_after(inner)
 
     def _handlers_all_leave(self, handler: int, body_end: Optional[int] = None) -> bool:
         """
@@ -7658,6 +7718,10 @@ class DecompilerGeneric(DecompilerBase):
             return
         opname = instr.opname
         jump_target = self._get_jump_target(instr)
+
+        if instr.offset in self.prescan.exc_handler_break_offsets:
+            self._append_reconstructed("break")   # (`break` in an except clause of a `while`)
+            return
 
         # Detect `break`: forward jump that lands at the exact end of a while/for loop.
         if instr.opname in ("JUMP_FORWARD", "JUMP_ABSOLUTE") and isinstance(jump_target, int) and jump_target > instr.offset:

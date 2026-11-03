@@ -265,8 +265,9 @@ class Decompiler39(DecompilerGeneric):
                                 inner_ins = self.instructions[k]
                                 if inner_ins.opname in ("JUMP_FORWARD", "JUMP_ABSOLUTE"):
                                     jt = getattr(self, "_get_jump_target")(inner_ins)
-                                    if jt > else_start:
-                                        post_except_targets.append(jt)
+                                    loop_end = self._innermost_while_end(inner_ins.offset)
+                                    if jt > else_start and not (loop_end is not None and jt >= loop_end):
+                                        post_except_targets.append(jt)   # (a `break` out of a `while` skips no else)
                             if post_except_targets:
                                 else_end = min(post_except_targets)
                                 self.prescan.else_starts[else_start] = else_end
@@ -322,6 +323,19 @@ class Decompiler39(DecompilerGeneric):
         while index < len(instrs) and instrs[index].offset in self.prescan.finally_body_suppress:
             index += 1
         return index
+
+    def _past_with_exit(self, index: int) -> int:
+        """
+        *index* moved past the inlined exit call of a `with` that a `break` in a handler leaves:
+        `[POP_BLOCK] LOAD_CONST None; DUP_TOP; DUP_TOP; CALL_FUNCTION 3; POP_TOP`.
+        """
+        instrs = self.instructions
+        while True:
+            at = index + 1 if index < len(instrs) and instrs[index].opname == "POP_BLOCK" else index
+            if not ([x.opname for x in instrs[at:at + 5]] == ["LOAD_CONST", "DUP_TOP", "DUP_TOP", "CALL_FUNCTION", "POP_TOP"]
+                    and instrs[at].argval is None and instrs[at + 3].arg == 3):
+                return index        # (a `break` can leave several `with` blocks: one exit call after another)
+            index = at + 5
 
     def _elide_early_finally_copies(self, setup_idx: int, handler_idx: int, reraise_offset: int) -> None:
         """
@@ -1244,6 +1258,7 @@ class Decompiler39(DecompilerGeneric):
         # reached this via the jump target path, so just skip silently.
         elif opname == "POP_EXCEPT":
             _deferred = False
+            _keep_open = False      # a `break` inside an `if` of the clause: the clause goes on after it
             if self.emit.except_header_indents:
                 # Peek ahead: if the next instruction is a backward JUMP_ABSOLUTE
                 # to a loop head (FOR_ITER, or a `while`'s condition), this POP_EXCEPT is the exit from an
@@ -1291,6 +1306,28 @@ class Decompiler39(DecompilerGeneric):
                         _emitted_continue = True
 
                 if not _emitted_continue:
+                    # `break` out of a `while`: no iterator to drop, just the jump past the loop
+                    look = self.pc
+                    look += self._is_as_name_cleanup(look, self.emit.exc_bound_names)
+                    look = self._skip_finally_copy(look)
+                    look = self._past_with_exit(look)
+                    if look < len(self.instructions) and self.instructions[look].offset in self.prescan.exc_handler_break_offsets:
+                        self._append_reconstructed("break")
+                        self.pc = look + 1
+                        after = self.instructions[look + 1] if look + 1 < len(self.instructions) else None
+                        # (a jump to the code right after the break: the `break` ends an `if`, and what follows it,
+                        # such as the clause's own exit, is reached from the other branch)
+                        reached = after is not None and any(
+                            "JUMP" in x.opname and x.offset < instr.offset and self._get_jump_target(x) == after.offset
+                            for x in self.instructions)
+                        dead = self.instructions[look + 1:look + 3]
+                        if reached:
+                            _keep_open = True
+                        elif [x.opname for x in dead] == ["POP_EXCEPT", "JUMP_FORWARD"]:
+                            self.pc = look + 3   # the compiler's unreachable copy of the clause exit
+                        _emitted_continue = True
+
+                if not _emitted_continue:
                     # ── Python 3.9 return-inside-except ─────────────────────────
                     # CPython 3.9 emits: LOAD_FAST x → ROT_FOUR → POP_EXCEPT → RETURN_VALUE
                     # The return value is on the stack but POP_EXCEPT fires first.
@@ -1327,7 +1364,7 @@ class Decompiler39(DecompilerGeneric):
                         if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
                             self._append_reconstructed("pass")
 
-                if not _deferred:
+                if not _deferred and not _keep_open:
                     self.indent_level = self.emit.except_header_indents.pop()
             if self.stack and self.stack[-1] == "_exc_match":
                 self.stack.pop()

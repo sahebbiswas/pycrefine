@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "python_version": "3.12",
-  "python_patch": "3.12.13",
+  "python_patch": "3.12.3",
   "entries": {
     "features/class_basic": "equivalent",
     "features/class_special_methods": "equivalent",
@@ -62,7 +62,7 @@
     "generated/cf_while_nested_break": "equivalent",
     "generated/cf_while_nested_continue": "equivalent",
     "generated/cf_while_nested_return": "equivalent",
-    "generated/cf_while_try_break": "mismatch",
+    "generated/cf_while_try_break": "equivalent",
     "generated/cf_while_try_continue": "equivalent",
     "generated/cf_while_try_return": "equivalent",
     "generated/cf_while_with_break": "equivalent",

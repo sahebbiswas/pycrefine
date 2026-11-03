@@ -16,6 +16,14 @@
       "tests": [
         "tests/test_integration.py::TestVerifyScenesBugs::test_nested_empty_except_pass_api_12"
       ]
+    },
+    {
+      "issue": 305,
+      "reason": "a while loop whose try body ends in break gains an else clause and a second break",
+      "tests": [
+        "tests/test_except_break_while.py::TestBreakInExceptInWhile::test_a_for_loop_inside_the_while_keeps_its_own_break",
+        "tests/test_except_break_while.py::TestBreakInExceptInWhile::test_code_after_the_loop"
+      ]
     }
   ]
 }
