@@ -941,7 +941,7 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "unsupported",
+      "support": "partial",
       "limitations": [
         {
           "issue": 305,
@@ -949,32 +949,6 @@
             "3.10"
           ],
           "summary": "3.10: a while loop whose try body ends in break gains an else clause and a second break"
-        },
-        {
-          "issue": 193,
-          "versions": [
-            "3.11"
-          ],
-          "summary": "3.11 break or continue in an except clause inside a loop is lost"
-        },
-        {
-          "issue": 207,
-          "versions": [
-            "3.9",
-            "3.12",
-            "3.13",
-            "3.14"
-          ],
-          "summary": "break in an except clause or elif branch becomes a return"
-        },
-        {
-          "issue": 170,
-          "versions": [
-            "3.12",
-            "3.13",
-            "3.14"
-          ],
-          "summary": "while loop whose try body returns and whose handler continues"
         }
       ]
     },

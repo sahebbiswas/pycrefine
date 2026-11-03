@@ -22,6 +22,7 @@ GROUPS = {"prescan": PrescanState, "emit": EmissionState, "doc": DocState}
 SHARED_WITH_HANDLER_SECTION = (
     "exc_handler_jump_offsets",
     "exc_handler_continue_offsets",
+    "exc_handler_break_offsets",
     "while_header_targets",
     "while_body_offsets",
     "dup_guard_exits",
