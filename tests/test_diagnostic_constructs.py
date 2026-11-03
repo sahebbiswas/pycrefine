@@ -22,8 +22,8 @@ UNSUPPORTED = [
     ("type_parameters", (3, 12), None,
      "def f[T](x: T) -> T:\n    return x\n",
      dg.UNSUPPORTED_VERSION_CONSTRUCT),
-    ("try_blocks_on_3_10", (3, 10), (3, 10),
-     "def f():\n    try:\n        return 1\n    except ValueError:\n        return 2\n",
+    ("async_with_on_3_10", (3, 10), (3, 10),
+     "async def f(a):\n    async with a:\n        pass\n",
      dg.INCOMPLETE_EXCEPTION),
 ]
 

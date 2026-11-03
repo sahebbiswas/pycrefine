@@ -28,7 +28,8 @@ source. For the development workflow, see [CONTRIBUTING.md](../CONTRIBUTING.md).
 | `decompiler/base.py` | `DecompilerBase`: the shared state and helpers (return-statement checks, literal formatting) |
 | `decompiler/generic.py` | `DecompilerGeneric`: the version-independent engine (prescans, dispatch table, opcode handlers) |
 | `decompiler/py39.py` | `Decompiler39`: 3.9's block-stack exception handling (`SETUP_FINALLY`, `POP_BLOCK`, …) |
-| `decompiler/py311.py` | `Decompiler311Plus`: 3.10–3.12 (exception tables, `BINARY_OP`, `SWAP`/`COPY`) |
+| `decompiler/py311.py` | `Decompiler311Plus`: 3.10–3.12 (3.10's handlers are first rewritten into exception tables; exception tables, `BINARY_OP`, `SWAP`/`COPY`) |
+| `decompiler/block_handlers.py` | reads 3.10's block-based `try`/`except`/`finally`/`with` handlers into the 3.11 form (instructions and exception table) that `Decompiler311Plus` understands |
 | `decompiler/py314.py` | `Decompiler314`: 3.13 and 3.14 (fused superinstructions, 3.14's `LOAD_SPECIAL` `with` blocks); a subclass of `Decompiler311Plus` |
 | `opcodes/py39.py` | the 3.9 opcode table, used to read 3.9 bytecode on any host |
 | `instructions.py` | `BytecodeInstruction`, constant formatting, finally-copy matching, comprehension rendering |
@@ -219,7 +220,7 @@ Things CPython does that the passes undo, each with the test or issue that taugh
 | Version | What the compiler does | Where it is handled | Test or issue |
 |---|---|---|---|
 | 3.9 | exceptions use a block stack (`SETUP_FINALLY`, `POP_BLOCK`), not an exception table | `Decompiler39` | [#179](https://github.com/sahebbiswas/pycrefine/issues/179) |
-| 3.10 | the same block stack, but 3.10 is rebuilt by `Decompiler311Plus`, which has no block-stack handling; its handlers are not decompiled yet and are reported once per code object | `_report_version_gaps` in `Decompiler311Plus` | [#179](https://github.com/sahebbiswas/pycrefine/issues/179) |
+| 3.10 | the same block stack, but 3.10 is rebuilt by `Decompiler311Plus`, after `block_handlers.py` rewrites the block-based `try`, `except`, `finally` and `with` handlers into the 3.11 exception-table form; handlers it cannot read (`async with`) are reported once per code object | `block_handlers.py`, `_report_version_gaps` in `Decompiler311Plus` | [#179](https://github.com/sahebbiswas/pycrefine/issues/179) |
 | 3.9–3.10 | `and`/`or` values use `JUMP_IF_*_OR_POP` | `_prescan_value_boolops` | `tests/test_basic.py::TestValueBoolOps` |
 | 3.11+ | exceptions use an exception table; handlers are laid out after the code they guard | `_exception_entries`, `_prescan_try_structure` | `tests/test_exceptions.py` |
 | 3.11+ | a `try` is introduced by `NOP`s; its `pass` body is another `NOP` | `_empty_try_nops` | [#167](https://github.com/sahebbiswas/pycrefine/issues/167), `tests/test_empty_bodies.py` |

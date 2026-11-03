@@ -56,7 +56,7 @@ Each diagnostic has a kind:
 | `unknown_control_flow` | Jumps or blocks that do not form a shape the decompiler knows. |
 | `stack_underflow` | An instruction needed an operand that was not there. |
 | `ambiguous_expression` | An operator or operand could not be determined. |
-| `incomplete_exception_reconstruction` | A `try`/`except`/`finally` the backend cannot rebuild (Python 3.10). |
+| `incomplete_exception_reconstruction` | An exception handler the backend cannot rebuild (`async with` on Python 3.10). |
 | `unsupported_version_construct` | A construct this Python version's backend lacks, such as `match`, `async` or type parameters. |
 | `internal_error` | The decompiler itself failed on this part. |
 

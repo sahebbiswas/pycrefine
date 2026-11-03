@@ -133,16 +133,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 179,
-          "versions": [
-            "3.10"
-          ],
-          "summary": "3.10 block-based exception handlers are not decompiled"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "features/exc_raise_chain",
@@ -156,16 +148,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 179,
-          "versions": [
-            "3.10"
-          ],
-          "summary": "3.10 block-based exception handlers are not decompiled"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "features/exc_try_except",
@@ -179,16 +163,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 179,
-          "versions": [
-            "3.10"
-          ],
-          "summary": "3.10 block-based exception handlers are not decompiled"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "features/exc_uncaught",
@@ -322,16 +298,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 179,
-          "versions": [
-            "3.10"
-          ],
-          "summary": "3.10 block-based exception handlers are not decompiled"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "features/flow_while",
@@ -569,16 +537,8 @@
         "optimize": 2
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 179,
-          "versions": [
-            "3.10"
-          ],
-          "summary": "3.10: the try/except around the assertion comes out without its except clause"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "features/unpack_assign",
@@ -622,16 +582,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 179,
-          "versions": [
-            "3.10"
-          ],
-          "summary": "3.10 block-based exception handlers are not decompiled"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "generated/cf_for_finally_continue",
@@ -645,16 +597,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 179,
-          "versions": [
-            "3.10"
-          ],
-          "summary": "3.10 block-based exception handlers are not decompiled"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "generated/cf_for_finally_return",
@@ -668,16 +612,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 179,
-          "versions": [
-            "3.10"
-          ],
-          "summary": "3.10 block-based exception handlers are not decompiled"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "generated/cf_for_if_break",
@@ -781,16 +717,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 179,
-          "versions": [
-            "3.10"
-          ],
-          "summary": "3.10 block-based exception handlers are not decompiled"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "generated/cf_for_try_continue",
@@ -804,16 +732,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 179,
-          "versions": [
-            "3.10"
-          ],
-          "summary": "3.10 block-based exception handlers are not decompiled"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "generated/cf_for_try_return",
@@ -827,16 +747,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 179,
-          "versions": [
-            "3.10"
-          ],
-          "summary": "3.10 block-based exception handlers are not decompiled"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "generated/cf_for_with_break",
@@ -895,16 +807,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 179,
-          "versions": [
-            "3.10"
-          ],
-          "summary": "3.10 block-based exception handlers are not decompiled"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "generated/cf_while_finally_continue",
@@ -918,16 +822,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 179,
-          "versions": [
-            "3.10"
-          ],
-          "summary": "3.10 block-based exception handlers are not decompiled"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "generated/cf_while_finally_return",
@@ -941,16 +837,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 179,
-          "versions": [
-            "3.10"
-          ],
-          "summary": "3.10 block-based exception handlers are not decompiled"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "generated/cf_while_if_break",
@@ -1056,11 +944,11 @@
       "support": "unsupported",
       "limitations": [
         {
-          "issue": 179,
+          "issue": 305,
           "versions": [
             "3.10"
           ],
-          "summary": "3.10 block-based exception handlers are not decompiled"
+          "summary": "3.10: a while loop whose try body ends in break gains an else clause and a second break"
         },
         {
           "issue": 193,
@@ -1102,16 +990,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 179,
-          "versions": [
-            "3.10"
-          ],
-          "summary": "3.10 block-based exception handlers are not decompiled"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "generated/cf_while_try_return",
@@ -1125,16 +1005,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 179,
-          "versions": [
-            "3.10"
-          ],
-          "summary": "3.10 block-based exception handlers are not decompiled"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "generated/cf_while_with_break",
@@ -1208,16 +1080,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 179,
-          "versions": [
-            "3.10"
-          ],
-          "summary": "3.10 block-based exception handlers are not decompiled"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "realworld/state_machine",
@@ -1261,16 +1125,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 179,
-          "versions": [
-            "3.10"
-          ],
-          "summary": "3.10 block-based exception handlers are not decompiled"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "stdlib/bisect",
@@ -1314,16 +1170,8 @@
         "optimize": 0
       },
       "equivalence": "compile_only",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 179,
-          "versions": [
-            "3.10"
-          ],
-          "summary": "3.10 block-based exception handlers are not decompiled"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "stdlib/fnmatch",
@@ -1352,16 +1200,8 @@
         "optimize": 0
       },
       "equivalence": "compile_only",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 179,
-          "versions": [
-            "3.10"
-          ],
-          "summary": "3.10 block-based exception handlers are not decompiled"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "stdlib/queue",
@@ -1375,16 +1215,8 @@
         "optimize": 0
       },
       "equivalence": "compile_only",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 179,
-          "versions": [
-            "3.10"
-          ],
-          "summary": "3.10 block-based exception handlers are not decompiled"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "stdlib/shlex",

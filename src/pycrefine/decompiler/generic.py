@@ -4308,7 +4308,7 @@ class DecompilerGeneric(DecompilerBase):
         self.prescan.try_else = {}
         exit_only = self._prescan_exit_only_finally(_exc_entries, real_push_exc, _body_end_by_target)
         outer_handlers, outer_inner = self._outer_handler_map(real_push_exc)  # (outer NOP -> handler, handler -> inner handler)
-        if self.target_version >= (3, 11):
+        if self._has_exception_table():
             _body_start_by_target: Dict[int, int] = {}
             for e in _exc_entries:
                 if e.target in real_push_exc:
@@ -4724,7 +4724,7 @@ class DecompilerGeneric(DecompilerBase):
         """
         found: set = set()
         self.prescan.exit_only_finally = {}
-        if self.target_version < (3, 11):
+        if not self._has_exception_table():
             return found
         instrs = self.instructions
         for handler in sorted(real_push_exc):

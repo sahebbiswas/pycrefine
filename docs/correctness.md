@@ -190,7 +190,7 @@ every entry, unit or corpus entry reported. A run fails with `noisier` when some
 reports more of a kind than its baseline allows, so a clean entry cannot start guessing
 unnoticed, and a construct known to be unsupported cannot silently stop saying so
 (`tests/test_diagnostic_constructs.py` checks that for `match`, async, type parameters,
-f-string conversions and 3.10 exception blocks). Fewer diagnostics never fail; record
+f-string conversions and 3.10 `async with`). Fewer diagnostics never fail; record
 them with `--update-baseline`. Each report also counts **silent failures**: output that
 does not compile (gate) or is wrong (differential) and carries no diagnostic. That number is
 the measure of the roadmap's "no silent fallbacks" goal; it should only go down.

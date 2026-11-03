@@ -11,9 +11,9 @@
     "features/comp_list_dict_set": "equivalent",
     "features/data_structures": "equivalent",
     "features/decorators_properties": "equivalent",
-    "features/exc_finally": "syntax_error",
-    "features/exc_raise_chain": "syntax_error",
-    "features/exc_try_except": "syntax_error",
+    "features/exc_finally": "equivalent",
+    "features/exc_raise_chain": "equivalent",
+    "features/exc_try_except": "equivalent",
     "features/exc_uncaught": "equivalent",
     "features/expr_arithmetic": "equivalent",
     "features/expr_boolops_ternary": "equivalent",
@@ -22,7 +22,7 @@
     "features/flow_for_else": "equivalent",
     "features/flow_if_elif": "equivalent",
     "features/flow_nested_loops": "equivalent",
-    "features/flow_try_in_loops": "syntax_error",
+    "features/flow_try_in_loops": "equivalent",
     "features/flow_while": "equivalent",
     "features/func_defaults_kwargs": "syntax_error",
     "features/func_lambda_sorted": "equivalent",
@@ -32,154 +32,62 @@
     "features/modern_match": "mismatch",
     "features/modern_walrus": "equivalent",
     "features/module_globals": "equivalent",
-    "features/opt_asserts_debug": "syntax_error",
+    "features/opt_asserts_debug": "equivalent",
     "features/unpack_assign": "equivalent",
     "features/with_context": "equivalent",
-    "generated/cf_for_finally_break": "syntax_error",
-    "generated/cf_for_finally_continue": "syntax_error",
-    "generated/cf_for_finally_return": "syntax_error",
+    "generated/cf_for_finally_break": "equivalent",
+    "generated/cf_for_finally_continue": "equivalent",
+    "generated/cf_for_finally_return": "equivalent",
     "generated/cf_for_if_break": "equivalent",
     "generated/cf_for_if_continue": "equivalent",
     "generated/cf_for_if_return": "equivalent",
     "generated/cf_for_nested_break": "equivalent",
     "generated/cf_for_nested_continue": "equivalent",
     "generated/cf_for_nested_return": "equivalent",
-    "generated/cf_for_try_break": "syntax_error",
-    "generated/cf_for_try_continue": "syntax_error",
-    "generated/cf_for_try_return": "syntax_error",
+    "generated/cf_for_try_break": "equivalent",
+    "generated/cf_for_try_continue": "equivalent",
+    "generated/cf_for_try_return": "equivalent",
     "generated/cf_for_with_break": "equivalent",
     "generated/cf_for_with_continue": "equivalent",
     "generated/cf_for_with_return": "equivalent",
-    "generated/cf_while_finally_break": "syntax_error",
-    "generated/cf_while_finally_continue": "syntax_error",
-    "generated/cf_while_finally_return": "syntax_error",
+    "generated/cf_while_finally_break": "equivalent",
+    "generated/cf_while_finally_continue": "equivalent",
+    "generated/cf_while_finally_return": "equivalent",
     "generated/cf_while_if_break": "equivalent",
     "generated/cf_while_if_continue": "equivalent",
     "generated/cf_while_if_return": "equivalent",
     "generated/cf_while_nested_break": "equivalent",
     "generated/cf_while_nested_continue": "equivalent",
     "generated/cf_while_nested_return": "equivalent",
-    "generated/cf_while_try_break": "syntax_error",
-    "generated/cf_while_try_continue": "syntax_error",
-    "generated/cf_while_try_return": "syntax_error",
+    "generated/cf_while_try_break": "mismatch",
+    "generated/cf_while_try_continue": "equivalent",
+    "generated/cf_while_try_return": "equivalent",
     "generated/cf_while_with_break": "equivalent",
     "generated/cf_while_with_continue": "equivalent",
     "generated/cf_while_with_return": "equivalent",
     "realworld/inventory_report": "equivalent",
-    "realworld/lru_cache": "syntax_error",
+    "realworld/lru_cache": "equivalent",
     "realworld/state_machine": "equivalent",
     "realworld/text_stats": "equivalent",
-    "realworld/tokenizer": "syntax_error",
+    "realworld/tokenizer": "equivalent",
     "stdlib/bisect": "compiles",
     "stdlib/colorsys": "compiles",
-    "stdlib/copy": "syntax_error",
+    "stdlib/copy": "compiles",
     "stdlib/fnmatch": "compiles",
-    "stdlib/getopt": "syntax_error",
-    "stdlib/queue": "syntax_error",
+    "stdlib/getopt": "compiles",
+    "stdlib/queue": "compiles",
     "stdlib/shlex": "compiles",
     "stdlib/textwrap": "compiles"
   },
   "diagnostics": {
-    "features/exc_finally": {
-      "incomplete_exception_reconstruction": 2
-    },
-    "features/exc_raise_chain": {
-      "incomplete_exception_reconstruction": 2
-    },
-    "features/exc_try_except": {
-      "incomplete_exception_reconstruction": 3
-    },
-    "features/flow_try_in_loops": {
-      "incomplete_exception_reconstruction": 2
-    },
     "features/modern_async": {
-      "incomplete_exception_reconstruction": 1,
-      "unsupported_version_construct": 11
+      "unsupported_version_construct": 10
     },
     "features/modern_match": {
       "unsupported_version_construct": 6
     },
-    "features/opt_asserts_debug": {
-      "incomplete_exception_reconstruction": 1
-    },
-    "features/with_context": {
-      "incomplete_exception_reconstruction": 1
-    },
-    "generated/cf_for_finally_break": {
-      "incomplete_exception_reconstruction": 1
-    },
-    "generated/cf_for_finally_continue": {
-      "incomplete_exception_reconstruction": 1
-    },
-    "generated/cf_for_finally_return": {
-      "incomplete_exception_reconstruction": 1
-    },
-    "generated/cf_for_try_break": {
-      "incomplete_exception_reconstruction": 1
-    },
-    "generated/cf_for_try_continue": {
-      "incomplete_exception_reconstruction": 1
-    },
-    "generated/cf_for_try_return": {
-      "incomplete_exception_reconstruction": 1
-    },
-    "generated/cf_for_with_break": {
-      "incomplete_exception_reconstruction": 1
-    },
-    "generated/cf_for_with_continue": {
-      "incomplete_exception_reconstruction": 1
-    },
-    "generated/cf_for_with_return": {
-      "incomplete_exception_reconstruction": 1
-    },
-    "generated/cf_while_finally_break": {
-      "incomplete_exception_reconstruction": 1
-    },
-    "generated/cf_while_finally_continue": {
-      "incomplete_exception_reconstruction": 1
-    },
-    "generated/cf_while_finally_return": {
-      "incomplete_exception_reconstruction": 1
-    },
-    "generated/cf_while_try_break": {
-      "incomplete_exception_reconstruction": 1
-    },
-    "generated/cf_while_try_continue": {
-      "incomplete_exception_reconstruction": 1
-    },
-    "generated/cf_while_try_return": {
-      "incomplete_exception_reconstruction": 1
-    },
-    "generated/cf_while_with_break": {
-      "incomplete_exception_reconstruction": 1
-    },
-    "generated/cf_while_with_continue": {
-      "incomplete_exception_reconstruction": 1
-    },
-    "generated/cf_while_with_return": {
-      "incomplete_exception_reconstruction": 1
-    },
-    "realworld/lru_cache": {
-      "incomplete_exception_reconstruction": 1
-    },
-    "realworld/tokenizer": {
-      "incomplete_exception_reconstruction": 1
-    },
     "stdlib/bisect": {
-      "incomplete_exception_reconstruction": 1,
       "unsupported_opcode": 1
-    },
-    "stdlib/copy": {
-      "incomplete_exception_reconstruction": 3
-    },
-    "stdlib/getopt": {
-      "incomplete_exception_reconstruction": 2
-    },
-    "stdlib/queue": {
-      "incomplete_exception_reconstruction": 8
-    },
-    "stdlib/shlex": {
-      "incomplete_exception_reconstruction": 1
     }
   }
 }

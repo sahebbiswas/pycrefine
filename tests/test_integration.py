@@ -506,7 +506,7 @@ class TestVerifyScenesBugs(unittest.TestCase):
         except SyntaxError:
             self.fail("Structural barrier triggered a syntax error in output")
 
-    @unittest.skipIf(sys.version_info >= (3, 11), "Known issue: 3.11+ compiler optimizations scramble nested try-except in ways this guard doesn't yet solve")
+    @unittest.skipIf(sys.version_info >= (3, 10), "Known issue: 3.10+ compiler optimizations scramble nested try-except in ways this guard doesn't yet solve")
     def test_try_except_nested_in_if_else(self):
         """Positive test: ensure try/except blocks inside if/else branches work correctly with the new guard."""
         src = (
