@@ -5,6 +5,7 @@ import keyword
 import re
 import sys
 import types
+from dataclasses import replace
 from typing import Any, Dict, List, Optional, Set, Tuple
 from .._constants import (
     _AUG_ASSIGN_MAP,
@@ -35,7 +36,7 @@ from .._constants import (
 )
 from ..codeobj import _is_code
 from .base import DecompilerBase
-from ..expr import (StackNULL, UnknownExpression, _BoolExpr, _ChainedValue, _CollectionAccumSentinel, _ConvertedValue, _FString,
+from ..expr import (StackNULL, UnknownExpression, _YieldExpr, _BoolExpr, _ChainedValue, _CollectionAccumSentinel, _ConvertedValue, _FString,
                     _FStringField, _MergedDisplay, _UnpackAccessor, _unary_operand, is_unknown)
 from ..diagnostics import (AMBIGUOUS_EXPRESSION, INTERNAL_ERROR, STACK_UNDERFLOW, UNKNOWN_CONTROL_FLOW,
                            UNSUPPORTED_OPCODE, UNSUPPORTED_VERSION_CONSTRUCT, DecompilationError)
@@ -245,7 +246,7 @@ _BASE_DISPATCH: Dict[str, str] = {
     # Nops
     "RESUME": "_op_no_op", "PRECALL": "_op_no_op", "CACHE": "_op_no_op",
     "COPY_FREE_VARS": "_op_no_op", "NOT_TAKEN": "_op_no_op", "MAKE_CELL": "_op_no_op",
-    "END_FOR": "_op_no_op", "POP_ITER": "_op_no_op", "YIELD_FROM": "_op_no_op",
+    "END_FOR": "_op_no_op", "POP_ITER": "_op_no_op", "YIELD_FROM": "_op_no_op", "YIELD_FROM_EXPR": "_op_yield_from",
     "NOP": "_op_nop",
     # Synthetic: the comprehension inliner builds this instruction itself (opcode -1).
     "INLINED_COMPREHENSION": "_op_inlined_comprehension",
@@ -663,6 +664,74 @@ class DecompilerGeneric(DecompilerBase):
         if drop:
             self.instructions = [ins for n, ins in enumerate(instrs) if n not in drop]
 
+    def _fold_yield_from(self) -> None:
+        """
+        Fold the loop that ``yield from`` compiles to into one YIELD_FROM_EXPR instruction (`await` is not touched).
+
+        3.9 and 3.10 write ``GET_YIELD_FROM_ITER; LOAD_CONST None; YIELD_FROM``. 3.11 and later send the
+        values one by one::
+
+            GET_YIELD_FROM_ITER; LOAD_CONST None
+            head: SEND end; YIELD_VALUE; RESUME; JUMP_BACKWARD_NO_INTERRUPT head
+            end: [END_SEND]
+
+        and 3.12+ add a ``CLEANUP_THROW; JUMP_BACKWARD(_NO_INTERRUPT)`` handler after the function's code. None of
+        that is a statement of its own: the loop's jumps would read as a `while`, and the handler as a jump back.
+        """
+        instrs = self.instructions
+        drop: set = set()
+        released: set = set()   # the jump targets the loop made
+        index_at = {ins.offset: n for n, ins in enumerate(instrs)}
+        for k, ins in enumerate(instrs):
+            if ins.opname != "GET_YIELD_FROM_ITER":
+                continue
+            found = self._yield_from_loop(k, index_at)
+            if found is None:
+                continue
+            drop.update(found[0])
+            released.update(found[1])
+            instrs[k] = replace(ins, opname="YIELD_FROM_EXPR", opcode=-1)
+        if not drop:
+            return
+        for k, ins in enumerate(instrs):
+            # the handler that lets the delegated generator be thrown into (3.12+)
+            if ins.opname == "CLEANUP_THROW":
+                drop.add(k)
+                if k + 1 < len(instrs) and instrs[k + 1].opname.startswith("JUMP_BACKWARD"):
+                    drop.add(k + 1)
+        kept = [ins for n, ins in enumerate(instrs) if n not in drop]
+        still_target = {self._get_jump_target(x) for x in kept if "JUMP" in x.opname or x.opname == "FOR_ITER"}
+        for n, ins in enumerate(kept):
+            if ins.offset in released and ins.offset not in still_target and ins.is_jump_target:
+                kept[n] = replace(ins, is_jump_target=False)
+        self.instructions = kept
+
+    def _yield_from_loop(self, k: int, index_at: Dict[int, int]) -> Optional[Tuple[Set[int], Set[int]]]:
+        """
+        The instructions after the GET_YIELD_FROM_ITER at index *k* that `yield from` is made of (their
+        indexes), and the offsets of the jump targets they made; or None when it is not a `yield from`.
+        *index_at* maps an instruction's offset to its index.
+        """
+        instrs = self.instructions
+        if k + 2 >= len(instrs) or instrs[k + 1].opname != "LOAD_CONST" or instrs[k + 1].argval is not None:
+            return None
+        second = instrs[k + 2]
+        if second.opname == "YIELD_FROM":          # 3.9, 3.10
+            return {k + 1, k + 2}, set()
+        if second.opname != "SEND":                # 3.11+
+            return None
+        end = index_at.get(self._get_jump_target(second))
+        if end is None or end <= k + 2 or instrs[end - 1].opname != "JUMP_BACKWARD_NO_INTERRUPT":
+            return None
+        gone = set(range(k + 1, end))
+        released = {second.offset}
+        if instrs[end].opname == "END_SEND":       # 3.12+: it leaves the value that was sent on
+            gone.add(end)
+            end += 1
+        if end < len(instrs):
+            released.add(instrs[end].offset)
+        return gone, released
+
     def decompile(self) -> str:
         """
         Decompile the stored code object into a human-readable Python source string.
@@ -679,6 +748,7 @@ class DecompilerGeneric(DecompilerBase):
         self._check_jump_targets()
         self._collapse_inlined_comprehensions()
         self._fold_inlined_builtin_calls()
+        self._fold_yield_from()
         self._drop_unreachable_handlers()
         self.pc = 0
         self.blocks = []
@@ -6834,7 +6904,7 @@ class DecompilerGeneric(DecompilerBase):
                 return
             if str(stmt) in ("None", "_exc_info", "_exc_match", "_exc"):
                 return
-            self._append_reconstructed(str(stmt))
+            self._append_reconstructed(stmt.bare if isinstance(stmt, _YieldExpr) else str(stmt))
 
         # ── binary arithmetic ──────────────────────────────────────────
 
@@ -7386,7 +7456,7 @@ class DecompilerGeneric(DecompilerBase):
         is computed once; writing it per target would run it once per target).
         """
         value = self.stack[-1]
-        if type(value) is str:  # pylint: disable=unidiomatic-typecheck
+        if type(value) is str or isinstance(value, _YieldExpr):  # pylint: disable=unidiomatic-typecheck
             first = self._next_real_index()
             store = self.instructions[first] if first is not None else None
             if (store is not None and store.opname in self._NAME_STORES
@@ -7396,7 +7466,7 @@ class DecompilerGeneric(DecompilerBase):
                 self.pc = first + 1
                 return
             if self._stored_next():
-                value = _ChainedValue(value)
+                value = _ChainedValue(value.bare if isinstance(value, _YieldExpr) else value)
                 self.stack[-1] = value
         self.stack.append(value)
 
@@ -7452,7 +7522,7 @@ class DecompilerGeneric(DecompilerBase):
             if value.alias is None:
                 value.row = len(self.reconstructed) - 1
             return
-        self._append_reconstructed(f"{target} = {value}")
+        self._append_reconstructed(f"{target} = {value.bare if isinstance(value, _YieldExpr) else value}")
 
     def _op_dup_top(self, instr: BytecodeInstruction):
         opname = instr.opname
@@ -9079,10 +9149,20 @@ class DecompilerGeneric(DecompilerBase):
         opname = instr.opname
         self.stack.append(str(instr.argval))
 
-    def _op_yield_value(self, instr: BytecodeInstruction):
-        opname = instr.opname
+    def _op_yield_value(self, _instr: BytecodeInstruction):
+        # The value sent in comes back as the expression's result: `x = yield v`, or dropped by a POP_TOP.
         val = self._pop()
-        self._append_reconstructed(f"yield {val}")
+        if self.code_obj.co_flags & (_CO_COROUTINE | _CO_ASYNC_GENERATOR):
+            # (an `await` is a yield too, and not rebuilt yet: #85)
+            self._append_reconstructed(f"yield {val}")
+            return
+        # (`yield` and `yield None` compile alike; a comprehension body always has a value to rebuild)
+        bare = str(val) == "None" and not self.code_obj.co_name.startswith("<")
+        self.stack.append(_YieldExpr("yield" if bare else f"yield {val}"))
+
+    def _op_yield_from(self, _instr: BytecodeInstruction):
+        iterable = self._pop()
+        self.stack.append(_YieldExpr(f"yield from {iterable}"))
 
     def _op_delete_attr(self, instr: BytecodeInstruction):
         obj = self._pop()

@@ -67,6 +67,22 @@ class _BoolExpr(str):
 
 
 # ---------------------------------------------------------------------------
+class _YieldExpr(str):
+    """A ``yield`` or ``yield from`` expression, as source text in parentheses; :attr:`bare` is the text without them.
+
+    The value of a `yield` is what the caller sends in; the value of a `yield from` is the delegated iterator's return
+    value. Written as a statement (`yield x`) or as the whole right-hand side of an assignment (`v = yield x`) the
+    parentheses are not needed; anywhere else they are.
+    """
+
+    bare: str
+
+    def __new__(cls, bare: str) -> "_YieldExpr":
+        self = super().__new__(cls, f"({bare})")
+        self.bare = bare
+        return self
+
+
 class StackNULL:
     """Internal sentinel pushed onto the stack to represent Python 3.11+ NULL sentinels in method calls."""
     def __init__(self, is_method: bool = False) -> None:
