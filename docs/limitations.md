@@ -40,7 +40,6 @@ The code runs the same way, but it does not read like the original:
 | A short `if/elif/else` or conditional expression at the end of a function (3.12+) | separate `if` blocks, each ending in `return` | the compiler duplicates the tail |
 | `if` at the end of a loop body | `if not cond: continue` followed by the body | the compiler's layout |
 | Dict and list displays with `**` / `*` | `{**{**{}, **b}, **{'x': 1}}`, `[*list(a), *rest]` | how the bytecode builds them |
-| A tail the compiler copies into an `except` handler (3.12+) | the same statements twice, the second unreachable | [#148](https://github.com/sahebbiswas/pycrefine/issues/148) |
 
 ## Never recovered
 

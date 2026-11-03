@@ -4465,6 +4465,11 @@ class DecompilerGeneric(DecompilerBase):
                     and ins.offset not in self.prescan.finally_body_suppress
                     and ins.offset not in self.prescan.wrapper_body_suppress
                 ]
+                if merge_off < push_off and merge_off in self.prescan.except_only_merge_offsets:
+                    kept = self._without_copied_tail(handler_instrs, merge_off)
+                    self.prescan.handler_section_suppress.update(
+                        ins.offset for ins in handler_instrs if ins not in kept)
+                    handler_instrs = kept
                 for ins in handler_instrs:
                     self.prescan.handler_section_suppress.add(ins.offset)
                     self.prescan.finally_body_suppress.discard(ins.offset)  # don't double-suppress
@@ -4878,6 +4883,48 @@ class DecompilerGeneric(DecompilerBase):
             end -= 1
         after = tail[end].offset if end < len(tail) else handler
         return tail[k].offset, after
+
+    def _without_copied_tail(self, handler_instrs: List[BytecodeInstruction], merge: int) -> List[BytecodeInstruction]:
+        """
+        3.12+ copies a short tail (`return len(log)`) to the end of an except clause, after its `POP_EXCEPT`,
+        as well as writing it once after the try. The clause falls through to the tail in the source, so the
+        copy is dropped when it is the same straight-line code, up to the `return`, as the one after the try.
+        """
+        if self.target_version < (3, 12):
+            return handler_instrs
+        instrs = self.instructions
+        start = next((n for n, ins in enumerate(instrs) if ins.offset == merge), None)
+        if start is None:
+            return handler_instrs
+
+        def run_from(sequence: List[BytecodeInstruction], first: int) -> Optional[List[BytecodeInstruction]]:
+            """The instructions from *first* up to the first return, or None if a jump or a raise comes first."""
+            run = []
+            for ins in sequence[first:]:
+                if ins.opname in ("NOP", "CACHE"):
+                    continue
+                if "JUMP" in ins.opname or ins.opname in ("RERAISE", "RAISE_VARARGS", "PUSH_EXC_INFO", "FOR_ITER"):
+                    return None
+                run.append(ins)
+                if ins.opname in ("RETURN_VALUE", "RETURN_CONST"):
+                    return run
+            return None
+
+        def signature(run: List[BytecodeInstruction]) -> Tuple[Tuple[str, Any], ...]:
+            return tuple((ins.opname, ins.argval) for ins in run)
+
+        normal = run_from(instrs, start)
+        if normal is None or len(normal) < 2:
+            return handler_instrs
+        wanted = signature(normal)
+        for at, ins in enumerate(handler_instrs):
+            if ins.opname != "POP_EXCEPT":
+                continue
+            copy = run_from(handler_instrs, at + 1)
+            if copy is not None and signature(copy) == wanted:
+                gone = {c.offset for c in copy}
+                return [x for x in handler_instrs if x.offset not in gone]
+        return handler_instrs
 
     def _else_is_loop_tail(self, region: Tuple[int, int], body_end: int, handler: int) -> bool:
         """
