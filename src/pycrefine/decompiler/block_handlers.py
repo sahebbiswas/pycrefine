@@ -167,15 +167,21 @@ class _Rewriter:  # pylint: disable=too-many-instance-attributes,too-few-public-
         self.by_offset = {ins.offset: i for i, ins in enumerate(instructions)}
         setups = {self.by_offset[ins.argval] for ins in instructions
                   if ins.opname in ("SETUP_FINALLY", "SETUP_WITH") and ins.argval in self.by_offset}
-        # a handler is entered from the `try`; the cleanup of `except ... as name` starts with LOAD_CONST None
-        self.handlers = {h for h in setups
-                         if not (instructions[h].opname == "LOAD_CONST" and instructions[h].argval is None)}
+        # a handler is entered from the `try`; the cleanup of `except ... as name` is
+        # `LOAD_CONST None; STORE_x name; DELETE_x name` (a `finally` body may also start with a None load)
+        self.handlers = {h for h in setups if not self._is_cleanup_start(h)}
         self.cleanups = setups - self.handlers
         self.next_clause = {self.by_offset[ins.argval] for ins in instructions
                             if ins.opname == "JUMP_IF_NOT_EXC_MATCH" and ins.argval in self.by_offset}
         self.copies = _copied_exits(instructions)
         self.out: List[Tuple[BytecodeInstruction, Optional[int]]] = []   # (new instruction, old index)
         self.first_new: Dict[int, int] = {}     # old index -> position in out of its first replacement
+
+    def _is_cleanup_start(self, h: int) -> bool:
+        window = self.instructions[h:h + 3]
+        return (len(window) == 3 and window[0].opname == "LOAD_CONST" and window[0].argval is None
+                and window[1].opname.startswith("STORE_") and window[2].opname.startswith("DELETE_")
+                and window[1].opname[6:] == window[2].opname[7:])
 
     def run(self) -> None:
         n = len(self.instructions)

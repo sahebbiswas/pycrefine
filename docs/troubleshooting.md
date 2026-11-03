@@ -178,7 +178,7 @@ python -m py_compile out.py && echo compiles
 | `_item`, `_res`, `_exc_match`, `_exc_info` | internal names from loops, comprehensions or `except` handling that were not folded back |
 | `('_with_info', ...)`, `('func', ...)` | internal placeholders that leaked into the output |
 | `# <genexpr/lambda — not reconstructable>` | a generator expression or `lambda` that could not be rebuilt |
-| `yield None` in a function that never yielded | `async def` or `yield from` (not supported yet) |
+| `yield None` in a function that never yielded | `async def` (not supported yet) |
 | `if a < b:` followed by a stray `a < b` line | a chained comparison used as a value ([#154](https://github.com/sahebbiswas/pycrefine/issues/154)) |
 | `__annotations__['x'] = int` in a class | a variable annotation; the output raises `NameError` when it runs ([#173](https://github.com/sahebbiswas/pycrefine/issues/173)) |
 

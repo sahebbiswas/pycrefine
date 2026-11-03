@@ -80,7 +80,7 @@ def main() -> None:
     parser.add_argument(
         "--beautification-level",
         choices=['none', 'core', 'aggressive'], default='core',
-        help="Level of code beautification to apply. 'none' does no beautification. 'core' collapses else-if to elif. 'aggressive' is a stub for future use."
+        help="Level of code beautification to apply. 'none' does no beautification. 'core' collapses else-if to elif. 'aggressive' also writes dict displays of two or more entries one entry per line, except dict displays inside f-strings and dict displays that already span several lines."
     )
 
     parser.add_argument(

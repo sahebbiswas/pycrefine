@@ -165,5 +165,16 @@ class TestInALoop(BehaviourCase):
                   "            log.append('z')\n        log.append(i)\n    return log\n", ("f", (4,)))
 
 
+class TestFinallyStartingWithNone(BehaviourCase):
+
+    def test_finally_assigning_none_keeps_its_try(self):
+        source = ("class Box:\n    def run(self, log):\n        self.conn = 1\n        try:\n            log.append('body')\n"
+                  "        finally:\n            self.conn = None\n        return self.conn\n")
+        out = decompile(source)
+        self.assertIn("try:", out)
+        self.assertIn("finally:", out)
+        self.same(source + "def f(log):\n    return Box().run(log), list(log)\n", ("f", ()))
+
+
 if __name__ == "__main__":
     unittest.main()
