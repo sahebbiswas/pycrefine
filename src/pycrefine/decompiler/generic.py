@@ -3451,6 +3451,8 @@ class DecompilerGeneric(DecompilerBase):
             # the header the with statement recorded (see _op_before_with) must not outlive it:
             # it would stand for the enclosing except clause's
             self.emit.except_header_indents.pop()
+            if self.emit.with_header_slots and self.emit.with_header_slots[-1] >= len(self.emit.except_header_indents):
+                self.emit.with_header_slots.pop()
 
     def _emit_after_with(self, region: List[int]) -> None:
         """Emit the code only a `with`'s exit handler reaches, right after the statement."""
@@ -5056,6 +5058,14 @@ class DecompilerGeneric(DecompilerBase):
             starts = {limit} | {self._get_jump_target(x) for x in instrs if "JUMP" in x.opname
                                 and any(e.start <= x.offset < e.end for e in body_ranges)}
             normal_at = {self._skip_nops(by_offset[t]) for t in starts if t in by_offset and t < cold}
+            # (3.12 lays a handler out right after code that never falls through, such as an inner `with` whose body
+            # raises, so the first handler is not always the end of the ordinary code. A forward jump that the
+            # with's own protected ranges contain, and that lands on an exit call, is the normal exit all the same)
+            late = {self._skip_nops(by_offset[t]) for x in instrs if "JUMP_FORWARD" in x.opname
+                    and any(e.start <= x.offset < e.end for e in ranges)
+                    for t in [self._get_jump_target(x)] if isinstance(t, int) and t in by_offset
+                    and x.offset < t < handler and self._with_exit_call_at(self._skip_nops(by_offset[t])) is not None}
+            normal_at |= late
             # An exit call belongs to this with when one of its protected ranges ends
             # right there (only NOPs in between); a later or nested with's exit calls
             # follow that with's own ranges instead.
@@ -5080,7 +5090,7 @@ class DecompilerGeneric(DecompilerBase):
                 exit_off = instrs[seq_end - 1].offset
                 if self.prescan.with_exit_owner.get(exit_off, -1) < body_start:
                     self.prescan.with_exit_owner[exit_off] = body_start
-                if k in normal_at and instrs[k].offset < cold:
+                if k in normal_at and (instrs[k].offset < cold or k in late):
                     last = (k, seq_end)
                 k = seq_end
             if last is None:
@@ -6354,6 +6364,8 @@ class DecompilerGeneric(DecompilerBase):
         # jump that will be handled by our special logic.
         if opname == "POP_EXCEPT" and self._is_exception_cleanup():
             return  # `COPY 3; POP_EXCEPT; RERAISE 1`: the unwinding path, not the end of a clause
+        if opname == "POP_EXCEPT" and self._is_cleanup_under_with():
+            return      # (3.12+: the unwinding path of a clause inside a `with` must not close the `with`'s header)
         if opname == "POP_EXCEPT" and self.emit.except_header_indents:
             next_is_handler_jump = False
             ahead = self.pc
@@ -6378,6 +6390,20 @@ class DecompilerGeneric(DecompilerBase):
             if not next_is_handler_jump and not self._defer_close_to_handler_return():
                 self._close_except_clause()
         pass  # cleanup suppression (_exc_cleanup_name) stays active until DELETE_NAME fires
+
+    def _is_cleanup_under_with(self) -> bool:
+        """
+        True when the POP_EXCEPT being handled is the unwinding path of a clause (`COPY 3; POP_EXCEPT; RERAISE 1`, 3.12+)
+        and the innermost recorded header is the one a `with` made: the clause's own header is gone, so closing
+        one more would end the `with`.
+        """
+        slots = self.emit.with_header_slots
+        while slots and slots[-1] >= len(self.emit.except_header_indents):
+            slots.pop()
+        k = self.pc - 1
+        instrs = self.instructions
+        return (self.target_version >= (3, 12) and bool(slots) and slots[-1] == len(self.emit.except_header_indents) - 1
+                and 0 < k < len(instrs) - 1 and instrs[k - 1].opname == "COPY" and instrs[k + 1].opname == "RERAISE")
 
     def _is_exception_cleanup(self) -> bool:
         """True when the POP_EXCEPT being handled is that of a `COPY 3; POP_EXCEPT; RERAISE 1` clean-up handler (3.11)."""
@@ -6713,6 +6739,7 @@ class DecompilerGeneric(DecompilerBase):
             self.blocks.append((max(with_exc_offsets), "with"))
         # Also record the indent level so finally: de-indents correctly
         self.emit.except_header_indents.append(self.indent_level - 1)
+        self.emit.with_header_slots.append(len(self.emit.except_header_indents) - 1)
 
     def _op_with_except_start(self, instr: BytecodeInstruction):
         opname = instr.opname

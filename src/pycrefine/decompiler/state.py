@@ -105,6 +105,7 @@ class PrescanState:  # pylint: disable=too-many-instance-attributes
 class EmissionState:  # pylint: disable=too-many-instance-attributes
     except_header_indents: List[int] = field(default_factory=list)  # indent levels of the except headers being emitted
     except_end_offsets: List[int] = field(default_factory=list)     # end offsets of exception regions
+    with_header_slots: List[int] = field(default_factory=list)      # positions in except_header_indents that a `with` recorded
     exc_as_store_offset: int = -1                                   # the `as e` STORE to skip
     exc_bound_names: Set[str] = field(default_factory=set)          # every name bound by `except ... as`
     deferred_finally_lines: Dict[int, List[str]] = field(default_factory=dict)  # merge offset -> rendered finally body
