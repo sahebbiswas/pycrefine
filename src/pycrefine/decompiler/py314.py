@@ -198,6 +198,9 @@ class Decompiler314(Decompiler311Plus):
                 self.stack.append(val)
             # Fall through to super()
 
+        elif opname == "POP_TOP" and self.stack and isinstance(self.stack[-1], tuple) and self.stack[-1][0] == "_with_info":
+            return      # (the exception a clause matched, which the model never pushed: not the `with`'s own entry)
+
         elif opname == "STORE_FAST_STORE_FAST":
             names = instr.argval if isinstance(instr.argval, (tuple, list)) else ()
             waiting = self.stack[-len(names):] if names else []
