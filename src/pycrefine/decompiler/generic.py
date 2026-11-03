@@ -7861,6 +7861,19 @@ class DecompilerGeneric(DecompilerBase):
         self.stack.append(_FString(f"f{quote}{res}{quote}", res))
         # ── jumps / control flow ───────────────────────────────────────
 
+    def _is_value_jump_to_return(self, instr: BytecodeInstruction, target) -> bool:
+        """
+        True for a forward jump that carries a value to a `RETURN_VALUE`: the arm of a conditional expression
+        whose other arm returns its own copy of that instruction (`return ((x) if g else y) if f else z` on 3.9).
+        """
+        if instr.opname not in ("JUMP_FORWARD", "JUMP_ABSOLUTE") or not isinstance(target, int) \
+                or target <= instr.offset or len(self.stack) != 1:
+            return False
+        if isinstance(self.stack[-1], tuple):
+            return False                        # a marker (loop iterator, `with` state), not a value
+        landing = next((i for i in self.instructions if i.offset == target), None)
+        return landing is not None and landing.opname == "RETURN_VALUE"
+
     def _op_jump(self, instr: BytecodeInstruction):
         """
         Handle jump opcodes and reconstruct high-level control flow constructs (break, continue, else, while),
@@ -7892,6 +7905,10 @@ class DecompilerGeneric(DecompilerBase):
 
         if instr.offset in self.prescan.exc_handler_break_offsets:
             self._append_reconstructed("break")   # (`break` in an except clause of a `while`)
+            return
+
+        if self._is_value_jump_to_return(instr, jump_target):
+            self._op_return_value(instr)    # the value the jump carries is returned where it lands
             return
 
         # Detect `break`: forward jump that lands at the exact end of a while/for loop.
@@ -8659,6 +8676,32 @@ class DecompilerGeneric(DecompilerBase):
 
             self.blocks.append((if_block_end, "if"))
 
+    def _unthread_return(self, by_offset: Dict[int, int], after: int, target: int) -> int:
+        """
+        Where a value-context `and`/`or` whose jump lands on a `RETURN_VALUE` really joins. CPython threads a jump
+        to `RETURN_VALUE` onto a later identical return, skipping the right operand's own return: the operator
+        joins at the first return its right operand falls into, or at the jump that carries its value to a later
+        return (the arm of a nested conditional expression).
+        """
+        instrs = self.instructions
+        k = by_offset.get(target)
+        if k is None or instrs[k].opname != "RETURN_VALUE":
+            return target
+        between = [x for x in instrs if after < x.offset < target]
+        first = next((x.offset for x in between if x.opname == "RETURN_VALUE"), None)
+        if first is None:
+            first = next((x.offset for x in between if x.opname in ("JUMP_FORWARD", "JUMP_ABSOLUTE")
+                          and self._jumps_to_later_return(x, by_offset, target)), None)
+        return target if first is None else first
+
+    def _jumps_to_later_return(self, instr: BytecodeInstruction, by_offset: Dict[int, int], target: int) -> bool:
+        """Whether a jump lands on a `RETURN_VALUE` beyond `target` (an offset the table does not know is skipped)."""
+        dest = self._get_jump_target(instr)
+        if not isinstance(dest, int) or dest <= target:
+            return False
+        index = by_offset.get(dest)
+        return index is not None and self.instructions[index].opname == "RETURN_VALUE"
+
     def _prescan_value_boolops(self) -> None:
         """
         Find `and`/`or` used as a value (`x = a or b`, `return p and q`, call arguments).
@@ -8688,21 +8731,11 @@ class DecompilerGeneric(DecompilerBase):
                 return True
             return instrs[k].opname == "SWAP" and k + 1 < len(instrs) and instrs[k + 1].opname == "POP_TOP"
 
-        def unthread_return(after, target):
-            # CPython 3.9 threads a jump to `RETURN_VALUE` onto a later identical return,
-            # skipping the right operand's own return: the operator really joins at the
-            # first return its right operand falls into.
-            k = by_offset.get(target)
-            if k is None or instrs[k].opname != "RETURN_VALUE":
-                return target
-            first = next((x.offset for x in instrs if after < x.offset < target and x.opname == "RETURN_VALUE"), None)
-            return target if first is None else first
-
         for k, ins in enumerate(instrs):
             if ins.opname in ("JUMP_IF_FALSE_OR_POP", "JUMP_IF_TRUE_OR_POP"):
                 target = self._get_jump_target(ins)
                 if isinstance(target, int):
-                    target = unthread_return(ins.offset, target)
+                    target = self._unthread_return(by_offset, ins.offset, target)
                 if isinstance(target, int) and target > ins.offset and not is_chain_cleanup(target):
                     op = "and" if ins.opname == "JUMP_IF_FALSE_OR_POP" else "or"
                     self.prescan.boolop_or_pop[ins.offset] = (op, target)
@@ -8718,6 +8751,8 @@ class DecompilerGeneric(DecompilerBase):
                 if m >= len(instrs) or instrs[m].opname != "POP_TOP":
                     continue
                 target = self._get_jump_target(instrs[j])
+                if isinstance(target, int):
+                    target = self._unthread_return(by_offset, instrs[m].offset, target)
                 if not isinstance(target, int) or target <= ins.offset or is_chain_cleanup(target):
                     continue
                 op = "and" if instrs[j].opname == "POP_JUMP_IF_FALSE" else "or"
