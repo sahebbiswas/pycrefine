@@ -368,6 +368,8 @@ def _move_else_clauses(instructions, out, first_new, by_offset):
         withs = sum(e[0].opname == "BEFORE_WITH" for e in block)
         if sum(e[0].opname == "PRECALL" and e[0].arg == 2 for e in block) > withs:
             continue        # the exit call of a `with` that opened outside the block, not an `else`
+        if any(isinstance(_jump_target(e[0]), int) and _jump_target(e[0]) < q_ins.argval for e in block):
+            continue        # it ends in the test that closes a loop: the rest of the loop body, not an `else`
         ends_path = block and block[-1][0].opname in ("JUMP_FORWARD", "RETURN_VALUE", "RERAISE", "RAISE_VARARGS")
         jump = [] if ends_path else [[replace(q_ins, argval=join, argrepr=""), None, None]]
         removed[q_key] = q

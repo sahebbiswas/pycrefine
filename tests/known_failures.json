@@ -21,14 +21,6 @@
         "tests/test_try_in_clause.py::TestTryInClause::test_the_inner_clause_does_not_match",
         "tests/test_try_in_clause.py::TestTryInClause::test_the_reproduction"
       ]
-    },
-    {
-      "issue": 305,
-      "reason": "a while loop whose try body ends in break gains an else clause and a second break",
-      "tests": [
-        "tests/test_except_break_while.py::TestBreakInExceptInWhile::test_a_for_loop_inside_the_while_keeps_its_own_break",
-        "tests/test_except_break_while.py::TestBreakInExceptInWhile::test_code_after_the_loop"
-      ]
     }
   ]
 }

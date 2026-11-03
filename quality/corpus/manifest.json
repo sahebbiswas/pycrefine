@@ -956,16 +956,8 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "partial",
-      "limitations": [
-        {
-          "issue": 305,
-          "versions": [
-            "3.10"
-          ],
-          "summary": "3.10: a while loop whose try body ends in break gains an else clause and a second break"
-        }
-      ]
+      "support": "supported",
+      "limitations": []
     },
     {
       "id": "generated/cf_while_try_continue",
