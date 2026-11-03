@@ -4339,6 +4339,8 @@ class DecompilerGeneric(DecompilerBase):
                 if handler in exit_only or handler in outer_handlers.values() or handler in outer_inner.values():
                     continue
                 region = self._try_else_region(end, handler, _body_start_by_target.get(handler, 0))
+                if region is not None and self._else_is_loop_tail(region, end, handler):
+                    region = None
                 if region is not None:
                     self.prescan.try_else[region[0]] = region[1]
                     _body_end_by_target[handler] = region[1]
@@ -4876,6 +4878,17 @@ class DecompilerGeneric(DecompilerBase):
             end -= 1
         after = tail[end].offset if end < len(tail) else handler
         return tail[k].offset, after
+
+    def _else_is_loop_tail(self, region: Tuple[int, int], body_end: int, handler: int) -> bool:
+        """
+        True if the `else` clause found for a try is really the rest of a loop body: every clause leaves,
+        so the clause and the code after the try run the same way, and the clause jumps back to
+        the loop or out of it. It is written after the try then, as it is in the source of 3.9.
+        """
+        if not self._handlers_all_leave(handler, body_end):
+            return False
+        start, end = region
+        return any("JUMP" in ins.opname and start <= ins.offset < end for ins in self.instructions)
 
     def _defer_try_else(self, instr: BytecodeInstruction) -> None:
         """
