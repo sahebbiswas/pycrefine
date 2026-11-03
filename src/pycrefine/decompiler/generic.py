@@ -4318,6 +4318,11 @@ class DecompilerGeneric(DecompilerBase):
             and ins.offset not in self.prescan.suppress_push_exc_offsets
         }
 
+        # 3.12+ lays a try that is inside an except clause out in the middle of the clause: its handler follows its
+        # body, within the outer handler's code. That handler belongs to the clause, not to the outer try.
+        self.prescan.handlers_in_clauses = self._handlers_in_clauses(_exc_entries, real_push_exc)
+        real_push_exc -= self.prescan.handlers_in_clauses
+
         # A `continue`/`break` in a try body is a jump the exception table leaves
         # out, so one try body can be covered by several entries that share a
         # handler. The try body ends where the last of them ends.
@@ -4453,7 +4458,8 @@ class DecompilerGeneric(DecompilerBase):
                     # (the exit handler of a `with` in the clause is part of it: the clause goes on after it)
                     if ins.offset > push_off and ins.opname == "PUSH_EXC_INFO" and not (
                             ins.offset in self.prescan.wrapper_body_suppress and k + 1 < n
-                            and instrs[k + 1].opname == "WITH_EXCEPT_START"):
+                            and instrs[k + 1].opname == "WITH_EXCEPT_START") \
+                            and ins.offset not in self.prescan.handlers_in_clauses:
                         handler_end = ins.offset
                         break
                 # The code where the try's paths rejoin is not part of its handlers.
@@ -4885,6 +4891,38 @@ class DecompilerGeneric(DecompilerBase):
             end -= 1
         after = tail[end].offset if end < len(tail) else handler
         return tail[k].offset, after
+
+    def _mark_nested_tries(self, sub: Any, handler_instrs: list) -> None:
+        """Tell the sub-decompiler of an except clause where the try statements written inside it start (3.12+)."""
+        if not self.prescan.handlers_in_clauses:
+            return
+        inside = {ins.offset for ins in handler_instrs}
+        for e in self._exception_entries() or []:
+            if e.target in self.prescan.handlers_in_clauses and e.target in inside and not e.lasti:
+                nop = e.start - 2
+                if nop in inside and sub.prescan.nop_to_push_exc.get(nop, e.target) == e.target:
+                    sub.prescan.try_nop_offsets.add(nop)
+                    sub.prescan.nop_to_push_exc[nop] = e.target
+
+    def _handlers_in_clauses(self, entries: list, real_push_exc: Set[int]) -> Set[int]:
+        """
+        The handlers (3.12+) of a try statement that is written inside an except clause: the clause's code runs
+        on into the inner try's body and then its handler, so the handler's protected range starts after the
+        outer handler and before the inner one.
+        """
+        if self.target_version < (3, 12):
+            return set()
+        nested: Set[int] = set()
+        for handler in sorted(real_push_exc):
+            outer = max((o for o in real_push_exc if o < handler and o not in nested), default=None)
+            if outer is None:
+                continue
+            # (a body inside a clause runs with the caught exception on the stack: depth 1, as against 0 for
+            # the ranges of a try that only wraps the code of another try's handler)
+            ranges = [e for e in entries if e.target == handler and not e.lasti]
+            if ranges and all(outer < e.start < handler and e.depth >= 1 for e in ranges):
+                nested.add(handler)
+        return nested
 
     def _without_copied_tail(self, handler_instrs: List[BytecodeInstruction], merge: int) -> List[BytecodeInstruction]:
         """
@@ -5706,6 +5744,7 @@ class DecompilerGeneric(DecompilerBase):
         # Install the same prescan results so sentinel detection works
         sub.prescan = self.prescan.for_handler_section()
         sub.emit = self.emit.for_handler_section()
+        self._mark_nested_tries(sub, handler_instrs)
         sub._enclosing_locals = self._enclosing_locals
         # Install only the handler instructions
         sub.instructions = handler_instrs

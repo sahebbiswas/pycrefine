@@ -68,6 +68,7 @@ class PrescanState:  # pylint: disable=too-many-instance-attributes
     exc_handler_jump_offsets: Set[int] = field(default_factory=set)  # jumps that leave a handler
     exc_handler_continue_offsets: Set[int] = field(default_factory=set)  # ... and those that are a `continue`
     exc_handler_break_offsets: Set[int] = field(default_factory=set)  # ... and those that are a `break` out of a `while`
+    handlers_in_clauses: Set[int] = field(default_factory=set)      # handlers of a try written inside an except clause (3.12+)
     exc_cleanup_offsets: Set[int] = field(default_factory=set)      # compiler-generated `e = None; del e`
     header_indent_by_cleanup: Dict[int, int] = field(default_factory=dict)
     handler_return_close: Set[int] = field(default_factory=set)     # returns that end an except clause
@@ -92,6 +93,7 @@ class PrescanState:  # pylint: disable=too-many-instance-attributes
         state.exc_handler_jump_offsets = self.exc_handler_jump_offsets
         state.exc_handler_continue_offsets = self.exc_handler_continue_offsets
         state.exc_handler_break_offsets = self.exc_handler_break_offsets
+        state.handlers_in_clauses = self.handlers_in_clauses
         state.while_header_targets = self.while_header_targets
         state.while_body_offsets = self.while_body_offsets
         state.dup_guard_exits = self.dup_guard_exits

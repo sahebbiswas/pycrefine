@@ -16,7 +16,10 @@
       "issue": 301,
       "reason": "the code after a try that every path copies is written inside the last handler",
       "tests": [
-        "tests/test_integration.py::TestVerifyScenesBugs::test_nested_empty_except_pass_api_12"
+        "tests/test_integration.py::TestVerifyScenesBugs::test_nested_empty_except_pass_api_12",
+        "tests/test_try_in_clause.py::TestTryInClause::test_a_statement_before_the_inner_try",
+        "tests/test_try_in_clause.py::TestTryInClause::test_the_inner_clause_does_not_match",
+        "tests/test_try_in_clause.py::TestTryInClause::test_the_reproduction"
       ]
     },
     {
