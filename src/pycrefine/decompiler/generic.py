@@ -5340,7 +5340,10 @@ class DecompilerGeneric(DecompilerBase):
             return False
         if any(ins.opname.startswith("JUMP_FORWARD") or ins.opname == "JUMP_ABSOLUTE" for ins in instrs[start:reraise]):
             return False
-        end = instrs[reraise - 1]
+        last = reraise - 1
+        if last >= start + 3 and self._is_name_cleanup_reraise(last):
+            last -= 4       # (the clean-up that `except E as e` adds, for an exception raised in the clause)
+        end = instrs[last]
         if end.opname == "RETURN_CONST":
             if end.argval is not None:
                 return True
@@ -5348,6 +5351,13 @@ class DecompilerGeneric(DecompilerBase):
             # body does not fall into that end, so the clause cannot be a copy of it)
             return body_end is not None and not self._falls_into_function_end(body_end)
         return end.opname in ("RETURN_VALUE", "JUMP_BACKWARD")
+
+    def _is_name_cleanup_reraise(self, k: int) -> bool:
+        """True if the instructions ending at index *k* are `e = None; del e; raise` (the clean-up of `except E as e`)."""
+        instrs = self.instructions
+        return (instrs[k].opname == "RERAISE" and instrs[k].arg == 1
+                and instrs[k - 1].opname.startswith("DELETE_") and instrs[k - 2].opname.startswith("STORE_")
+                and instrs[k - 3].opname in ("LOAD_CONST", "LOAD_SMALL_INT") and instrs[k - 3].argval is None)
 
     def _falls_into_function_end(self, offset: int) -> bool:
         """True if the code at *offset* is the implicit `return None` that ends a function."""
