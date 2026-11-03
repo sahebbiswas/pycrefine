@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "python_version": "3.12",
-  "python_patch": "3.12.13",
+  "python_patch": "3.12.3",
   "diagnostics_recorded": true,
   "entries": {
     "corpus/comprehensive.py": {
@@ -92,13 +92,13 @@
     },
     "corpus/verify_scenes.py": {
       "kind": "source",
-      "status": "syntax_error",
+      "status": "compiles",
       "units": {
         "Assign: my_map = {": "compiles",
         "def api_1": "compiles",
         "def api_10": "compiles",
         "def api_11": "compiles",
-        "def api_12": "syntax_error",
+        "def api_12": "compiles",
         "def api_20": "compiles",
         "def api_21": "compiles",
         "def api_22": "compiles",
@@ -110,7 +110,7 @@
         "def api_30": "compiles",
         "def api_31": "compiles",
         "def api_32": "compiles",
-        "def api_4": "syntax_error",
+        "def api_4": "compiles",
         "def api_40": "compiles",
         "def api_41": "compiles",
         "def api_5": "compiles",
