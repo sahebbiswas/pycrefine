@@ -590,7 +590,7 @@ class Decompiler39(DecompilerGeneric):
                 left = self.stack.pop()
                 op = str(instr.argval)
                 # No outer parens: tests expect 'if x > 0:' not 'if (x > 0):'
-                self.stack.append(f"{left} {op} {right}")
+                self.stack.append(f"{self._comparand(left)} {op} {self._comparand(right)}")
 
         # POP_BLOCK: marks the clean exit from a try body in Python 3.9.
         # Close the try_body block and record the indent level for except headers.

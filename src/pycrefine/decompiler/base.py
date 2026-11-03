@@ -114,6 +114,22 @@ class DecompilerBase:
                 return f"({text})"
         return text
 
+    def _comparand(self, value: Any) -> str:
+        """
+        Text of *value* as an operand of a comparison, ``is`` or ``in``: a conditional expression, a lambda or an
+        assignment expression binds more loosely, so ``(a if c else b) > 0`` would otherwise come out as ``a if c else b > 0``.
+        """
+        text = str(value)
+        if " if " not in text and not text.startswith("lambda") and ":=" not in text:
+            return text
+        try:
+            node = ast.parse(text.strip(), mode="eval").body
+        except SyntaxError:
+            return text
+        if isinstance(node, (ast.IfExp, ast.Lambda, ast.NamedExpr)) and node.col_offset == 0:
+            return f"({text})"
+        return text
+
     def _disassemble(self):
         """Convert code object bytecode into a list of BytecodeInstruction."""
         for instr in dis.get_instructions(self.code_obj):

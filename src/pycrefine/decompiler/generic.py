@@ -1538,6 +1538,7 @@ class DecompilerGeneric(DecompilerBase):
             "UNARY_NEGATIVE", "UNARY_POSITIVE", "UNARY_INVERT", "UNARY_NOT",
             "CALL_INTRINSIC_1", "TO_BOOL",
             "FORMAT_VALUE", "FORMAT_SIMPLE", "FORMAT_WITH_SPEC", "CONVERT_VALUE", "CALL_FUNCTION_EX", "CALL_KW",
+            "COMPARE_OP", "IS_OP", "CONTAINS_OP", "BINARY_SUBSCR",
         ))
         for idx, ins in enumerate(self.instructions):
             if not self._is_compound_cjump(ins.opname):
@@ -2907,8 +2908,8 @@ class DecompilerGeneric(DecompilerBase):
 
     def _loads_then_call(self, index: int) -> bool:
         """
-        True if the instructions from *index* are plain loads (the arguments) and then the call that
-        uses the value before them as its callee: the join of `(f if c else g)(1, 2)`.
+        True if the instructions from *index* are plain loads (the arguments, or the other operand) and then the
+        call or operator that uses the value before them: the join of `(f if c else g)(1, 2)` or `(a if c else b) > 0`.
         """
         instrs = self.instructions
         loads = 0
@@ -2918,9 +2919,10 @@ class DecompilerGeneric(DecompilerBase):
                                    and instrs[k].opname not in ("LOAD_ATTR", "LOAD_METHOD", "LOAD_BUILD_CLASS")):
             loads += 0 if instrs[k].opname in quiet else 1
             k += 1
-        return (k < len(instrs) and instrs[k].opname in ("CALL", "CALL_FUNCTION", "CALL_METHOD", "CALL_KW",
-                                                         "CALL_FUNCTION_KW")
-                and loads > 0 and (instrs[k].arg or 0) >= 0)
+        return (k < len(instrs) and loads > 0 and (instrs[k].arg or 0) >= 0
+                and (instrs[k].opname in ("CALL", "CALL_FUNCTION", "CALL_METHOD", "CALL_KW", "CALL_FUNCTION_KW",
+                                          "COMPARE_OP", "IS_OP", "CONTAINS_OP", "BINARY_SUBSCR")
+                     or (instrs[k].opname == "BINARY_OP" and instrs[k].arg is not None and int(instrs[k].arg) < 13)))
 
     def _eval_branch_with_sub(self, instrs: list) -> Optional[str]:
         """
@@ -7416,7 +7418,7 @@ class DecompilerGeneric(DecompilerBase):
             if str(left) == "__name__" and str(right) == "'__main__'" and op == "==":
                 self.stack.append('__name__ == "__main__"')
             else:
-                self.stack.append(f"{left} {op} {right}")
+                self.stack.append(f"{self._comparand(left)} {op} {self._comparand(right)}")
 
     def _op_contains(self, instr: BytecodeInstruction):
         opname = instr.opname
@@ -7424,7 +7426,7 @@ class DecompilerGeneric(DecompilerBase):
             container = self.stack.pop()
             item = self.stack.pop()
             op = "not in" if bool(instr.arg) else "in"
-            self.stack.append(f"{item} {op} {container}")
+            self.stack.append(f"{self._comparand(item)} {op} {self._comparand(container)}")
 
     def _op_is(self, instr: BytecodeInstruction):
         opname = instr.opname
@@ -7432,7 +7434,7 @@ class DecompilerGeneric(DecompilerBase):
             right = self.stack.pop()
             left = self.stack.pop()
             op = "is not" if bool(instr.arg) else "is"
-            self.stack.append(f"{left} {op} {right}")
+            self.stack.append(f"{self._comparand(left)} {op} {self._comparand(right)}")
 
     def _loop_return_tail(self) -> Optional[int]:
         """

@@ -24,7 +24,7 @@ These change what the code does, or produce code that does not compile:
 | Walrus (`:=`) inside a comprehension, or a comprehension variable captured by a `lambda` | 3.12+ | a broken explicit loop | [#99](https://github.com/sahebbiswas/pycrefine/issues/99) |
 | `try`/`except` around a `with` that always raises, inside another `with` | 3.12, 3.14 | the code after the outer `with` is misplaced | [#146](https://github.com/sahebbiswas/pycrefine/issues/146) |
 | `with` whose `try` has `except E as e: return ...`, inside a loop | 3.12, 3.13, 3.14 | the statement after the `with` is written inside it | [#298](https://github.com/sahebbiswas/pycrefine/issues/298) |
-| A conditional expression in a `while` condition | 3.12+ | a constant condition and empty `if`/`else` statements | [#292](https://github.com/sahebbiswas/pycrefine/issues/292) |
+| A conditional expression that is the whole condition of a `while` (`while (a if b else c):`), or one operand of `and`/`or` in it | all | the condition is rebuilt as nested `if` statements around the loop, so `b` is tested once instead of on every pass | [#292](https://github.com/sahebbiswas/pycrefine/issues/292) |
 | `try` nested at the very start of another `try` | 3.12, 3.14 | the outer `except` clauses attach to the inner `try` | [#169](https://github.com/sahebbiswas/pycrefine/issues/169) |
 | Some code in the test corpus | 3.12, 3.14 | output that does not parse | [#91](https://github.com/sahebbiswas/pycrefine/issues/91) |
 
