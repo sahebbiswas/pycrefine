@@ -343,6 +343,87 @@ def _unmask_multiline_strings(source: str, literals: List[str]) -> str:
     return source
 
 
+def _dict_lines(source: str, node: ast.Dict, indent: str) -> str:
+    """*node* written one entry per line, its entries indented one level below *indent* (nested displays too)."""
+    inner = indent + "    "
+    rows = []
+    for key, value in zip(node.keys, node.values):
+        value_text = _display_text(source, value, inner)
+        rows.append(f"{inner}**{value_text}," if key is None else f"{inner}{_display_text(source, key, inner)}: {value_text},")
+    return "{\n" + "\n".join(rows) + f"\n{indent}}}"
+
+
+def _display_text(source: str, node: ast.expr, indent: str) -> str:
+    """
+    The text of *node*: a dict display with several entries is split over lines, one nested in a
+    one-line list, tuple or call is split in place, anything else is kept. A walrus or yield keeps its
+    parentheses, which a dict entry needs.
+    """
+    if isinstance(node, ast.Dict) and len(node.keys) > 1 and node.lineno == node.end_lineno:
+        return _dict_lines(source, node, indent)
+    text = ast.get_source_segment(source, node) or ""
+    if node.lineno == node.end_lineno:
+        nested = _outer_one_line_dicts(node)
+        if nested:
+            raw = source.split("\n")[node.lineno - 1].encode("utf-8")[node.col_offset:node.end_col_offset]
+            for inner in sorted(nested, key=lambda n: n.col_offset, reverse=True):
+                lo, hi = inner.col_offset - node.col_offset, inner.end_col_offset - node.col_offset
+                raw = raw[:lo] + _dict_lines(source, inner, indent).encode("utf-8") + raw[hi:]
+            text = raw.decode("utf-8")
+    if isinstance(node, (ast.NamedExpr, ast.Yield, ast.YieldFrom)):
+        text = f"({text})"
+    return text
+
+
+def _outer_one_line_dicts(tree: ast.AST) -> List[ast.Dict]:
+    """The dict displays of several entries that stand on one line and are not inside another such display."""
+    found: List[ast.Dict] = []
+
+    def visit(node: ast.AST) -> None:
+        if isinstance(node, ast.JoinedStr):
+            return                   # (the positions inside an f-string are not reliable before 3.12)
+        if isinstance(node, ast.Dict) and len(node.keys) > 1 and node.lineno == node.end_lineno:
+            found.append(node)
+            return
+        for child in ast.iter_child_nodes(node):
+            visit(child)
+
+    visit(tree)
+    return found
+
+
+def split_dict_displays(source: str) -> str:
+    """
+    Write each dict display of several entries that stands on one line with one entry per line.
+
+    The source is parsed; if it does not parse, or no display qualifies, it is returned as it is. Only the
+    text of the display changes, and the result is checked to parse to the same tree.
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError, RecursionError):
+        return source
+    try:
+        nodes = _outer_one_line_dicts(tree)
+    except RecursionError:
+        return source
+    if not nodes:
+        return source
+    lines = source.split("\n")
+    for node in sorted(nodes, key=lambda n: (n.lineno, n.col_offset), reverse=True):
+        raw = lines[node.lineno - 1].encode("utf-8")
+        indent = re.match(r"[ \t]*", lines[node.lineno - 1]).group(0)
+        text = _dict_lines(source, node, indent).encode("utf-8")
+        lines[node.lineno - 1] = (raw[:node.col_offset] + text + raw[node.end_col_offset:]).decode("utf-8")
+    result = "\n".join(lines)
+    try:
+        if ast.dump(ast.parse(result)) != ast.dump(tree):
+            return source
+    except (SyntaxError, ValueError, RecursionError):
+        return source
+    return result
+
+
 def post_process_source(source: str, beautification_level: str = 'core') -> str:
     """Clean up decompiled output to be more Pythonic."""
     source, literals = _mask_multiline_strings(source)
@@ -557,8 +638,7 @@ def post_process_source(source: str, beautification_level: str = 'core') -> str:
     if beautification_level in ('core', 'aggressive'):
         text = flatten_elif(text)
 
+    result = _unmask_multiline_strings(text.strip('\r\n') + '\n', literals)
     if beautification_level == 'aggressive':
-        # Stub for aggressive beautification - to be implemented in future
-        pass
-
-    return _unmask_multiline_strings(text.strip('\r\n') + '\n', literals)
+        result = split_dict_displays(result)
+    return result

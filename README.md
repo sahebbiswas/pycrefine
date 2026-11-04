@@ -36,7 +36,7 @@ Bytecode from 3.10 onwards can only be decompiled by the Python version that wro
 ([#94](https://github.com/sahebbiswas/pycrefine/issues/94)). pycrefine tells you which
 version to use, and [Getting started](https://github.com/sahebbiswas/pycrefine/blob/main/docs/getting-started.md#run-under-the-python-that-wrote-the-file)
 shows how to run it under another Python in one command. Some constructs (`match`,
-`async`/`await`, `yield from`) are not reconstructed yet; see
+`async`/`await`) are not reconstructed yet; see
 [Limitations](https://github.com/sahebbiswas/pycrefine/blob/main/docs/limitations.md).
 
 ## Install

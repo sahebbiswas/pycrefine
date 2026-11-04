@@ -18,7 +18,8 @@ def _run(code, **names):
 
 def _shape(namespace, cls):
     body = namespace[cls]
-    return list(getattr(body, "__annotations__", {})), sorted(k for k in vars(body) if not k.startswith("__"))
+    attrs = sorted((k, v) for k, v in vars(body).items() if not k.startswith("__"))
+    return list(getattr(body, "__annotations__", {}).items()), attrs
 
 
 class TestClassAnnotationsFlow(unittest.TestCase):

@@ -29,7 +29,7 @@ same arguments.
 |---|---|
 | `core` (default) | Folds `else:` blocks that contain only an `if` into `elif`, writes repeated string constants as a multiplication (`'-' * 40` instead of forty dashes), and removes redundant parentheses in `print(...)` calls. |
 | `none` | Leaves the reconstructed code as it comes out of the decompiler. Use it to see the raw structure when an `elif` chain looks wrong. |
-| `aggressive` | Reserved for future clean-ups; today it behaves like `core`. |
+| `aggressive` | Everything `core` does, and writes each dict display of two or more entries that is on one line one entry per line. |
 
 For example, this `if/elif/else` compiled by Python 3.9:
 
