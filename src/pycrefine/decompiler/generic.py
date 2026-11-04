@@ -3764,8 +3764,8 @@ class DecompilerGeneric(DecompilerBase):
         instrs = self.instructions
         last = None
         for k, ins in enumerate(instrs):
-            if (self._is_backward_instruction(ins) and ins.offset not in self.prescan.inner_back_jumps
-                    and self._get_jump_target(ins) == body_start):
+            if ((self._is_backward_instruction(ins) or self._is_conditional_back_jump(ins))
+                    and ins.offset not in self.prescan.inner_back_jumps and self._get_jump_target(ins) == body_start):
                 last = k
         if last is None:
             return instrs[-1].offset + 2
