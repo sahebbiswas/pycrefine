@@ -102,6 +102,12 @@ class TestAsyncAwait(unittest.TestCase):
             "class P:\n    def __init__(self, v):\n        self.v = v\n    def __add__(self, o):\n        return val(self.v + o.v)\n"
             "async def f(a):\n    return await (P(a) + P(2))\n", (3,))
 
+    def test_await_of_a_call_shaped_like_an_async_with_exit(self):
+        """`await g(None, None, None)` is no exit of an `async with` (3.10 spells that exit with a three-argument call)."""
+        self.assert_same(
+            "async def g(a, b, c):\n    return (a, b, c)\n"
+            "async def f(a):\n    x = await g(None, None, None)\n    y = await g(a, a, a)\n    return x, y\n", (1,))
+
     def test_await_in_a_condition(self):
         for body in ("async def f(a):\n    if await val(a):\n        return 'yes'\n    return 'no'\n",
                      "async def f(a):\n    n = 0\n    while await val(n < a):\n        n += 1\n    return n\n"):

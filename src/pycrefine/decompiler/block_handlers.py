@@ -82,8 +82,18 @@ def _is_with_exit_call(instructions: List[BytecodeInstruction], i: int) -> bool:
 
 def _follows_with_exit_call(instructions: List[BytecodeInstruction], i: int) -> bool:
     """True if the instruction at *i* follows the result-discarding `POP_TOP` of a `with` exit call."""
-    return (i > 1 and instructions[i - 1].opname == "POP_TOP" and instructions[i - 2].opname == "CALL_FUNCTION"
-            and instructions[i - 2].arg == 3)
+    if i > 1 and instructions[i - 1].opname == "POP_TOP" and instructions[i - 2].opname == "CALL_FUNCTION":
+        return instructions[i - 2].arg == 3
+    # (an `async with` awaits the result: GET_AWAITABLE; LOAD_CONST None; YIELD_FROM)
+    return (i > 4 and instructions[i - 1].opname == "POP_TOP" and instructions[i - 5].opname == "CALL_FUNCTION"
+            and instructions[i - 5].arg == 3
+            and [x.opname for x in instructions[i - 4:i - 1]] == ["GET_AWAITABLE", "LOAD_CONST", "YIELD_FROM"])
+
+
+def _awaited_with_except_start(instructions: List[BytecodeInstruction], i: int) -> bool:
+    """True if the RERAISE at *i* follows the awaited `WITH_EXCEPT_START` of an `async with` handler."""
+    return [x.opname for x in instructions[max(i - 5, 0):i]] == [
+        "WITH_EXCEPT_START", "GET_AWAITABLE", "LOAD_CONST", "YIELD_FROM", "POP_JUMP_IF_TRUE"]
 
 
 def _is_with_suppress(instructions: List[BytecodeInstruction], i: int) -> bool:
@@ -104,7 +114,8 @@ def _starts_copy(instructions: List[BytecodeInstruction], s: int) -> bool:
     # the result of the exit call of a `with`, and the end of the handler that swallowed an error
     return (s > 1 and prev.opname == "POP_TOP"
             and (instructions[s - 2].opname == "POP_EXCEPT"
-                 or (instructions[s - 2].opname == "CALL_FUNCTION" and instructions[s - 2].arg == 3)))
+                 or (instructions[s - 2].opname == "CALL_FUNCTION" and instructions[s - 2].arg == 3))
+            ) or _follows_with_exit_call(instructions, s)
 
 
 def _straight_tail(instructions: List[BytecodeInstruction], s: int) -> Optional[int]:
@@ -166,7 +177,7 @@ class _Rewriter:  # pylint: disable=too-many-instance-attributes,too-few-public-
         self.instructions = instructions
         self.by_offset = {ins.offset: i for i, ins in enumerate(instructions)}
         setups = {self.by_offset[ins.argval] for ins in instructions
-                  if ins.opname in ("SETUP_FINALLY", "SETUP_WITH") and ins.argval in self.by_offset}
+                  if ins.opname in _SETUP_OPS and ins.argval in self.by_offset}
         # a handler is entered from the `try`; the cleanup of `except ... as name` is
         # `LOAD_CONST None; STORE_x name; DELETE_x name` (a `finally` body may also start with a None load)
         self.handlers = {h for h in setups if not self._is_cleanup_start(h)}
@@ -222,6 +233,9 @@ class _Rewriter:  # pylint: disable=too-many-instance-attributes,too-few-public-
         if name == "SETUP_WITH":
             self._emit(ins, i, opname="BEFORE_WITH", arg=None, argval=None, argrepr="")
             return i + 1
+        if name == "SETUP_ASYNC_WITH":
+            # (an `async with` has BEFORE_ASYNC_WITH and the awaited entry before it, and only a table entry in 3.11)
+            return i + 1
         return i + 1 if name == "POP_BLOCK" else None
 
     def _with(self, i: int, ins: BytecodeInstruction) -> Optional[int]:
@@ -239,7 +253,8 @@ class _Rewriter:  # pylint: disable=too-many-instance-attributes,too-few-public-
             # a `return` that leaves a `with`: the value goes under the exit function and back
             self._emit(ins, i, opname="SWAP", opcode=0, arg=2, argval=2, argrepr="")
             return i + 1
-        if name == "RERAISE" and i > 1 and instructions[i - 2].opname == "WITH_EXCEPT_START":
+        if name == "RERAISE" and i > 1 and (instructions[i - 2].opname == "WITH_EXCEPT_START"
+                                            or _awaited_with_except_start(instructions, i)):
             self._emit(ins, i, arg=2, argval=2)
             return i + 1
         if name == "POP_TOP" and _is_with_suppress(instructions, i):

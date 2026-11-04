@@ -48,7 +48,7 @@ def _outcome(function, args):
     return result, log
 
 
-@unittest.skipIf(sys.version_info < (3, 11), "async with is read from 3.11 on (3.10: #303)")
+@unittest.skipIf(sys.version_info < (3, 10), "async with is read from 3.10 on")
 class TestAsyncWith(unittest.TestCase):
 
     def assert_same(self, body, *calls, name="f"):
