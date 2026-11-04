@@ -1802,6 +1802,8 @@ class DecompilerGeneric(DecompilerBase):
             "BINARY_RSHIFT", "BINARY_POWER", "BINARY_MATRIX_MULTIPLY",
             "CALL_FUNCTION", "CALL", "PRECALL", "CALL_METHOD", "CALL_FUNCTION_KW",
             "RETURN_VALUE", "RETURN_CONST", "YIELD_VALUE", "AWAIT_EXPR", "YIELD_FROM_EXPR",
+            "BUILD_TUPLE", "BUILD_LIST", "BUILD_SET", "BUILD_MAP", "BUILD_CONST_KEY_MAP", "BUILD_STRING",
+            "BUILD_SLICE",
             "LIST_APPEND", "SET_ADD", "MAP_ADD",
             "UNARY_NEGATIVE", "UNARY_POSITIVE", "UNARY_INVERT", "UNARY_NOT",
             "CALL_INTRINSIC_1", "TO_BOOL",
@@ -3229,7 +3231,9 @@ class DecompilerGeneric(DecompilerBase):
             k += 1
         return (k < len(instrs) and loads > 0 and (instrs[k].arg or 0) >= 0
                 and (instrs[k].opname in ("CALL", "CALL_FUNCTION", "CALL_METHOD", "CALL_KW", "CALL_FUNCTION_KW",
-                                          "COMPARE_OP", "IS_OP", "CONTAINS_OP", "BINARY_SUBSCR", "BUILD_INTERPOLATION")
+                                          "COMPARE_OP", "IS_OP", "CONTAINS_OP", "BINARY_SUBSCR", "BUILD_INTERPOLATION",
+                                          "BUILD_TUPLE", "BUILD_LIST", "BUILD_SET", "BUILD_MAP", "BUILD_CONST_KEY_MAP",
+                                          "BUILD_STRING", "BUILD_SLICE")
                      or (instrs[k].opname == "BINARY_OP" and instrs[k].arg is not None and int(instrs[k].arg) < 13)))
 
     def _eval_branch_with_sub(self, instrs: list) -> Optional[str]:
