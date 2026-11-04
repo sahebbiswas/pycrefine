@@ -83,6 +83,10 @@ class _YieldExpr(str):
         return self
 
 
+class _AwaitExpr(_YieldExpr):
+    """An ``await`` expression: written like a ``yield`` (parenthesised inside an expression), and also bare after ``return``."""
+
+
 class StackNULL:
     """Internal sentinel pushed onto the stack to represent Python 3.11+ NULL sentinels in method calls."""
     def __init__(self, is_method: bool = False) -> None:

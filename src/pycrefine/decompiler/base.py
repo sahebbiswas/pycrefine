@@ -29,6 +29,8 @@ class DecompilerBase:
         self._current_instr: Optional[BytecodeInstruction] = None
         # Exception table, filled in on first use by _exception_entries(); False = not yet read.
         self._exception_entries_cache: Any = False
+        # The offsets of the CLEANUP_THROW handlers that were folded away with a `yield from` or `await` (3.12+)
+        self._throw_handlers: Set[int] = set()
         # 3.10: the exception table read from the block-based handlers (block_handlers)
         self._block_entries: Optional[list] = None
         self.instructions: List[BytecodeInstruction] = []
@@ -328,11 +330,51 @@ class DecompilerBase:
                 cached = self._block_entries
             elif tuple(self.target_version) >= (3, 11):
                 try:
-                    cached = list(dis.Bytecode(self.code_obj).exception_entries)
+                    cached = self._joined_entries([e for e in dis.Bytecode(self.code_obj).exception_entries
+                                                   if e.target not in self._throw_handlers])
                 except (AttributeError, TypeError, ValueError, IndexError) as exc:
                     self._report(INTERNAL_ERROR, f"could not read the exception table: {type(exc).__name__}: {exc}")
             self._exception_entries_cache = cached
         return cached
+
+    def _joined_entries(self, entries: list) -> list:
+        """
+        *entries* with the ones that only a folded `yield from` or `await` held apart joined: neighbours that
+        protect the same way and have no instruction left between them are one range again. A range that
+        protected only folded code (the throw handlers) goes.
+        """
+        if not self._throw_handlers:
+            return entries
+        kept = {ins.offset for ins in self.instructions}
+        joined: list = []
+        for entry in sorted(entries, key=lambda e: e.start):
+            if not any(entry.start <= off < entry.end for off in kept):
+                continue
+            last = joined[-1] if joined else None
+            if (last is not None and (last.target, last.depth, last.lasti) == (entry.target, entry.depth, entry.lasti)
+                    and not any(last.end <= off < entry.start for off in kept)):
+                joined[-1] = last._replace(end=max(last.end, entry.end))
+            else:
+                joined.append(entry)
+        return joined
+
+    def _only_generator_wrapper_follows(self, instr_index: int) -> bool:
+        """True if all that follows the instruction at *instr_index* is the StopIteration handler of a generator (3.12+)."""
+        rest = self.instructions[instr_index + 1:]
+        return (len(rest) == 2 and rest[0].opname == "CALL_INTRINSIC_1" and rest[0].arg == 3
+                and rest[1].opname == "RERAISE")
+
+    def _without_generator_wrapper(self, entries: Optional[list]) -> Optional[list]:
+        """
+        *entries* without the one that covers a whole generator or coroutine (3.12+), whose handler turns a
+        StopIteration into a RuntimeError (``CALL_INTRINSIC_1 3; RERAISE``). It protects no `try` of the source.
+        """
+        if not entries:
+            return entries
+        by_offset = {ins.offset: ins for ins in self.instructions}
+        return [e for e in entries
+                if not (by_offset.get(e.target) is not None and by_offset[e.target].opname == "CALL_INTRINSIC_1"
+                        and by_offset[e.target].arg == 3)]
 
     def _ends_try_before_handlers(self, instr_index: int) -> bool:
         """
@@ -383,13 +425,13 @@ class DecompilerBase:
         # Save current state for lookahead
         old_pc = self.pc
         self.pc = instr_index + 1
-        effectively_last = self.is_effectively_last()
+        effectively_last = self.is_effectively_last() or self._only_generator_wrapper_follows(instr_index)
         self.pc = old_pc
 
         # Robust check for Python 3.11+: if the return is within a protected
         # range in the exception table, it's explicit. Compiler-generated
         # returns for with/try blocks are always outside the protected range.
-        entries = self._exception_entries()
+        entries = self._without_generator_wrapper(self._exception_entries())
         if entries and any(e.start <= instr.offset < e.end for e in entries):
             return False
 
