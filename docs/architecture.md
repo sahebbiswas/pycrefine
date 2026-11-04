@@ -178,10 +178,10 @@ Bookkeeping that changes while instructions are replayed.
 
 | Field | Meaning | Written by |
 |---|---|---|
-| `except_header_indents` | indent levels of the except headers being emitted | `_close_except_clause`, `_dispatch_instruction`, `_op_before_with`, `_op_check_exc_match`, `_op_pop_block_39`, `_op_push_exc_info` |
+| `except_header_indents` | indent levels of the except headers being emitted | `_close_except_clause`, `_op_before_with`, `_op_check_exc_match`, `_op_dup_top_39`, `_op_pop_block_39`, `_op_pop_except_39`, `_op_push_exc_info` |
 | `except_end_offsets` | end offsets of exception regions | `_dispatch_instruction`, `_op_pop_block_39` |
-| `exc_as_store_offset` | the `as e` STORE to skip | `_dispatch_instruction`, `_op_check_exc_match`, `_op_store` |
-| `exc_bound_names` | every name bound by `except ... as` | `_dispatch_instruction`, `_op_check_exc_match` |
+| `exc_as_store_offset` | the `as e` STORE to skip | `_op_check_exc_match`, `_op_dup_top_39`, `_op_store` |
+| `exc_bound_names` | every name bound by `except ... as` | `_op_check_exc_match`, `_op_dup_top_39` |
 | `deferred_finally_lines` | merge offset -> rendered finally body | `_prescan_try_structure` |
 | `deferred_except_lines` | merge offset -> rendered handler | `_prescan_try_structure` |
 | `pending_finally_merge` | merge offset awaiting emission | `_dispatch_instruction`, `_prescan_try_structure` |
@@ -189,7 +189,7 @@ Bookkeeping that changes while instructions are replayed.
 | `else_stack_snapshots` | second arm's offset -> stack to restore | `_decompile_step`, `_op_conditional_jump` |
 | `open_with_sentinels` | 3.14: (body end, body start) of open with bodies | `_close_blocks`, `_dispatch_instruction` |
 | `pei_indents` | `PUSH_EXC_INFO` offset -> indent of the `try:` that precedes it, which its `except` headers use | `_op_nop` |
-| `finally_wrapper_indent` | 3.9: wrapper jump target -> indent at which `finally:` is written when its `POP_BLOCK` is reached | `_dispatch_instruction` |
+| `finally_wrapper_indent` | 3.9: wrapper jump target -> indent at which `finally:` is written when its `POP_BLOCK` is reached | `_op_setup_finally_39` |
 | `kw_names` | keyword names of the call being built | `_op_call`, `_op_kw_names` |
 
 #### `DocState` (`self.doc`)
