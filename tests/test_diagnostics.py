@@ -120,26 +120,23 @@ COMBINED_CONDITION_SRC = "def f(a, b):\n    if a > 1 and b < 2:\n        return 
 
 
 class TestAsyncDef(unittest.TestCase):
-    """An `async def` is written as a plain def, so it must be reported even with no await in it."""
+    """An `async def` is written as one, so nothing is reported for it, with or without an await in it."""
 
-    def test_async_def_without_await_is_reported(self):
+    def test_async_def_is_written_as_async_def_and_not_reported(self):
         for name, src in (("coroutine", ASYNC_SRC), ("async generator", ASYNC_GEN_SRC),
                           ("method", ASYNC_METHOD_SRC)):
             with self.subTest(name):
                 dec = _decompiler(src)
-                dec.decompile()
-                # Other constructs in the function may be reported as well (3.11 also flags
-                # the async generator's wrapper opcode), so look for this report in particular.
+                out = dec.decompile()
+                self.assertIn("async def f(", out)
+                # (3.11 flags the async generator's wrapper opcode, which is no source: not a construct left out)
                 reasons = [d.reason for d in dec.diagnostics if d.kind == dg.UNSUPPORTED_VERSION_CONSTRUCT]
-                self.assertTrue(any("async def" in reason for reason in reasons), reasons)
+                self.assertFalse(any("async def" in reason for reason in reasons), reasons)
 
-    def test_strict_raises_for_async_def_without_await(self):
-        for name, src in (("coroutine", ASYNC_SRC), ("async generator", ASYNC_GEN_SRC),
-                          ("method", ASYNC_METHOD_SRC)):
+    def test_strict_does_not_raise_for_async_def(self):
+        for name, src in (("coroutine", ASYNC_SRC), ("method", ASYNC_METHOD_SRC)):
             with self.subTest(name):
-                with self.assertRaises(DecompilationError) as cm:
-                    _decompiler(src, strict=True).decompile()
-                self.assertEqual(cm.exception.diagnostic.kind, dg.UNSUPPORTED_VERSION_CONSTRUCT)
+                self.assertIn("async def f(", _decompiler(src, strict=True).decompile())
 
     def test_plain_and_generator_functions_are_not_reported(self):
         for src in (CLEAN_SRC, "def g():\n    yield 1\n"):

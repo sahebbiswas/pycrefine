@@ -36,7 +36,7 @@ from .._constants import (
 )
 from ..codeobj import _is_code
 from .base import DecompilerBase
-from ..expr import (StackNULL, with_unknown_origin, _YieldExpr, _BoolExpr, _ChainedUnknown, _ChainedValue, _CollectionAccumSentinel, _ConvertedValue, _FString,
+from ..expr import (StackNULL, with_unknown_origin, _AwaitExpr, _YieldExpr, _BoolExpr, _ChainedUnknown, _ChainedValue, _CollectionAccumSentinel, _ConvertedValue, _FString,
                     _FStringField, _MergedDisplay, _TInterpolation, _TInterpolations, _UnpackAccessor, _unary_operand, is_unknown)
 from ..diagnostics import (AMBIGUOUS_EXPRESSION, INTERNAL_ERROR, STACK_UNDERFLOW, UNKNOWN_CONTROL_FLOW,
                            UNSUPPORTED_OPCODE, UNSUPPORTED_VERSION_CONSTRUCT, DecompilationError)
@@ -102,17 +102,15 @@ _UNSUPPORTED_CONSTRUCTS = {
     **dict.fromkeys(("MATCH_SEQUENCE", "MATCH_MAPPING", "MATCH_KEYS", "MATCH_CLASS", "GET_LEN"),
                     "match statements are not decompiled (issue #85)"),
     **dict.fromkeys(("GET_AWAITABLE", "GET_AITER", "GET_ANEXT", "END_ASYNC_FOR", "SEND", "END_SEND",
-                     "CLEANUP_THROW", "ASYNC_GEN_WRAP", "BEFORE_ASYNC_WITH"),
-                    "await, async for and async with are not decompiled (issue #85)"),
+                     "CLEANUP_THROW", "BEFORE_ASYNC_WITH"),
+                    "async for and async with are not decompiled (issue #85)"),
     **dict.fromkeys(("LOAD_FROM_DICT_OR_DEREF", "CALL_INTRINSIC_2"),
                     "type parameters (PEP 695) are not decompiled (issue #85)"),
 }
 
-# `async def` functions (CO_COROUTINE, CO_ASYNC_GENERATOR). One with no `await` in it has no opcode
-# that gives it away, so it is found by its flags when the function is made.
+# `async def` functions (CO_COROUTINE, CO_ASYNC_GENERATOR): found by their flags when the function is made.
 _CO_COROUTINE = 0x80
 _CO_ASYNC_GENERATOR = 0x200
-_ASYNC_DEF_REASON = "async def is not decompiled and is written as a plain def (issue #85)"
 
 # Opcodes that reach `_op_unknown` and are correctly left out of the source: they set up
 # generators and wide operands, or (3.10's `POP_BLOCK`) belong to block-based exception
@@ -247,7 +245,7 @@ _BASE_DISPATCH: Dict[str, str] = {
     # Nops
     "RESUME": "_op_no_op", "PRECALL": "_op_no_op", "CACHE": "_op_no_op",
     "COPY_FREE_VARS": "_op_no_op", "NOT_TAKEN": "_op_no_op", "MAKE_CELL": "_op_no_op",
-    "END_FOR": "_op_no_op", "POP_ITER": "_op_no_op", "YIELD_FROM": "_op_no_op", "YIELD_FROM_EXPR": "_op_yield_from",
+    "END_FOR": "_op_no_op", "POP_ITER": "_op_no_op", "ASYNC_GEN_WRAP": "_op_no_op", "YIELD_FROM": "_op_no_op", "YIELD_FROM_EXPR": "_op_yield_from", "AWAIT_EXPR": "_op_await",
     "NOP": "_op_nop",
     # Synthetic: the comprehension inliner builds this instruction itself (opcode -1).
     "INLINED_COMPREHENSION": "_op_inlined_comprehension",
@@ -667,10 +665,10 @@ class DecompilerGeneric(DecompilerBase):
 
     def _fold_yield_from(self) -> None:
         """
-        Fold the loop that ``yield from`` compiles to into one YIELD_FROM_EXPR instruction (`await` is not touched).
+        Fold the loop that ``yield from`` or ``await`` compiles to into one YIELD_FROM_EXPR or AWAIT_EXPR instruction.
 
-        3.9 and 3.10 write ``GET_YIELD_FROM_ITER; LOAD_CONST None; YIELD_FROM``. 3.11 and later send the
-        values one by one::
+        3.9 and 3.10 write ``GET_YIELD_FROM_ITER; LOAD_CONST None; YIELD_FROM`` (``GET_AWAITABLE`` for an ``await``).
+        3.11 and later send the values one by one::
 
             GET_YIELD_FROM_ITER; LOAD_CONST None
             head: SEND end; YIELD_VALUE; RESUME; JUMP_BACKWARD_NO_INTERRUPT head
@@ -684,14 +682,18 @@ class DecompilerGeneric(DecompilerBase):
         released: set = set()   # the jump targets the loop made
         index_at = {ins.offset: n for n, ins in enumerate(instrs)}
         for k, ins in enumerate(instrs):
-            if ins.opname != "GET_YIELD_FROM_ITER":
+            if ins.opname == "GET_AWAITABLE" and not self._awaits_in_with(k):
+                folded = "AWAIT_EXPR"
+            elif ins.opname == "GET_YIELD_FROM_ITER":
+                folded = "YIELD_FROM_EXPR"
+            else:
                 continue
             found = self._yield_from_loop(k, index_at)
             if found is None:
                 continue
             drop.update(found[0])
             released.update(found[1])
-            instrs[k] = replace(ins, opname="YIELD_FROM_EXPR", opcode=-1)
+            instrs[k] = replace(ins, opname=folded, opcode=-1)
         if not drop:
             return
         for k, ins in enumerate(instrs):
@@ -701,11 +703,24 @@ class DecompilerGeneric(DecompilerBase):
                 if k + 1 < len(instrs) and instrs[k + 1].opname.startswith("JUMP_BACKWARD"):
                     drop.add(k + 1)
         kept = [ins for n, ins in enumerate(instrs) if n not in drop]
+        # (the table entries that forward a throw into the delegated generator go with their handlers)
+        self._throw_handlers = {instrs[n].offset for n in drop if instrs[n].opname == "CLEANUP_THROW"}
+        self._exception_entries_cache = False
         still_target = {self._get_jump_target(x) for x in kept if "JUMP" in x.opname or x.opname == "FOR_ITER"}
         for n, ins in enumerate(kept):
             if ins.offset in released and ins.offset not in still_target and ins.is_jump_target:
                 kept[n] = replace(ins, is_jump_target=False)
         self.instructions = kept
+
+    def _awaits_in_with(self, k: int) -> bool:
+        """True if the GET_AWAITABLE at index *k* awaits the entry or the exit of an `async with`, not an `await`."""
+        instrs = self.instructions
+        ins = instrs[k]
+        if ins.arg in (1, 2) and self.target_version >= (3, 11):    # (where the awaited value comes from)
+            return True
+        before = instrs[k - 1].opname if k else ""
+        return before in ("BEFORE_ASYNC_WITH", "WITH_EXCEPT_START") or (
+            before == "CALL_FUNCTION" and instrs[k - 1].arg == 3)
 
     def _yield_from_loop(self, k: int, index_at: Dict[int, int]) -> Optional[Tuple[Set[int], Set[int]]]:
         """
@@ -722,7 +737,11 @@ class DecompilerGeneric(DecompilerBase):
         if second.opname != "SEND":                # 3.11+
             return None
         end = index_at.get(self._get_jump_target(second))
-        if end is None or end <= k + 2 or instrs[end - 1].opname != "JUMP_BACKWARD_NO_INTERRUPT":
+        if end is None or end <= k + 2:
+            return None
+        # (inside an exception handler the CLEANUP_THROW that catches a throw stays in line, before END_SEND)
+        last = end - 2 if instrs[end - 1].opname == "CLEANUP_THROW" else end - 1
+        if last <= k + 2 or instrs[last].opname != "JUMP_BACKWARD_NO_INTERRUPT":
             return None
         gone = set(range(k + 1, end))
         released = {second.offset}
@@ -1060,7 +1079,7 @@ class DecompilerGeneric(DecompilerBase):
                     and not (line.startswith("except") and prev.lstrip().startswith("try:"))):
                 self.reconstructed.append("    " * (self.indent_level + 1) + "pass")
         # Blank line before major blocks (top-level only)
-        if self.indent_level == 0 and line.startswith(("def ", "class ", "if ", "for ", "while ", "try:")) and self.reconstructed:
+        if self.indent_level == 0 and line.startswith(("def ", "async def ", "class ", "if ", "for ", "while ", "try:")) and self.reconstructed:
             if self.reconstructed[-1] != "":
                 self.reconstructed.append("")
 
@@ -6921,14 +6940,13 @@ class DecompilerGeneric(DecompilerBase):
             if varkw_name:
                 params.append(varkw_name)
 
-            if inner_code.co_flags & (_CO_COROUTINE | _CO_ASYNC_GENERATOR):
-                self._report(UNSUPPORTED_VERSION_CONSTRUCT, _ASYNC_DEF_REASON, instr)
             dec_class = _pick_decompiler_class(self)
             dec = dec_class(inner_code, indent_level=1, beautification_level=self.beautification_level, target_version=self.target_version)
             self._share_diagnostics_with(dec)
             dec._enclosing_locals = self._child_enclosing_locals()
             body = dec.decompile()
-            sig = f"def {inner_code.co_name}({', '.join(params)}):"
+            keyword = "async def" if inner_code.co_flags & (_CO_COROUTINE | _CO_ASYNC_GENERATOR) else "def"
+            sig = f"{keyword} {inner_code.co_name}({', '.join(params)}):"
             func_text = f"{sig}\n{body}"
             for found, keyword_only in ((defaults, False), (kw_defs, True)):
                 if found is not None and (not keyword_only or found):
@@ -6967,7 +6985,7 @@ class DecompilerGeneric(DecompilerBase):
     @staticmethod
     def _parse_def_head(head: str) -> Optional[Tuple[str, Any]]:
         """``(head + " pass", ast.arguments)`` when *head* is the whole ``def`` line, else None."""
-        named = re.match(r"def\s+([^\s(]+)\s*\(", head)
+        named = re.match(r"(?:async\s+)?def\s+([^\s(]+)\s*\(", head)
         if named is None:
             return None
         # `<lambda>` and the compiler's own parameters (`.0`, `.format`) are not identifiers:
@@ -7097,7 +7115,7 @@ class DecompilerGeneric(DecompilerBase):
             elif "__class__" in val_str or "__classdict__" in val_str:
                 pass
             else:
-                self._append_reconstructed(f"return {val}")
+                self._append_reconstructed(f"return {val.bare if isinstance(val, _AwaitExpr) else val}")
                 # A return exits the function entirely. If we are within a try/except,
                 # any remaining instructions are either dead code or jump targets for
                 # other control flow. Because RETURN_VALUE bypasses the normal POP_BLOCK
@@ -9590,13 +9608,17 @@ class DecompilerGeneric(DecompilerBase):
     def _op_yield_value(self, _instr: BytecodeInstruction):
         # The value sent in comes back as the expression's result: `x = yield v`, or dropped by a POP_TOP.
         val = self._pop()
-        if self.code_obj.co_flags & (_CO_COROUTINE | _CO_ASYNC_GENERATOR):
-            # (an `await` is a yield too, and not rebuilt yet: #85)
+        if self.code_obj.co_flags & _CO_COROUTINE and not self.code_obj.co_flags & _CO_ASYNC_GENERATOR:
+            # (an `await` that is not folded: the entry or exit of an `async with`, not rebuilt yet: #85)
             self._append_reconstructed(f"yield {val}")
             return
         # (`yield` and `yield None` compile alike; a comprehension body always has a value to rebuild)
         bare = str(val) == "None" and not self.code_obj.co_name.startswith("<")
         self.stack.append(_YieldExpr("yield" if bare else f"yield {val}"))
+
+    def _op_await(self, _instr: BytecodeInstruction):
+        awaited = self._pop()
+        self.stack.append(_AwaitExpr(f"await {awaited}"))
 
     def _op_yield_from(self, _instr: BytecodeInstruction):
         iterable = self._pop()

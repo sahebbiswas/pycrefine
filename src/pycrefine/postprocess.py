@@ -464,14 +464,15 @@ def post_process_source(source: str, beautification_level: str = 'core') -> str:
         r'^(\s*[A-Za-z_][A-Za-z0-9_.]*\s*(?:\+|-|\*|/|//|%|&|\||\^|<<|>>)?=\s*)'
         r'\(' + _NO_KW + r'([^,()]+)\)$'
     )
+    # (a `yield` needs its parentheses after `return`, `if`, `elif` and `while`; after `=` it does not)
     return_parens_re = re.compile(
-        r'^(\s*return\s+)\(' + _NO_KW + r'([^,()]+)\)$'
+        r'^(\s*return\s+)\((?!yield\b)' + _NO_KW + r'([^,()]+)\)$'
     )
     if_parens_re = re.compile(
-        r'^(\s*(?:if|elif)\s+)\(' + _NO_KW + r'([^,()]+)\):$'
+        r'^(\s*(?:if|elif)\s+)\((?!yield\b)' + _NO_KW + r'([^,()]+)\):$'
     )
     while_parens_re = re.compile(
-        r'^(\s*while\s+)\(' + _NO_KW + r'([^,()]+)\):$'
+        r'^(\s*while\s+)\((?!yield\b)' + _NO_KW + r'([^,()]+)\):$'
     )
 
     for line in lines:

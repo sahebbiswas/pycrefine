@@ -16,8 +16,8 @@ UNSUPPORTED = [
     ("async_with", (3, 9), None,
      "async def f(x):\n    async with x as y:\n        return y\n",
      dg.UNSUPPORTED_VERSION_CONSTRUCT),
-    ("await", (3, 9), None,
-     "async def f(x):\n    return await x\n",
+    ("async_for", (3, 9), None,
+     "async def f(x):\n    async for y in x:\n        pass\n",
      dg.UNSUPPORTED_VERSION_CONSTRUCT),
     ("type_parameters", (3, 12), None,
      "def f[T](x: T) -> T:\n    return x\n",
@@ -32,6 +32,8 @@ CLEAN = [
     "x = [i * 2 for i in range(3)]\n",
     "class C:\n    def m(self):\n        return 1\n",
     "def g(items):\n    total = 0\n    for i in items:\n        total += i\n    return total\n",
+    "async def f(x):\n    return await x\n",
+    "async def f(x):\n    yield 1\n",
 ]
 
 

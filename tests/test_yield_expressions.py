@@ -152,6 +152,40 @@ class TestYieldInsideTryAndWith(unittest.TestCase):
         self.assert_same_results(
             "def k(c):\n    x = (yield 1) if c else 0\n    return x\n", "run(k(True), 'a')", "run(k(False), 'a')")
 
+    def test_yield_from_in_a_handler_and_a_finally(self):
+        """3.12+ keeps the CLEANUP_THROW of a `yield from` in a handler in line, and its table entries split the ranges."""
+        out = self.assert_same_results(
+            "def boom():\n    raise ValueError('x')\n    yield 0\n"
+            "def t():\n    log = []\n    try:\n        yield from boom()\n    except ValueError:\n"
+            "        log.append((yield from inner(1)))\n    finally:\n        log.append((yield from inner(1)))\n"
+            "    return log\n",
+            "run(t(), None, None, None, None)")
+        self.assertIn("return log", out)
+
+    def test_yield_from_in_the_body_of_a_with(self):
+        out = self.assert_same_results(
+            "import contextlib\n"
+            "def w(log):\n    with contextlib.suppress(KeyError):\n        x = yield from inner(2)\n        {}[x]\n"
+            "    log.append('after')\n    return (yield from inner(1))\n"
+            "def go():\n    log = []\n    return run(w(log), None, None, None, None), log\n",
+            "go()")
+        self.assertNotIn("        return (yield from", out)
+
+    def test_return_of_a_yield_keeps_its_parentheses(self):
+        out = self.assert_same_results("def e():\n    return (yield 1)\n", "run(e(), 'sent')")
+        self.assertIn("return (yield 1)", out)
+
+    def test_yield_as_a_condition_keeps_its_parentheses(self):
+        self.assert_same_results(
+            "def c():\n    if (yield 1):\n        return 'yes'\n    return 'no'\n", "run(c(), True)", "run(c(), False)")
+        self.assert_same_results(
+            "def c():\n    n = 0\n    while (yield n):\n        n += 1\n    return n\n", "run(c(), True, True, False)")
+
+    def test_a_generator_does_not_end_with_a_return_none(self):
+        """3.12+ lays the StopIteration handler of a generator after its last return."""
+        out = self.assert_same_results("def g(a):\n    yield 1\n    yield a\n", "run(g(5), None, None)")
+        self.assertNotIn("return None", out)
+
 
 if __name__ == "__main__":
     unittest.main()
