@@ -84,7 +84,7 @@
   },
   "diagnostics": {
     "features/modern_async": {
-      "unsupported_version_construct": 6
+      "unsupported_version_construct": 1
     },
     "features/modern_generics": {
       "unsupported_version_construct": 4

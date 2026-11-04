@@ -82,7 +82,7 @@
   },
   "diagnostics": {
     "features/modern_async": {
-      "unsupported_version_construct": 4
+      "unsupported_version_construct": 2
     },
     "features/modern_match": {
       "unsupported_version_construct": 6

@@ -28,7 +28,7 @@
     "features/func_lambda_sorted": "equivalent",
     "features/func_recursion": "equivalent",
     "features/io_streams": "equivalent",
-    "features/modern_async": "syntax_error",
+    "features/modern_async": "mismatch",
     "features/modern_except_star": "mismatch",
     "features/modern_fstring_nested": "equivalent",
     "features/modern_generics": "syntax_error",
@@ -85,7 +85,7 @@
   },
   "diagnostics": {
     "features/modern_async": {
-      "unsupported_version_construct": 6
+      "unsupported_version_construct": 1
     },
     "features/modern_generics": {
       "unsupported_version_construct": 3

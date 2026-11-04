@@ -3,7 +3,7 @@ import ast
 import dis
 import sys
 import types
-from typing import Any, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from .state import PrescanState
 from ..diagnostics import INTERNAL_ERROR, STACK_UNDERFLOW, DecompilationError, Diagnostic
 from ..expr import UnknownExpression
@@ -31,6 +31,9 @@ class DecompilerBase:
         self._exception_entries_cache: Any = False
         # The offsets of the BEFORE_WITH instructions that were an `async with`'s BEFORE_ASYNC_WITH
         self._async_with_offsets: Set[int] = set()
+        self._async_for_offsets: Set[int] = set()
+        # {offset in the disassembly: offset now} once the instructions have been numbered again (None: they have not)
+        self._offset_map: Optional[Dict[int, int]] = None
         # The offsets of the CLEANUP_THROW handlers that were folded away with a `yield from` or `await` (3.12+)
         self._throw_handlers: Set[int] = set()
         # 3.10: the exception table read from the block-based handlers (block_handlers)
@@ -330,17 +333,42 @@ class DecompilerBase:
             if tuple(self.target_version) == (3, 10):
                 # computed from the block stack when the instructions were read (block_handlers)
                 cached = self._block_entries
+                if cached is not None and self._throw_handlers:
+                    cached = [e for e in cached if e.target not in self._throw_handlers]
             elif tuple(self.target_version) >= (3, 11):
                 try:
                     bytecode = dis.Bytecode(self.code_obj)
                     at = {ins.offset: ins for ins in bytecode}
-                    cached = self._joined_entries(
-                        [e for e in bytecode.exception_entries
-                         if e.target not in self._throw_handlers and not self._is_generator_wrapper(e, at)])
+                    entries = self._remap_entries([e for e in bytecode.exception_entries
+                                                   if not self._is_generator_wrapper(e, at)])
+                    cached = self._joined_entries([e for e in entries if e.target not in self._throw_handlers])
                 except (AttributeError, TypeError, ValueError, IndexError) as exc:
                     self._report(INTERNAL_ERROR, f"could not read the exception table: {type(exc).__name__}: {exc}")
             self._exception_entries_cache = cached
         return cached
+
+    def _remap_entries(self, entries: list) -> list:
+        """
+        *entries* in the numbering of the instructions as they stand, once they have been numbered again
+        (_renumber_offsets): a range covers the same instructions, so it becomes one range for each run of them.
+        """
+        mapping = self._offset_map
+        if mapping is None:
+            return entries
+        by_old = sorted(mapping.items())
+        remapped: list = []
+        for entry in entries:
+            target = mapping.get(entry.target, -1 - entry.target)
+            covered = sorted(new for old, new in by_old if entry.start <= old < entry.end)
+            run_start = previous = None
+            for new in covered + [None]:
+                if run_start is not None and (new is None or new != previous + 2):
+                    remapped.append(entry._replace(start=run_start, end=previous + 2, target=target))
+                    run_start = None
+                if new is not None and run_start is None:
+                    run_start = new
+                previous = new
+        return remapped
 
     def _joined_entries(self, entries: list) -> list:
         """

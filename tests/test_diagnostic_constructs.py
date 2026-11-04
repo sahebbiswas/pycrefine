@@ -16,7 +16,7 @@ UNSUPPORTED = [
     ("async_with_on_3_9", (3, 9), (3, 9),
      "async def f(x):\n    async with x as y:\n        return y\n",
      dg.UNSUPPORTED_OPCODE),
-    ("async_for", (3, 9), None,
+    ("async_for_on_3_9", (3, 9), (3, 9),
      "async def f(x):\n    async for y in x:\n        pass\n",
      dg.UNSUPPORTED_VERSION_CONSTRUCT),
     ("type_parameters", (3, 12), None,
