@@ -756,9 +756,13 @@ class DecompilerGeneric(DecompilerBase):
         before = instrs[k - 1].opname if k else ""
         if before in ("BEFORE_ASYNC_WITH", "WITH_EXCEPT_START"):
             return True
-        # 3.9, 3.10: the exit call is `LOAD_CONST None; DUP_TOP; DUP_TOP; CALL_FUNCTION 3` (an `await f(a, b, c)` is not)
-        return (k > 3 and before == "CALL_FUNCTION" and instrs[k - 1].arg == 3
-                and [x.opname for x in instrs[k - 4:k - 1]] == ["LOAD_CONST", "DUP_TOP", "DUP_TOP"])
+        if tuple(self.target_version) != (3, 10):
+            return False
+        # 3.10: `LOAD_CONST None; DUP_TOP; DUP_TOP; CALL_FUNCTION 3` (read as three loads and a CALL 2 on 3.11's form)
+        return k > 3 and ((before == "CALL_FUNCTION" and instrs[k - 1].arg == 3
+                           and [x.opname for x in instrs[k - 4:k - 1]] == ["LOAD_CONST", "DUP_TOP", "DUP_TOP"])
+                          or (before == "CALL" and [x.opname for x in instrs[k - 5:k - 2]] == ["LOAD_CONST"] * 3
+                              and all(x.argval is None for x in instrs[k - 5:k - 2])))
 
     def _yield_from_loop(self, k: int, index_at: Dict[int, int]) -> Optional[Tuple[Set[int], Set[int]]]:
         """

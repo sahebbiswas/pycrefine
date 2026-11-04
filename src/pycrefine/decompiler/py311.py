@@ -1,15 +1,12 @@
 """Decompiler backend for CPython 3.10-3.12 bytecode (uses the host ``dis`` module)."""
 from .generic import DecompilerGeneric
-from ..diagnostics import AMBIGUOUS_EXPRESSION, INCOMPLETE_EXCEPTION
+from ..diagnostics import AMBIGUOUS_EXPRESSION
 from ..instructions import BytecodeInstruction
 from .block_handlers import has_block_handlers, normalise_block_handlers
 
 # 3.10 sets up try, with and finally with block-stack instructions (3.11 replaced them
 # with an exception table). block_handlers reads them into the 3.11 form (#179), except the
 # handlers of `async with`, which stay as they were.
-_BLOCK_SETUP_OPS = frozenset(("SETUP_ASYNC_WITH",))
-
-
 # ---------------------------------------------------------------------------
 # Python 3.11+ specialisation  (3.11, 3.12, 3.13)
 # ---------------------------------------------------------------------------
@@ -20,15 +17,6 @@ class Decompiler311Plus(DecompilerGeneric):
         super()._disassemble()
         if tuple(self.target_version) == (3, 10) and has_block_handlers(self.instructions):
             self.instructions, self._block_entries = normalise_block_handlers(self.instructions)
-
-    def _report_version_gaps(self) -> None:
-        if self.target_version < (3, 11):
-            first = next((ins for ins in self.instructions if ins.opname in _BLOCK_SETUP_OPS), None)
-            if first is not None:
-                self._report(
-                    INCOMPLETE_EXCEPTION,
-                    "async with is not decompiled on Python 3.10 "
-                    "(block-based exception handlers, issue #179)", first)
 
     def _dispatch_instruction(self, instr: BytecodeInstruction):
         """

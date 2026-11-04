@@ -22,9 +22,6 @@ UNSUPPORTED = [
     ("type_parameters", (3, 12), None,
      "def f[T](x: T) -> T:\n    return x\n",
      dg.UNSUPPORTED_VERSION_CONSTRUCT),
-    ("async_with_on_3_10", (3, 10), (3, 10),
-     "async def f(a):\n    async with a:\n        pass\n",
-     dg.INCOMPLETE_EXCEPTION),
 ]
 
 CLEAN = [
