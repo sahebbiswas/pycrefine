@@ -210,6 +210,18 @@ def _only_continues(block: List[_BodyLine]) -> bool:
     return [n.text for n in block if n.text != "pass"] == ["continue"]
 
 
+def _without_await_parentheses(element: str) -> str:
+    """`(await f(x))` as the element of a comprehension is `await f(x)`: it needs no parentheses there."""
+    if element.startswith("(await ") and element.endswith(")"):
+        try:
+            node = ast.parse(element[1:-1], mode="eval").body
+        except SyntaxError:
+            return element
+        if isinstance(node, ast.Await):
+            return element[1:-1]
+    return element
+
+
 class _ComprehensionCollector:
     """
     Reads the loop body of a decompiled ``<genexpr>`` / ``<listcomp>`` / ... code
@@ -242,7 +254,7 @@ class _ComprehensionCollector:
 
     def render(self, wrapper: Tuple[str, str]) -> Optional[str]:
         """The comprehension text, or None when no ``for`` clause and element were found."""
-        if self.clauses and self.clauses[0].startswith("for ") and self.element is not None:
+        if self.clauses and self.clauses[0].startswith(("for ", "async for ")) and self.element is not None:
             return wrapper[0] + self.element + " " + " ".join(self.clauses) + wrapper[1]
         return None
 
@@ -264,7 +276,7 @@ class _ComprehensionCollector:
             # 3.9 wraps the whole genexpr body in 'while True:'.
             self.collect(node.children)
             return True
-        if not text.startswith("for "):
+        if not text.startswith(("for ", "async for ")):
             return False
         clause = text.rstrip(":")
         # Only the outermost for-clause iterates the implicit .0 parameter.
@@ -294,16 +306,16 @@ class _ComprehensionCollector:
 
     def _visit_leaf(self, node: _BodyLine) -> bool:
         text = node.text
-        if self.clauses and self.clauses[-1].startswith("for "):
+        if self.clauses and self.clauses[-1].startswith(("for ", "async for ")):
             # Nested unpacking is decompiled as `for _item in it:` followed by
             # `(a, b), c = _item`; fold it back into the for-target.
             m_unpack = re.match(r"^(.+?) = (\w+)$", text)
-            m_for = re.match(r"^for (\w+) in (.+)$", self.clauses[-1])
-            if m_unpack and m_for and m_unpack.group(2) == m_for.group(1):
-                self.clauses[-1] = f"for {m_unpack.group(1)} in {m_for.group(2)}"
+            m_for = re.match(r"^(async )?for (\w+) in (.+)$", self.clauses[-1])
+            if m_unpack and m_for and m_unpack.group(2) == m_for.group(2):
+                self.clauses[-1] = f"{m_for.group(1) or ''}for {m_unpack.group(1)} in {m_for.group(3)}"
                 return True
         if text.startswith("yield "):
-            self.element = text[len("yield "):].strip()
+            self.element = _without_await_parentheses(text[len("yield "):].strip())
             return True
         return False
 

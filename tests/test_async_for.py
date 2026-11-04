@@ -172,8 +172,10 @@ class TestAsyncFor(unittest.TestCase):
         out = decompile("def f(xs):\n    for x in xs:\n        print(x)\n")
         self.assertNotIn("async", out)
 
-    def test_async_comprehensions_are_reported(self):
-        """They are not rebuilt yet (#85): they must not come out as plain code without a word."""
+    def test_async_comprehensions_are_rebuilt_without_a_report(self):
+        """They are comprehensions again (see test_async_comprehensions.py), so nothing is left to report (3.10+)."""
+        if sys.version_info < (3, 10):
+            self.skipTest("async for is read from 3.10 on")
         import os  # pylint: disable=import-outside-toplevel
         from pycrefine import get_decompiler  # pylint: disable=import-outside-toplevel
         from .test_helpers import _compile  # pylint: disable=import-outside-toplevel
@@ -186,9 +188,7 @@ class TestAsyncFor(unittest.TestCase):
                 try:
                     dec = get_decompiler(pyc)
                     dec.decompile()
-                    self.assertTrue(any("async comprehensions" in d.reason for d in dec.diagnostics) or
-                                    any("async" in d.reason for d in dec.diagnostics),
-                                    [str(d) for d in dec.diagnostics])
+                    self.assertEqual([str(d) for d in dec.diagnostics], [])
                 finally:
                     os.unlink(pyc)
 

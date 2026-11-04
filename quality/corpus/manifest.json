@@ -386,12 +386,14 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "unsupported",
+      "support": "partial",
       "limitations": [
         {
           "issue": 85,
-          "versions": "all",
-          "summary": "modern constructs (async, match, except*, type parameters, PEP 701 f-strings)"
+          "versions": [
+            "3.9"
+          ],
+          "summary": "async for and async comprehensions with async for on 3.9"
         }
       ]
     },

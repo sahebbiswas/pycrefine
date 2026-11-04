@@ -80,7 +80,7 @@
   },
   "diagnostics": {
     "features/modern_async": {
-      "unsupported_version_construct": 4
+      "unsupported_version_construct": 2
     },
     "stdlib/bisect": {
       "unsupported_opcode": 1
