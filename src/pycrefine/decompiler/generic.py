@@ -3239,6 +3239,7 @@ class DecompilerGeneric(DecompilerBase):
                                           "COMPARE_OP", "IS_OP", "CONTAINS_OP", "BINARY_SUBSCR", "BUILD_INTERPOLATION",
                                           "BUILD_TUPLE", "BUILD_LIST", "BUILD_SET", "BUILD_MAP", "BUILD_CONST_KEY_MAP",
                                           "BUILD_STRING", "BUILD_SLICE")
+                     or (instrs[k].opname.startswith("BINARY_") and instrs[k].opname != "BINARY_OP")   # (3.9, 3.10)
                      or (instrs[k].opname == "BINARY_OP" and instrs[k].arg is not None and int(instrs[k].arg) < 13)))
 
     def _eval_branch_with_sub(self, instrs: list) -> Optional[str]:

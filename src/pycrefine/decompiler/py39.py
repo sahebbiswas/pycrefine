@@ -8,6 +8,27 @@ from ..instructions import BytecodeInstruction, _copy_signature, _match_finally_
 from ..opcodes.py39 import _OPCODES_39
 
 
+# Binary and in-place operators (3.9 uses named opcodes, not BINARY_OP)
+_BINARY_39 = {
+    "BINARY_ADD": "+", "BINARY_SUBTRACT": "-",
+    "BINARY_MULTIPLY": "*", "BINARY_TRUE_DIVIDE": "/",
+    "BINARY_FLOOR_DIVIDE": "//", "BINARY_MODULO": "%",
+    "BINARY_POWER": "**", "BINARY_LSHIFT": "<<",
+    "BINARY_RSHIFT": ">>", "BINARY_AND": "&",
+    "BINARY_OR": "|", "BINARY_XOR": "^",
+    "BINARY_MATRIX_MULTIPLY": "@",
+}
+_INPLACE_39 = {
+    "INPLACE_ADD": "+=", "INPLACE_SUBTRACT": "-=",
+    "INPLACE_MULTIPLY": "*=", "INPLACE_TRUE_DIVIDE": "/=",
+    "INPLACE_FLOOR_DIVIDE": "//=", "INPLACE_MODULO": "%=",
+    "INPLACE_POWER": "**=", "INPLACE_LSHIFT": "<<=",
+    "INPLACE_RSHIFT": ">>=", "INPLACE_AND": "&=",
+    "INPLACE_OR": "|=", "INPLACE_XOR": "^=",
+    "INPLACE_MATRIX_MULTIPLY": "@=",
+}
+
+
 def _lnotab_line_starts(code: Any) -> dict:
     """``{offset: line}`` for each instruction that starts a source line (3.8-3.9 lnotab)."""
     if isinstance(code, types.CodeType):
@@ -404,6 +425,133 @@ class Decompiler39(DecompilerGeneric):
         # The RERAISE that ends the copy closes the block (and is skipped as usual).
         self.blocks.append((end, "finally_body"))
 
+    def _open_while_true_39(self, instr: BytecodeInstruction) -> None:
+        """If *instr* is the first instruction of a `while True:` body, open the loop."""
+        # while-True header: if this instruction is the body_start of a while-True
+        # loop (sentinel guard_offset == -1), emit 'while True:' once and push a
+        # while block covering the loop back-edge.
+        # This fires on the very first instruction of the loop body.
+        while_header_targets = self.prescan.while_header_targets
+        while_true_body_starts = {
+            bs for bs, go in while_header_targets.items() if go == -1
+        }
+        if instr.offset in while_true_body_starts:
+            self._append_reconstructed("while True:")
+            self.indent_level += 1
+            # Find the loop end: offset just after the last backward jump that
+            # targets this body_start.
+            loop_end = instr.offset + 2
+            for ins in self.instructions:
+                if (self._is_backward_instruction(ins)
+                        and self._get_jump_target(ins) == instr.offset):
+                    loop_end = max(loop_end, ins.offset + 2)
+            self.blocks.append((loop_end, "while"))
+            _wte = self.prescan.while_true_ends
+            _wte.add(loop_end)
+            self.prescan.while_true_ends = _wte
+
+    def _pop_jump_39(self, instr: BytecodeInstruction) -> None:
+        """POP_JUMP_IF_TRUE/FALSE: the break guard of a `while True:`, or the generic handling."""
+        opname = instr.opname
+        # POP_JUMP_IF_FALSE/TRUE with a BACKWARD target (target <= current offset):
+        # In a 3.9 while-True loop, this is the inner 'if cond: break' guard.
+        # The bytecode says "if the condition is FALSE, jump back to start" which is
+        # the NOT-break path (continue the loop).  The break path is a JUMP_ABSOLUTE
+        # forward.  Emit 'if <cond>:' (the break body is the following JUMP_ABSOLUTE).
+        jump_target = self._get_jump_target(instr)
+
+        if (jump_target <= instr.offset  # backward target → inside while-True
+                and instr.offset not in self.prescan.while_header_targets.values()
+                and next((b[1] for b in reversed(self.blocks) if b[1] in ("while", "for")), None) == "while"):
+            # This is the break-guard inside a while-True.
+            if self.stack:
+                cond = self.stack.pop()
+                if str(cond) not in ("_exc_match", "_exc_info"):
+                    is_true = "IF_TRUE" in opname
+                    if is_true:
+                        self._append_reconstructed(f"if not {cond}:")
+                    else:
+                        self._append_reconstructed(f"if {cond}:")
+                    self.indent_level += 1
+                    while_end = next(
+                        (b[0] for b in reversed(self.blocks) if b[1] == "while"), -1
+                    )
+                    if while_end > instr.offset:
+                        self.blocks.append((while_end, "if"))
+            return
+
+        # Pattern for 3.9 asserts: if not cond: raise AssertionError
+        # We skip explicit emit here and let DecompilerGeneric._op_pop_jump_if_false handle it
+        # if it's not a while-break. This prevents double-emission or mis-indentation.
+        super()._dispatch_instruction(instr)
+
+    def _op_binary_39(self, instr: BytecodeInstruction) -> None:
+        """A binary operator (named opcodes on 3.9 and 3.10)."""
+        opname = instr.opname
+        if len(self.stack) >= 2:
+            right = self.stack.pop()
+            left = self.stack.pop()
+            # Wrap the right operand in parens when it contains a ternary
+            # expression (e.g. 'x if cond else y') to prevent operator-
+            # precedence ambiguity (% binds tighter than if...else).
+            r_str = str(right)
+            if ' if ' in r_str and ' else ' in r_str:
+                r_str = f'({r_str})'
+            # Wrap the left operand in parens when it contains a ternary
+            l_str = str(left)
+            if ' if ' in l_str and ' else ' in l_str:
+                l_str = f'({l_str})'
+            self.stack.append(f"({l_str} {_BINARY_39[opname]} {r_str})")
+
+    def _op_inplace_39(self, instr: BytecodeInstruction) -> None:
+        """An in-place operator, folded with the store that follows into an augmented assignment."""
+        opname = instr.opname
+        if len(self.stack) >= 2:
+            right = self.stack.pop()
+            left = self.stack.pop()
+            op = _INPLACE_39[opname]
+            # Peek ahead: if next instruction is a STORE back to the same
+            # name, emit `left op= right` directly and consume the STORE.
+            next_pc = self.pc
+            while (next_pc < len(self.instructions)
+                   and self.instructions[next_pc].opname in (
+                       "CACHE", "RESUME", "NOP", "NOT_TAKEN", "ROT_TWO", "ROT_THREE"
+            )):
+                next_pc += 1
+
+            if (next_pc < len(self.instructions)
+                    and self.instructions[next_pc].opname in (
+                        "STORE_NAME", "STORE_FAST", "STORE_GLOBAL", "STORE_ATTR", "STORE_DEREF", "STORE_SUBSCR"
+            )):
+                instr_store = self.instructions[next_pc]
+                if self._match_augassign_store(str(left), instr_store):
+                    if instr_store.opname == "STORE_ATTR" and self.stack:
+                        self.stack.pop()  # pop defensive receiver
+                    if instr_store.opname == "STORE_SUBSCR" and len(self.stack) >= 2:
+                        self.stack.pop()
+                        self.stack.pop()
+                    self._append_reconstructed(f"{left} {op} {right}")
+                    self.pc = next_pc + 1  # consume the STORE
+                    return
+            # Fallback: push as expression for STORE to handle
+            # Wrap operands in parens when they contain a ternary
+            r_str = str(right)
+            if ' if ' in r_str and ' else ' in r_str:
+                r_str = f'({r_str})'
+            l_str = str(left)
+            if ' if ' in l_str and ' else ' in l_str:
+                l_str = f'({l_str})'
+            self.stack.append(f"({l_str} {op} {r_str})")
+
+    def _op_compare_39(self, instr: BytecodeInstruction) -> None:
+        """COMPARE_OP: the comparison, without outer parentheses."""
+        if len(self.stack) >= 2:
+            right = self.stack.pop()
+            left = self.stack.pop()
+            op = str(instr.argval)
+            # No outer parens: tests expect 'if x > 0:' not 'if (x > 0):'
+            self.stack.append(f"{self._comparand(left)} {op} {self._comparand(right)}")
+
     # clean instruction dispatch for 3.9-specific opcodes
     def _dispatch_instruction(self, instr: BytecodeInstruction):
         # Suppress exception-path finally bodies
@@ -431,166 +579,18 @@ class Decompiler39(DecompilerGeneric):
             self.indent_level += 1
             self.blocks.append((self.prescan.else_starts[instr.offset], "else"))
 
-        # Binary ops (3.9 uses named opcodes, not BINARY_OP)
-        _bin39 = {
-            "BINARY_ADD": "+", "BINARY_SUBTRACT": "-",
-            "BINARY_MULTIPLY": "*", "BINARY_TRUE_DIVIDE": "/",
-            "BINARY_FLOOR_DIVIDE": "//", "BINARY_MODULO": "%",
-            "BINARY_POWER": "**", "BINARY_LSHIFT": "<<",
-            "BINARY_RSHIFT": ">>", "BINARY_AND": "&",
-            "BINARY_OR": "|", "BINARY_XOR": "^",
-            "BINARY_MATRIX_MULTIPLY": "@",
-        }
-        _inplace39 = {
-            "INPLACE_ADD": "+=", "INPLACE_SUBTRACT": "-=",
-            "INPLACE_MULTIPLY": "*=", "INPLACE_TRUE_DIVIDE": "/=",
-            "INPLACE_FLOOR_DIVIDE": "//=", "INPLACE_MODULO": "%=",
-            "INPLACE_POWER": "**=", "INPLACE_LSHIFT": "<<=",
-            "INPLACE_RSHIFT": ">>=", "INPLACE_AND": "&=",
-            "INPLACE_OR": "|=", "INPLACE_XOR": "^=",
-            "INPLACE_MATRIX_MULTIPLY": "@=",
-        }
+        self._open_while_true_39(instr)
 
-        # while-True header: if this instruction is the body_start of a while-True
-        # loop (sentinel guard_offset == -1), emit 'while True:' once and push a
-        # while block covering the loop back-edge.
-        # This fires on the very first instruction of the loop body.
-        _while_header_targets = self.prescan.while_header_targets
-        _while_true_body_starts = {
-            bs for bs, go in _while_header_targets.items() if go == -1
-        }
-        if instr.offset in _while_true_body_starts:
-            self._append_reconstructed("while True:")
-            self.indent_level += 1
-            # Find the loop end: offset just after the last backward jump that
-            # targets this body_start.
-            loop_end = instr.offset + 2
-            for ins in self.instructions:
-                if (self._is_backward_instruction(ins)
-                        and self._get_jump_target(ins) == instr.offset):
-                    loop_end = max(loop_end, ins.offset + 2)
-            self.blocks.append((loop_end, "while"))
-            _wte = self.prescan.while_true_ends
-            _wte.add(loop_end)
-            self.prescan.while_true_ends = _wte
-
-        # POP_JUMP_IF_FALSE/TRUE with a BACKWARD target (target <= current offset):
-        # In a 3.9 while-True loop, this is the inner 'if cond: break' guard.
-        # The bytecode says "if the condition is FALSE, jump back to start" which is
-        # the NOT-break path (continue the loop).  The break path is a JUMP_ABSOLUTE
-        # forward.  Emit 'if <cond>:' (the break body is the following JUMP_ABSOLUTE).
-        if ("POP_JUMP_IF_FALSE" in opname or "POP_JUMP_IF_TRUE" in opname):
-            jump_target = self._get_jump_target(instr)
-
-            # --- Assertion detection (Python 3.9) ---
-            # Pattern: POP_JUMP_IF_TRUE/FALSE skipping over a RAISE_VARARGS(AssertionError)
-            # Find the instruction just BEFORE the jump target
-            target_idx = next((i for i, x in enumerate(self.instructions) if x.offset == jump_target), -1)
-            if target_idx > 0:
-                raise_instr = self.instructions[target_idx - 1]
-                if raise_instr.opname == "RAISE_VARARGS" and raise_instr.arg == 1:
-                    # Check if stack has AssertionError (usually 2rd or 3th item before raise)
-                    # For simplicity, we just check if it's a likely candidate path
-                    # 3.9 assert pattern: if (not) cond: raise AssertionError(msg)
-                    if self.stack:
-                        cond = self.stack.pop()
-                        # We'll emit as a generic if for now if we can't be sure,
-                        # but here we can try to be bold.
-                        prefix = "assert " if "FALSE" in opname else "assert not "
-                        # Peek for the message
-                        msg = None
-                        # This is a bit complex for a single handler, so we'll let
-                        # DecompilerGeneric handle it as a block if we return.
-                        # Actually, let's keep it simple and just fix the basic emission.
-                        self.stack.append(cond)  # Put it back and let super() or generic handle it
-
-            if (jump_target <= instr.offset  # backward target → inside while-True
-                    and instr.offset not in self.prescan.while_header_targets.values()
-                    and next((b[1] for b in reversed(self.blocks) if b[1] in ("while", "for")), None) == "while"):
-                # This is the break-guard inside a while-True.
-                if self.stack:
-                    cond = self.stack.pop()
-                    if str(cond) not in ("_exc_match", "_exc_info"):
-                        is_true = "IF_TRUE" in opname
-                        if is_true:
-                            self._append_reconstructed(f"if not {cond}:")
-                        else:
-                            self._append_reconstructed(f"if {cond}:")
-                        self.indent_level += 1
-                        while_end = next(
-                            (b[0] for b in reversed(self.blocks) if b[1] == "while"), -1
-                        )
-                        if while_end > instr.offset:
-                            self.blocks.append((while_end, "if"))
-                return
-
-            # Pattern for 3.9 asserts: if not cond: raise AssertionError
-            # We skip explicit emit here and let DecompilerGeneric._op_pop_jump_if_false handle it
-            # if it's not a while-break. This prevents double-emission or mis-indentation.
-            super()._dispatch_instruction(instr)
+        if "POP_JUMP_IF_FALSE" in opname or "POP_JUMP_IF_TRUE" in opname:
+            self._pop_jump_39(instr)
             return
 
-        if opname in _bin39:
-            if len(self.stack) >= 2:
-                right = self.stack.pop()
-                left = self.stack.pop()
-                # Wrap the right operand in parens when it contains a ternary
-                # expression (e.g. 'x if cond else y') to prevent operator-
-                # precedence ambiguity (% binds tighter than if...else).
-                r_str = str(right)
-                if ' if ' in r_str and ' else ' in r_str:
-                    r_str = f'({r_str})'
-                # Wrap the left operand in parens when it contains a ternary
-                l_str = str(left)
-                if ' if ' in l_str and ' else ' in l_str:
-                    l_str = f'({l_str})'
-                self.stack.append(f"({l_str} {_bin39[opname]} {r_str})")
-
-        elif opname in _inplace39:
-            if len(self.stack) >= 2:
-                right = self.stack.pop()
-                left = self.stack.pop()
-                op = _inplace39[opname]
-                # Peek ahead: if next instruction is a STORE back to the same
-                # name, emit `left op= right` directly and consume the STORE.
-                next_pc = self.pc
-                while (next_pc < len(self.instructions)
-                       and self.instructions[next_pc].opname in (
-                           "CACHE", "RESUME", "NOP", "NOT_TAKEN", "ROT_TWO", "ROT_THREE"
-                )):
-                    next_pc += 1
-                
-                if (next_pc < len(self.instructions)
-                        and self.instructions[next_pc].opname in (
-                            "STORE_NAME", "STORE_FAST", "STORE_GLOBAL", "STORE_ATTR", "STORE_DEREF", "STORE_SUBSCR"
-                )):
-                    instr_store = self.instructions[next_pc]
-                    if self._match_augassign_store(str(left), instr_store):
-                        if instr_store.opname == "STORE_ATTR" and self.stack:
-                            self.stack.pop()  # pop defensive receiver
-                        if instr_store.opname == "STORE_SUBSCR" and len(self.stack) >= 2:
-                            self.stack.pop()
-                            self.stack.pop()
-                        self._append_reconstructed(f"{left} {op} {right}")
-                        self.pc = next_pc + 1  # consume the STORE
-                        return
-                # Fallback: push as expression for STORE to handle
-                # Wrap operands in parens when they contain a ternary
-                r_str = str(right)
-                if ' if ' in r_str and ' else ' in r_str:
-                    r_str = f'({r_str})'
-                l_str = str(left)
-                if ' if ' in l_str and ' else ' in l_str:
-                    l_str = f'({l_str})'
-                self.stack.append(f"({l_str} {op} {r_str})")
-
+        if opname in _BINARY_39:
+            self._op_binary_39(instr)
+        elif opname in _INPLACE_39:
+            self._op_inplace_39(instr)
         elif opname == "COMPARE_OP":
-            if len(self.stack) >= 2:
-                right = self.stack.pop()
-                left = self.stack.pop()
-                op = str(instr.argval)
-                # No outer parens: tests expect 'if x > 0:' not 'if (x > 0):'
-                self.stack.append(f"{self._comparand(left)} {op} {self._comparand(right)}")
+            self._op_compare_39(instr)
 
         # POP_BLOCK: marks the clean exit from a try body in Python 3.9.
         # Close the try_body block and record the indent level for except headers.
