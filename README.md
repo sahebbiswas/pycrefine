@@ -27,7 +27,7 @@ def summarize(rows, limit=10):
 
 | Bytecode written by | Status | Run pycrefine under |
 |---|---|---|
-| Python 3.9 | supported, tested in CI | any Python 3.9 or later |
+| Python 3.9 | supported, tested in CI; `async with` is not rebuilt and is reported | any Python 3.9 or later |
 | Python 3.11, 3.12, 3.13, 3.14 | supported, tested in CI | the same minor version (3.12 for 3.12 bytecode) |
 | Python 3.10 | partial, tested in CI: `async with` is not decompiled and some `if`/`else` and `try` shapes come out wrong ([known failures](https://github.com/sahebbiswas/pycrefine/blob/main/tests/known_failures.json)) | Python 3.10 |
 | Python 3.8 and older | not supported | |
@@ -36,7 +36,7 @@ Bytecode from 3.10 onwards can only be decompiled by the Python version that wro
 ([#94](https://github.com/sahebbiswas/pycrefine/issues/94)). pycrefine tells you which
 version to use, and [Getting started](https://github.com/sahebbiswas/pycrefine/blob/main/docs/getting-started.md#run-under-the-python-that-wrote-the-file)
 shows how to run it under another Python in one command. Some constructs (`match`,
-`async for`, `async with`) are not reconstructed yet; see
+`async for`) are not reconstructed yet; see
 [Limitations](https://github.com/sahebbiswas/pycrefine/blob/main/docs/limitations.md).
 
 ## Install

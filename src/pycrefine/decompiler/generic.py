@@ -682,18 +682,19 @@ class DecompilerGeneric(DecompilerBase):
         released: set = set()   # the jump targets the loop made
         index_at = {ins.offset: n for n, ins in enumerate(instrs)}
         for k, ins in enumerate(instrs):
-            if ins.opname == "GET_AWAITABLE" and not self._awaits_in_with(k):
-                folded = "AWAIT_EXPR"
-            elif ins.opname == "GET_YIELD_FROM_ITER":
-                folded = "YIELD_FROM_EXPR"
-            else:
+            folded = self._fold_kind(k)
+            if folded is None:
                 continue
             found = self._yield_from_loop(k, index_at)
             if found is None:
                 continue
             drop.update(found[0])
             released.update(found[1])
-            instrs[k] = replace(ins, opname=folded, opcode=-1)
+            if folded:
+                instrs[k] = replace(ins, opname=folded, opcode=-1)
+                continue
+            drop.add(k)
+            self._mark_async_with(k)
         if not drop:
             return
         for k, ins in enumerate(instrs):
@@ -711,6 +712,40 @@ class DecompilerGeneric(DecompilerBase):
             if ins.offset in released and ins.offset not in still_target and ins.is_jump_target:
                 kept[n] = replace(ins, is_jump_target=False)
         self.instructions = kept
+
+    def _fold_kind(self, k: int) -> Optional[str]:
+        """What the instruction at index *k* starts: AWAIT_EXPR, YIELD_FROM_EXPR, "" (an await of an `async with`), or None."""
+        opname = self.instructions[k].opname
+        if opname == "GET_YIELD_FROM_ITER":
+            return "YIELD_FROM_EXPR"
+        if opname != "GET_AWAITABLE":
+            return None
+        return "" if self._awaits_in_with(k) else "AWAIT_EXPR"
+
+    def _mark_async_with(self, k: int) -> None:
+        """
+        The awaits of an `async with` are no source: the entry's (the GET_AWAITABLE at index *k*) goes into its
+        BEFORE_ASYNC_WITH, which then reads as the BEFORE_WITH of a `with` written with `async`; the exit's go altogether.
+        """
+        instrs = self.instructions
+        before = instrs[k - 1]
+        if before.opname == "BEFORE_ASYNC_WITH":
+            instrs[k - 1] = replace(before, opname="BEFORE_WITH", opcode=-1)
+            self._async_with_offsets.add(before.offset)
+        elif self._is_async_with_preamble(k):
+            # 3.14: COPY 1; LOAD_SPECIAL __aexit__; SWAP 2; SWAP 3; LOAD_SPECIAL __aenter__; CALL 0
+            for n in (k - 5, k - 2):
+                instrs[n] = replace(instrs[n], arg=instrs[n].arg - 2, argval=instrs[n].argval - 2)
+            self._async_with_offsets.add(instrs[k - 6].offset)
+
+    def _is_async_with_preamble(self, k: int) -> bool:
+        """True if the GET_AWAITABLE at index *k* follows the 3.14 preamble of an `async with`."""
+        window = self.instructions[k - 6:k] if k >= 6 else []
+        return (len(window) == 6 and window[0].opname == "COPY" and window[0].arg == 1
+                and window[1].opname == "LOAD_SPECIAL" and window[1].arg == 3
+                and [(x.opname, x.arg) for x in window[2:4]] == [("SWAP", 2), ("SWAP", 3)]
+                and window[4].opname == "LOAD_SPECIAL" and window[4].arg == 2
+                and window[5].opname == "CALL" and window[5].arg == 0)
 
     def _awaits_in_with(self, k: int) -> bool:
         """True if the GET_AWAITABLE at index *k* awaits the entry or the exit of an `async with`, not an `await`."""
@@ -3006,6 +3041,7 @@ class DecompilerGeneric(DecompilerBase):
         self._share_diagnostics_with(sub)
         sub.prescan = self.prescan.for_handler_section()
         sub.emit = self.emit.for_handler_section()
+        sub._async_with_offsets = self._async_with_offsets
         sub._enclosing_locals = self._enclosing_locals
         sub.instructions = instrs
         sub.pc = 0
@@ -5813,6 +5849,7 @@ class DecompilerGeneric(DecompilerBase):
         # Install the same prescan results so sentinel detection works
         sub.prescan = self.prescan.for_handler_section()
         sub.emit = self.emit.for_handler_section()
+        sub._async_with_offsets = self._async_with_offsets
         sub.emit.annotations = self._body_annotations()    # (3.14: an annotation in a handler is written where it ran)
         self._mark_nested_tries(sub, handler_instrs)
         sub._enclosing_locals = self._enclosing_locals
@@ -6801,6 +6838,32 @@ class DecompilerGeneric(DecompilerBase):
             end += 1  # the handler's own jump back to the code after the block
         hidden.update(x.offset for x in instrs[handler_idx:end])
 
+    def _placeholder_target(self) -> str:
+        """`` as _item`` for a `with` whose target is stored by the instructions that follow (they take the item from it)."""
+        name = self._loop_placeholder()
+        self.stack.append(name)
+        return f" as {name}"
+
+    def _stores_into_attribute_or_subscript(self, index: int) -> bool:
+        """
+        True if the instructions from *index* load an object (and a key) and store the value on the stack into it:
+        the target of ``with cm as obj.attr:`` or ``with cm as obj[key]:``. A statement that only starts there
+        loads its value first, so the loads before the store are one (attribute) or two (subscript) in number.
+        """
+        instrs = self.instructions
+        loads = 0
+        for ins in instrs[index:index + 12]:
+            if ins.opname in _GENERIC_SKIP_OPS:
+                continue
+            if ins.opname in ("LOAD_FAST", "LOAD_NAME", "LOAD_GLOBAL", "LOAD_DEREF", "LOAD_CONST", "LOAD_SMALL_INT",
+                              "LOAD_FAST_BORROW", "LOAD_CONST_BORROW"):
+                loads += 1
+            elif ins.opname in ("LOAD_FAST_LOAD_FAST", "LOAD_FAST_BORROW_LOAD_FAST_BORROW"):
+                loads += 2
+            elif ins.opname != "LOAD_ATTR" or (ins.arg or 0) & 1:
+                return (ins.opname == "STORE_ATTR" and loads == 1) or (ins.opname == "STORE_SUBSCR" and loads == 2)
+        return False
+
     def _op_before_with(self, instr: BytecodeInstruction):
         opname = instr.opname
         # BEFORE_WITH — Python 3.11+ context-manager entry opcode.
@@ -6816,15 +6879,30 @@ class DecompilerGeneric(DecompilerBase):
         while look < len(self.instructions) and self.instructions[look].opname in _GENERIC_SKIP_OPS:
             look += 1
         if look < len(self.instructions) and self.instructions[look].opname in (
-            "STORE_FAST", "STORE_NAME", "STORE_GLOBAL"
+            "STORE_FAST", "STORE_NAME", "STORE_GLOBAL", "STORE_DEREF", "UNPACK_SEQUENCE", "UNPACK_EX",
+            "STORE_ATTR", "STORE_SUBSCR"
         ):
-            as_var = str(self.instructions[look].argval)
-            # Advance pc past the STORE so it is not processed again
-            self.pc = look + 1
+            # (a name, a captured name, or an unpacking: `as x`, `as (x, y)`)
+            pending: List[str] = []
+            parsed = (self._parse_store_target(self.instructions, look, pending)
+                      if self.instructions[look].opname not in ("STORE_ATTR", "STORE_SUBSCR") else None)
+            if parsed is not None and not pending:
+                as_var = f"({parsed[0]})" if "," in parsed[0] else parsed[0]
+                # Advance pc past the target so it is not processed again
+                self.pc = parsed[2]
+            else:
+                # an attribute or a subscript somewhere in the target: the stores that follow take the item
+                # from a name, as they do for the target of a `for` loop
+                as_var = self._loop_placeholder()
+                self.stack.append(as_var)
+        elif self._stores_into_attribute_or_subscript(look):
+            as_var = self._loop_placeholder()
+            self.stack.append(as_var)
+        keyword = "async with" if instr.offset in self._async_with_offsets else "with"
         if as_var:
-            self._append_reconstructed(f"with {ctx} as {as_var}:")
+            self._append_reconstructed(f"{keyword} {ctx} as {as_var}:")
         else:
-            self._append_reconstructed(f"with {ctx}:")
+            self._append_reconstructed(f"{keyword} {ctx}:")
         self.indent_level += 1
         # Find the PUSH_EXC_INFO that guards this with-block's exit handler
         # and record it as the block boundary so we can de-indent properly.
