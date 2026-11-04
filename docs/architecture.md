@@ -135,7 +135,7 @@ What the analysis passes found before emission starts.
 |---|---|---|
 | `while_body_offsets` | where a while body starts, to drop the repeated condition | `_prescan_while_loops` |
 | `while_header_targets` | body start -> guard POP_JUMP offset | `_prescan_while_loops`, `decompile` |
-| `while_true_ends` | end offsets of while-True loops | `_dispatch_instruction`, `_op_jump`, `_op_nop`, `_prescan_while_loops` |
+| `while_true_ends` | end offsets of while-True loops | `_open_while_true_39`, `_op_jump`, `_op_nop`, `_prescan_while_loops` |
 | `inner_back_jumps` | inner back-jump -> the back-edge that closes the loop | `_prescan_while_loops` |
 | `dup_guard_exits` | exit targets of suppressed bottom-of-loop condition copies | `_prescan_while_loops` |
 | `for_iter_targets` | jump targets of FOR_ITER (3.9 break detection) | `_prescan_try_structure` |
