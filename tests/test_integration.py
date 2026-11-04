@@ -276,7 +276,7 @@ class TestVerifyScenesBugs(unittest.TestCase):
         """
         Verify that decompiling a function with an empty `if` followed by `else` preserves the `pass`/else structure when expected.
         
-        For Python versions before 3.11, asserts that the decompiled output contains both `pass` and `else:`. For Python 3.11 and later, asserts that the `print` from the `else` branch is present (the compiler/runtime may optimize the `if`/`else` shape).
+        For Python versions before 3.10, asserts that the decompiled output contains both `pass` and `else:`. From 3.10 on, asserts that the `print` from the `else` branch is present: the compiler copies the function's final `return None` into both branches, which is rebuilt as an early return, the same behaviour.
         """
         src = (
             "def f(in_a):\n"
@@ -287,11 +287,11 @@ class TestVerifyScenesBugs(unittest.TestCase):
         )
         out = decompile(src)
         import sys
-        if sys.version_info < (3, 11):
+        if sys.version_info < (3, 10):
             self.assertIn("pass", out)
             self.assertIn("else:", out)
         else:
-            # 3.12+ may optimize trailing if/else into an early return
+            # 3.10+ copies the final return into both branches: an early return, the same behaviour
             self.assertIn("print", out)
 
     def test_api_40_pass_in_if_no_else(self):
@@ -334,7 +334,7 @@ class TestVerifyScenesBugs(unittest.TestCase):
         )
         out = decompile(src)
         import sys
-        if sys.version_info < (3, 11):
+        if sys.version_info < (3, 10):
             self.assertIn("else:", out)
             self.assertIn("print('in_a is None')", out)
         else:
