@@ -8107,6 +8107,10 @@ class DecompilerGeneric(DecompilerBase):
                 self._emit_inner_back_jump(instr, self.prescan.inner_back_jumps[instr.offset])
                 return
 
+            if self._is_continue_in_loop_else(instr, body_start):
+                self._append_reconstructed("continue")
+                return
+
             # If the prescan successfully identified the loop guard
             # (guard_offset in _while_header_targets), it already arranged for
             # the POP_JUMP_IF_FALSE handler to open a "while" block instead of
@@ -8299,6 +8303,34 @@ class DecompilerGeneric(DecompilerBase):
                 if end_offset > 0:
                     self.blocks.append((end_offset, "while"))
                     self.prescan.while_true_ends.add(end_offset)
+
+    def _is_continue_in_loop_else(self, instr: BytecodeInstruction, head: int) -> bool:
+        """
+        Whether a jump back to a `for` or `while` loop's head ends an `else` clause while the loop body goes on after the
+        clause (`for ...: ... else: continue` followed by code). It is the only jump back to the head, so nothing
+        marks it as a `continue`: the clause would be written as `pass`, or without its last statement.
+        """
+        # (the jump may land on an EXTENDED_ARG prefix of a long FOR_ITER, which the 3.9 disassembler leaves out)
+        instrs = self.instructions
+        index = next((k for k, i in enumerate(instrs) if i.offset >= head), None)
+        while index is not None and index + 1 < len(instrs) and instrs[index].opname == "EXTENDED_ARG":
+            index += 1
+        head_instr = None if index is None or instrs[index].offset - head > 6 else instrs[index]
+        if head_instr is None or not self.blocks or self.blocks[-1][1] != "else":
+            return False
+        if head_instr.opname == "FOR_ITER":
+            exit_target = self._get_jump_target(head_instr)
+        else:                       # a `while` loop: where its first test jumps when the condition fails
+            guard = next((i for i in self.instructions if head <= i.offset < instr.offset
+                          and i.opname.startswith("POP_JUMP") and self._get_jump_target(i) > instr.offset), None)
+            exit_target = self._get_jump_target(guard) if guard is not None else None
+        k = self.pc
+        while k < len(self.instructions) and self.instructions[k].opname in _WHILE_TRIVIAL_OPS:
+            k += 1
+        if not isinstance(exit_target, int) or k >= len(self.instructions):
+            return False
+        following = self.instructions[k].offset
+        return self.blocks[-1][0] <= following < exit_target
 
     def _emit_inner_back_jump(self, instr: BytecodeInstruction, loop_end: int) -> None:
         """
