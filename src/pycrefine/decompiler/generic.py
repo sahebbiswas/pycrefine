@@ -2416,8 +2416,7 @@ class DecompilerGeneric(DecompilerBase):
         entries = self._exception_entries() or []
         i = len(instrs) - 1
         while i >= 0:
-            if (instrs[i].opname == "LOAD_FAST_AND_CLEAR"
-                    and (i == 0 or instrs[i - 1].opname != "LOAD_FAST_AND_CLEAR")):
+            if instrs[i].opname == "LOAD_FAST_AND_CLEAR" and not self._continues_save_run(i):
                 match = self._match_inlined_comprehension(i)
                 if match is not None:
                     end, rendered, consumer = match
@@ -2434,6 +2433,14 @@ class DecompilerGeneric(DecompilerBase):
                     self._drop_comprehension_handlers(targets)
                     i = min(i, len(instrs) - 1)
             i -= 1
+
+    def _continues_save_run(self, i: int) -> bool:
+        """True if the LOAD_FAST_AND_CLEAR at *i* follows another one (`LOAD_FAST_AND_CLEAR x; MAKE_CELL x; ...`)."""
+        instrs = self.instructions
+        before = instrs[i - 1].opname if i > 0 else ""
+        if before == "MAKE_CELL" and i > 1:
+            before = instrs[i - 2].opname
+        return before == "LOAD_FAST_AND_CLEAR"
 
     def _drop_comprehension_handlers(self, targets):
         """Remove the SWAP/POP_TOP/SWAP/STORE_FAST.../RERAISE cleanup blocks."""
@@ -2470,8 +2477,9 @@ class DecompilerGeneric(DecompilerBase):
         n_ins = len(instrs)
         k = start
         saved: List[str] = []
-        while k < n_ins and instrs[k].opname == "LOAD_FAST_AND_CLEAR":
-            saved.append(str(instrs[k].argval))
+        while k < n_ins and instrs[k].opname in ("LOAD_FAST_AND_CLEAR", "MAKE_CELL"):
+            if instrs[k].opname == "LOAD_FAST_AND_CLEAR":     # (a loop variable a closure captures is a cell too)
+                saved.append(str(instrs[k].argval))
             k += 1
         if not (k + 2 < n_ins and instrs[k].opname == "SWAP"
                 and instrs[k + 1].opname in self._COMP_KINDS and not instrs[k + 1].arg
