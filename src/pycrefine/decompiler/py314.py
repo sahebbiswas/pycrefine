@@ -1,4 +1,5 @@
 """Decompiler backend for CPython 3.13/3.14 bytecode."""
+from typing import List
 from .._constants import _VALUE_OPS
 from ..expr import _ChainedValue, _UnpackAccessor
 from .py311 import Decompiler311Plus
@@ -104,10 +105,21 @@ class Decompiler314(Decompiler311Plus):
                     if next_instr and next_instr.opname in ("STORE_NAME", "STORE_FAST", "STORE_GLOBAL", "STORE_ATTR"):
                         as_name = f" as {next_instr.argval}"
                         self.pc += 1
+                    elif next_instr and next_instr.opname in ("STORE_DEREF", "UNPACK_SEQUENCE", "UNPACK_EX"):
+                        pending: List[str] = []
+                        parsed = self._parse_store_target(self.instructions, self.pc, pending)
+                        if parsed is not None and not pending:
+                            as_name = f" as ({parsed[0]})" if "," in parsed[0] else f" as {parsed[0]}"
+                            self.pc = parsed[2]
+                        else:
+                            as_name = self._placeholder_target()
+                    elif next_instr and self._stores_into_attribute_or_subscript(self.pc):
+                        as_name = self._placeholder_target()
                     elif next_instr and next_instr.opname == "POP_TOP":
                         self.pc += 1
 
-                    self._append_reconstructed(f"with {ctx_mgr}{as_name}:")
+                    keyword = "async with" if instr.offset in self._async_with_offsets else "with"
+                    self._append_reconstructed(f"{keyword} {ctx_mgr}{as_name}:")
                     self.indent_level += 1
 
                     try_end = None

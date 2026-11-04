@@ -8,7 +8,7 @@ Everything here was checked against the current `main`.
 
 | Bytecode written by | Status |
 |---|---|
-| 3.9 | Supported and tested in CI. Decompiles under any Python 3.9 or later. |
+| 3.9 | Supported and tested in CI. Decompiles under any Python 3.9 or later. `async with` is not rebuilt: it reports `unsupported_opcode` ([#85](https://github.com/sahebbiswas/pycrefine/issues/85)). |
 | 3.11, 3.12, 3.13, 3.14 | Supported and tested in CI. Needs the same Python minor version to run pycrefine ([#94](https://github.com/sahebbiswas/pycrefine/issues/94)). |
 | 3.10 | Partial, and tested in CI: the failures that are known are expected failures in `tests/known_failures.json`. 3.10's block-based handlers (`try`/`except`/`finally`/`with`) are read into the 3.11 form, which has its own gaps: `async with` is not decompiled ([#303](https://github.com/sahebbiswas/pycrefine/issues/303)), the code after a `try` or a `with` that every path copies can land in the last handler or body ([#301](https://github.com/sahebbiswas/pycrefine/issues/301)). |
 | 3.8 and older | Not supported. |
@@ -20,7 +20,7 @@ These change what the code does, or produce code that does not compile:
 | Construct | Versions | What you get | Issue |
 |---|---|---|---|
 | `match` / `case` | 3.10+ | a single `if` with the wrong condition | [#85](https://github.com/sahebbiswas/pycrefine/issues/85) |
-| `async for`, `async with` (and `async` comprehensions) | all | an `async def` with `yield None` where the loop or the context manager was | [#85](https://github.com/sahebbiswas/pycrefine/issues/85) |
+| `async for` (and `async` comprehensions) | all | an `async def` with `yield None` where the loop was | [#85](https://github.com/sahebbiswas/pycrefine/issues/85) |
 | A conditional expression that is the whole condition of a `while` (`while (a if b else c):`), or one operand of `and`/`or` in it | all | the condition is rebuilt as nested `if` statements around the loop, so `b` is tested once instead of on every pass | [#292](https://github.com/sahebbiswas/pycrefine/issues/292) |
 | `try` nested at the very start of another `try` | 3.12, 3.14 | the outer `except` clauses attach to the inner `try` | [#169](https://github.com/sahebbiswas/pycrefine/issues/169) |
 | Some code in the test corpus | 3.12, 3.14 | output that does not parse | [#91](https://github.com/sahebbiswas/pycrefine/issues/91) |
