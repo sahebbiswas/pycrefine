@@ -226,7 +226,19 @@ class UnknownExpression(str):
 
 def is_unknown(value: Any) -> bool:
     """True if *value* is a placeholder for an expression that could not be determined."""
-    return isinstance(value, UnknownExpression)
+    return isinstance(value, (UnknownExpression, _ChainedUnknown))
+
+
+def with_unknown_origin(text: str, *operands: Any) -> str:
+    """
+    *text* as an expression built from *operands*: if one of them is unknown, so is the result.
+
+    The result is an :class:`UnknownExpression` that keeps the text and takes the reason and the instruction of the
+    first unknown operand, so an expression derived from an unknown one still points at the first thing that went
+    wrong, however many operators are applied to it. With no unknown operand it is *text* itself.
+    """
+    origin = next((v for v in operands if is_unknown(v)), None)
+    return text if origin is None else UnknownExpression(origin.reason, origin.opcode, origin.offset, text)
 
 
 class _ChainedValue(str):
@@ -237,3 +249,16 @@ class _ChainedValue(str):
     """
     row: Optional[int] = None
     alias: Optional[str] = None   # a temporary that already holds the value, for stores that cannot join
+
+
+class _ChainedUnknown(_ChainedValue):
+    """A chained value whose text came from an unknown operand: it keeps the reason and the instruction."""
+
+    reason: str
+    opcode: Optional[str]
+    offset: Optional[int]
+
+    def __new__(cls, value: "UnknownExpression") -> "_ChainedUnknown":
+        self = super().__new__(cls, value)
+        self.reason, self.opcode, self.offset = value.reason, value.opcode, value.offset
+        return self

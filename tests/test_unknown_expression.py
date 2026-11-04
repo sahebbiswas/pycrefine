@@ -6,6 +6,7 @@ from pathlib import Path
 import pycrefine
 from pycrefine import (BytecodeInstruction, DecompilationError, Decompiler39, UnknownExpression, is_unknown)
 from pycrefine import diagnostics as dg
+from pycrefine.expr import StackNULL, _ChainedValue, with_unknown_origin
 
 SRC_DIR = Path(pycrefine.__file__).parent
 
@@ -119,6 +120,129 @@ class TestMalformedBytecode(unittest.TestCase):
         dec._op_binary(instr)
         self.assertFalse(is_unknown(dec.stack[-1]))
         self.assertEqual(dec.stack[-1], "a + b")
+
+
+class TestUnknownOperandsStayTyped(unittest.TestCase):
+    """An expression built from an unknown operand is unknown too, with the origin's reason and instruction (#225)."""
+
+    ORIGIN = UnknownExpression("the operand", "LOAD_FAST", 4)
+
+    def run_handler(self, handler, instr, operands):
+        dec = _dec()
+        dec.stack.extend(operands)
+        dec._current_instr = instr
+        getattr(dec, handler)(instr)
+        return dec.stack[-1]
+
+    def check(self, handler, instr, operands, expected):
+        """Run with each operand unknown in turn, then with none: only an unknown operand makes the result unknown."""
+        for position in range(len(operands)):
+            mixed = ["x"] * len(operands)
+            mixed[position] = self.ORIGIN
+            value = self.run_handler(handler, instr, mixed)
+            self.assertTrue(is_unknown(value), f"{handler} with operand {position} unknown gave {value!r}")
+            self.assertEqual((value.reason, value.opcode, value.offset), ("the operand", "LOAD_FAST", 4))
+            self.assertIn("?", str(value))
+        plain = self.run_handler(handler, instr, ["x"] * len(operands))
+        self.assertFalse(is_unknown(plain))
+        self.assertEqual(plain, expected)
+
+    def test_unary(self):
+        self.check("_op_unary", _instr("UNARY_NEGATIVE"), 1 * ["x"], "(-x)")
+
+    def test_comparison(self):
+        self.check("_op_compare", _instr("COMPARE_OP", "=="), 2 * ["x"], "x == x")
+
+    def test_is(self):
+        self.check("_op_is", _instr("IS_OP", 0), 2 * ["x"], "x is x")
+
+    def test_contains(self):
+        self.check("_op_contains", _instr("CONTAINS_OP", 1), 2 * ["x"], "x not in x")
+
+    def test_subscript(self):
+        self.check("_op_binary_subscr", _instr("BINARY_SUBSCR"), 2 * ["x"], "x[x]")
+
+    def test_attribute(self):
+        self.check("_op_load_attr", BytecodeInstruction(0, "LOAD_ATTR", 0, "name", 0, None, False), 1 * ["x"], "x.name")
+
+    def test_slice(self):
+        self.check("_op_binary_slice", _instr("BINARY_SLICE"), 3 * ["x"], "x[x:x]")
+
+    def test_call(self):
+        for unknown_at in (0, 1):
+            dec = _dec()
+            dec.stack.extend(["f", "arg"])
+            dec.stack[unknown_at] = self.ORIGIN
+            dec._current_instr = instr = _instr("CALL_FUNCTION", 1)
+            dec._op_call(instr)
+            self.assertTrue(is_unknown(dec.stack[-1]), repr(dec.stack[-1]))
+            self.assertEqual((dec.stack[-1].reason, dec.stack[-1].offset), ("the operand", 4))
+        dec = _dec()
+        dec.stack.extend(["f", "arg"])
+        dec._current_instr = instr = _instr("CALL_FUNCTION", 1)
+        dec._op_call(instr)
+        self.assertFalse(is_unknown(dec.stack[-1]))
+        self.assertEqual(dec.stack[-1], "f(arg)")
+
+    def test_method_call_with_an_unknown_receiver(self):
+        for sentinel_first in (True, False):
+            for receiver in (self.ORIGIN, "obj"):
+                dec = _dec()
+                if sentinel_first:      # [receiver, NULL(method), name, arg]
+                    dec.stack.extend([receiver, StackNULL(is_method=True), "run", "arg"])
+                else:                   # [receiver, name, NULL(method), arg]
+                    dec.stack.extend([receiver, "run", StackNULL(is_method=True), "arg"])
+                dec._current_instr = instr = _instr("CALL_FUNCTION", 1)
+                dec._op_call(instr)
+                result = dec.stack[-1]
+                self.assertEqual(is_unknown(result), receiver is self.ORIGIN, repr(result))
+                if receiver is self.ORIGIN:
+                    self.assertEqual((result.reason, result.opcode, result.offset), ("the operand", "LOAD_FAST", 4))
+
+    def test_call_ex_with_an_unknown_tuple_or_dict(self):
+        for slot in ("tuple", "dict", None):
+            args = self.ORIGIN if slot == "tuple" else "(1,)"
+            kwargs = self.ORIGIN if slot == "dict" else "{'k': 1}"
+            dec = _dec()
+            dec.stack.extend(["f", args, kwargs])
+            dec._current_instr = instr = _instr("CALL_FUNCTION_EX", 1)
+            dec._op_call(instr)
+            result = dec.stack[-1]
+            self.assertEqual(is_unknown(result), slot is not None, f"{slot}: {result!r}")
+            if slot:
+                self.assertEqual((result.reason, result.offset), ("the operand", 4))
+
+    def test_unknown_value_stored_twice_stays_one_chained_value(self):
+        dec = _dec()
+        dec.instructions = [_instr("STORE_FAST", "a"), _instr("STORE_FAST", "b")]
+        dec.pc = 0
+        dec.stack.append(UnknownExpression("the operand", "LOAD_FAST", 4, "(-(f() + ?))"))
+        dec._duplicate_top()
+        first, second = dec.stack[-2:]
+        self.assertIs(first, second)                     # one value, so one statement `a = b = ...`
+        self.assertIsInstance(first, _ChainedValue)
+        self.assertTrue(is_unknown(first))
+        self.assertEqual((first.reason, first.opcode, first.offset), ("the operand", "LOAD_FAST", 4))
+        self.assertEqual(str(first), "(-(f() + ?))")
+        self.assertTrue(is_unknown(with_unknown_origin("(~x)", first)))
+
+    def test_the_first_unknown_operand_gives_the_origin(self):
+        first = UnknownExpression("first", "LOAD_FAST", 2)
+        second = UnknownExpression("second", "LOAD_FAST", 6)
+        value = self.run_handler("_op_compare", _instr("COMPARE_OP", "<"), [first, second])
+        self.assertEqual((value.reason, value.offset), ("first", 2))
+
+    def test_operators_compose_without_losing_the_origin(self):
+        dec = _dec()
+        dec.stack.append(self.ORIGIN)
+        for handler, instr in (("_op_unary", _instr("UNARY_NOT")),):
+            dec._current_instr = instr
+            getattr(dec, handler)(instr)
+        dec.stack.append("y")
+        dec._op_contains(_instr("CONTAINS_OP", 0))
+        value = dec.stack[-1]
+        self.assertTrue(is_unknown(value))
+        self.assertEqual((value.reason, value.offset), ("the operand", 4))
 
 
 class TestTernaryBranchEvaluation(unittest.TestCase):

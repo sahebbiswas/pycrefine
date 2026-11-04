@@ -36,7 +36,7 @@ from .._constants import (
 )
 from ..codeobj import _is_code
 from .base import DecompilerBase
-from ..expr import (StackNULL, UnknownExpression, _YieldExpr, _BoolExpr, _ChainedValue, _CollectionAccumSentinel, _ConvertedValue, _FString,
+from ..expr import (StackNULL, with_unknown_origin, _YieldExpr, _BoolExpr, _ChainedUnknown, _ChainedValue, _CollectionAccumSentinel, _ConvertedValue, _FString,
                     _FStringField, _MergedDisplay, _TInterpolation, _TInterpolations, _UnpackAccessor, _unary_operand, is_unknown)
 from ..diagnostics import (AMBIGUOUS_EXPRESSION, INTERNAL_ERROR, STACK_UNDERFLOW, UNKNOWN_CONTROL_FLOW,
                            UNSUPPORTED_OPCODE, UNSUPPORTED_VERSION_CONSTRUCT, DecompilationError)
@@ -6272,7 +6272,7 @@ class DecompilerGeneric(DecompilerBase):
         if len(self.stack) >= 2:
             sub = self.stack.pop()
             container = self.stack.pop()
-            self.stack.append(f"{self._receiver(container)}[{sub}]")
+            self.stack.append(with_unknown_origin(f"{self._receiver(container)}[{sub}]", container, sub))
 
         # ── exceptions ─────────────────────────────────────────────────
 
@@ -7214,9 +7214,7 @@ class DecompilerGeneric(DecompilerBase):
             if unknown_reason is not None:
                 self.stack.append(self._unknown(unknown_reason, text=text))
             else:
-                origin = next((v for v in (left, right) if is_unknown(v)), None)
-                self.stack.append(text if origin is None
-                                  else UnknownExpression(origin.reason, origin.opcode, origin.offset, text))
+                self.stack.append(with_unknown_origin(text, left, right))
 
     def _op_store_slice(self, _instr: BytecodeInstruction):
         # Python 3.12+ STORE_SLICE pops: stop, start, container, value
@@ -7235,13 +7233,14 @@ class DecompilerGeneric(DecompilerBase):
             stop = self.stack.pop()
             start = self.stack.pop()
             container = self.stack.pop()
+            operands = (container, start, stop)
 
             if str(start) == "None":
                 start = ""
             if str(stop) == "None":
                 stop = ""
 
-            self.stack.append(f"{self._receiver(container)}[{start}:{stop}]")
+            self.stack.append(with_unknown_origin(f"{self._receiver(container)}[{start}:{stop}]", *operands))
 
         # INPLACE_* → augmented assignment
 
@@ -7335,6 +7334,7 @@ class DecompilerGeneric(DecompilerBase):
         num_args = int(instr.arg) if instr.arg is not None else 0
         final_args: List[str] = []
         raw_args: List[Any] = []
+        ex_operands: List[Any] = []          # the tuple and the dict of a CALL_FUNCTION_EX, which `raw_args` leaves out
 
         # CALL_KW (3.13/3.14) or CALL_FUNCTION_KW (3.9/3.10) pops names tuple first
         if opname in ("CALL_KW", "CALL_FUNCTION_KW"):
@@ -7360,6 +7360,7 @@ class DecompilerGeneric(DecompilerBase):
                 item = self.stack.pop()
             args_tuple = item
             final_args, raw_args = self._call_ex_arguments(args_tuple, kwargs_dict)
+            ex_operands = [args_tuple, kwargs_dict]
         else:
             final_args = []
             final_args_raw = []
@@ -7437,7 +7438,7 @@ class DecompilerGeneric(DecompilerBase):
             func_val = self._pop()
             if sentinel.is_method and self.stack:
                 obj = self.stack.pop()
-                func_val = f"{self._wrap_negative_literal(obj)}.{func_val}"
+                func_val = with_unknown_origin(f"{self._wrap_negative_literal(obj)}.{func_val}", obj)
                 is_method_call = True
         elif self.stack:
             # Pattern 1: Popped name as callable. Sentinel might be on stack.
@@ -7446,7 +7447,7 @@ class DecompilerGeneric(DecompilerBase):
                 self.stack.pop() # pop sentinel
                 if sentinel.is_method and self.stack:
                     obj = self.stack.pop()
-                    func_val = f"{self._wrap_negative_literal(obj)}.{func_val}"
+                    func_val = with_unknown_origin(f"{self._wrap_negative_literal(obj)}.{func_val}", obj)
                     is_method_call = True
             elif opname in ("CALL", "CALL_KW"):
                 # Missing NULL sentinel in bound calls (genexprs/lambdas).
@@ -7518,7 +7519,8 @@ class DecompilerGeneric(DecompilerBase):
         if func == "super" and not final_args:
             self.stack.append("super()")
         else:
-            self.stack.append(f"{self._parenthesize_callee(func)}({', '.join(final_args)})")
+            self.stack.append(with_unknown_origin(f"{self._parenthesize_callee(func)}({', '.join(final_args)})",
+                                                  func_val, *raw_args, *ex_operands))
 
     @staticmethod
     def _parenthesize_callee(func: Any) -> str:
@@ -7606,7 +7608,7 @@ class DecompilerGeneric(DecompilerBase):
             if str(left) == "__name__" and str(right) == "'__main__'" and op == "==":
                 self.stack.append('__name__ == "__main__"')
             else:
-                self.stack.append(f"{self._comparand(left)} {op} {self._comparand(right)}")
+                self.stack.append(with_unknown_origin(f"{self._comparand(left)} {op} {self._comparand(right)}", left, right))
 
     def _op_contains(self, instr: BytecodeInstruction):
         opname = instr.opname
@@ -7614,7 +7616,8 @@ class DecompilerGeneric(DecompilerBase):
             container = self.stack.pop()
             item = self.stack.pop()
             op = "not in" if bool(instr.arg) else "in"
-            self.stack.append(f"{self._comparand(item)} {op} {self._comparand(container)}")
+            self.stack.append(with_unknown_origin(f"{self._comparand(item)} {op} {self._comparand(container)}",
+                                                  item, container))
 
     def _op_is(self, instr: BytecodeInstruction):
         opname = instr.opname
@@ -7622,7 +7625,7 @@ class DecompilerGeneric(DecompilerBase):
             right = self.stack.pop()
             left = self.stack.pop()
             op = "is not" if bool(instr.arg) else "is"
-            self.stack.append(f"{self._comparand(left)} {op} {self._comparand(right)}")
+            self.stack.append(with_unknown_origin(f"{self._comparand(left)} {op} {self._comparand(right)}", left, right))
 
     def _loop_return_tail(self) -> Optional[int]:
         """
@@ -7716,17 +7719,19 @@ class DecompilerGeneric(DecompilerBase):
         is computed once; writing it per target would run it once per target).
         """
         value = self.stack[-1]
-        if type(value) is str or isinstance(value, _YieldExpr):  # pylint: disable=unidiomatic-typecheck
+        plain = type(value) is str or isinstance(value, _YieldExpr)  # pylint: disable=unidiomatic-typecheck
+        if plain or is_unknown(value):
             first = self._next_real_index()
             store = self.instructions[first] if first is not None else None
-            if (store is not None and store.opname in self._NAME_STORES
+            if (plain and store is not None and store.opname in self._NAME_STORES
                     and str(store.argval) not in self._COMPILER_NAMES and not self._chain_follows(first + 1)):
                 # `(name := value)`: the copy stays on the stack as the expression's value
                 self.stack[-1] = f"({store.argval} := {value})"
                 self.pc = first + 1
                 return
             if self._stored_next():
-                value = _ChainedValue(value.bare if isinstance(value, _YieldExpr) else value)
+                value = (_ChainedUnknown(value) if is_unknown(value)
+                         else _ChainedValue(value.bare if isinstance(value, _YieldExpr) else value))
                 self.stack[-1] = value
         self.stack.append(value)
 
@@ -8919,7 +8924,8 @@ class DecompilerGeneric(DecompilerBase):
             }[instr.opname]
         if not self.stack:
             return
-        self.stack.append(f"({symbol}{_unary_operand(self.stack.pop())})")
+        operand = self.stack.pop()
+        self.stack.append(with_unknown_origin(f"({symbol}{_unary_operand(operand)})", operand))
 
     def _op_jump_if_not_exc_match(self, instr: BytecodeInstruction):
         # 3.9 / 3.10: JUMP_IF_NOT_EXC_MATCH(target)
@@ -9508,7 +9514,7 @@ class DecompilerGeneric(DecompilerBase):
                 # drop the NULL without taking another object off the stack. (3.12's LOAD_ATTR
                 # leaves the receiver on the stack instead, hence its `is_method=True`.)
                 self.stack.append(StackNULL(is_method=False))
-            self.stack.append(f"{self._receiver(obj)}.{instr.argval}")
+            self.stack.append(with_unknown_origin(f"{self._receiver(obj)}.{instr.argval}", obj))
 
     def _op_load_super_attr(self, instr: BytecodeInstruction):
         # LOAD_SUPER_ATTR pops 3: [global_super, class, self/class]
