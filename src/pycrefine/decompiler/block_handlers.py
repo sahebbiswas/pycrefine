@@ -56,7 +56,7 @@ def _cover(instructions: List[BytecodeInstruction]) -> Dict[int, int]:
                 if handler is not None:
                     work.append((handler, stack + (("E",),)))
                 stack = stack + (("B", ins.argval),)
-            elif name in ("POP_BLOCK", "POP_EXCEPT"):
+            elif name in ("POP_BLOCK", "POP_EXCEPT", "END_ASYNC_FOR"):    # (END_ASYNC_FOR ends its handler)
                 stack = stack[:-1]
             else:
                 target = _jump_target(ins)
@@ -177,7 +177,7 @@ class _Rewriter:  # pylint: disable=too-many-instance-attributes,too-few-public-
         self.instructions = instructions
         self.by_offset = {ins.offset: i for i, ins in enumerate(instructions)}
         setups = {self.by_offset[ins.argval] for ins in instructions
-                  if ins.opname in _SETUP_OPS and ins.argval in self.by_offset}
+                  if ins.opname in _SETUP_OPS and ins.argval in self.by_offset and not self._guards_async_for(ins)}
         # a handler is entered from the `try`; the cleanup of `except ... as name` is
         # `LOAD_CONST None; STORE_x name; DELETE_x name` (a `finally` body may also start with a None load)
         self.handlers = {h for h in setups if not self._is_cleanup_start(h)}
@@ -187,6 +187,11 @@ class _Rewriter:  # pylint: disable=too-many-instance-attributes,too-few-public-
         self.copies = _copied_exits(instructions)
         self.out: List[Tuple[BytecodeInstruction, Optional[int]]] = []   # (new instruction, old index)
         self.first_new: Dict[int, int] = {}     # old index -> position in out of its first replacement
+
+    def _guards_async_for(self, ins: BytecodeInstruction) -> bool:
+        """True for the SETUP_FINALLY that guards the `GET_ANEXT` of an `async for`: its handler is END_ASYNC_FOR."""
+        at = self.by_offset.get(ins.argval)
+        return ins.opname == "SETUP_FINALLY" and at is not None and self.instructions[at].opname == "END_ASYNC_FOR"
 
     def _is_cleanup_start(self, h: int) -> bool:
         window = self.instructions[h:h + 3]
@@ -223,6 +228,8 @@ class _Rewriter:  # pylint: disable=too-many-instance-attributes,too-few-public-
 
     def _setup(self, i: int, ins: BytecodeInstruction) -> Optional[int]:
         name = ins.opname
+        if name == "SETUP_FINALLY" and self._guards_async_for(ins):
+            return i + 1    # (3.11 has the loop's handler in the table only, and it is no source)
         if name == "SETUP_FINALLY":
             after_setup = i > 0 and self.instructions[i - 1].opname == "SETUP_FINALLY"
             if self.by_offset.get(ins.argval) not in self.cleanups and not after_setup:

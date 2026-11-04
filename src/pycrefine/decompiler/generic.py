@@ -103,7 +103,7 @@ _UNSUPPORTED_CONSTRUCTS = {
                     "match statements are not decompiled (issue #85)"),
     **dict.fromkeys(("GET_AWAITABLE", "GET_AITER", "GET_ANEXT", "END_ASYNC_FOR", "SEND", "END_SEND",
                      "CLEANUP_THROW", "BEFORE_ASYNC_WITH"),
-                    "async for and async with are not decompiled (issue #85)"),
+                    "async for and async comprehensions are not decompiled (issue #85)"),
     **dict.fromkeys(("LOAD_FROM_DICT_OR_DEREF", "CALL_INTRINSIC_2"),
                     "type parameters (PEP 695) are not decompiled (issue #85)"),
 }
@@ -713,11 +713,178 @@ class DecompilerGeneric(DecompilerBase):
                 kept[n] = replace(ins, is_jump_target=False)
         self.instructions = kept
 
+    def _fold_async_for(self) -> None:
+        """
+        Read an `async for` as the `for` it is written like.
+
+        ``GET_AITER`` starts the loop and ``GET_ANEXT`` plus its awaiting loop (folded into ANEXT_EXPR) takes the
+        place of FOR_ITER; the exhausted iterator ends the loop through an exception, so ``END_ASYNC_FOR`` (the
+        handler) stands where a `for` has its END_FOR (3.12+), or nothing (3.10, 3.11). The table entries that lead
+        to it go with it.
+        """
+        self._move_async_for_ends()
+        instrs = self.instructions
+        ends = self._async_for_ends()
+        if not ends:
+            return
+        drop: Set[int] = set()
+        for head, end in ends.items():
+            ins, last = instrs[head], instrs[end]
+            if self.target_version < (3, 12):
+                if end + 1 >= len(instrs):
+                    continue
+                target = instrs[end + 1].offset
+                instrs[end + 1] = replace(instrs[end + 1], is_jump_target=True)
+                drop.add(end)
+            else:
+                target = last.offset
+                instrs[end] = replace(last, opname="END_FOR", opcode=-1, arg=None, argval=None, argrepr="",
+                                      is_jump_target=True)
+            self._async_for_offsets.add(ins.offset)
+            instrs[head] = replace(ins, opname="FOR_ITER", opcode=-1, arg=target, argval=target,
+                                   argrepr=f"to {target}")
+            self._throw_handlers.add(last.offset)
+        for n, ins in enumerate(instrs):
+            if ins.opname == "GET_AITER":
+                instrs[n] = replace(ins, opname="GET_ITER", opcode=-1)
+        self.instructions = [ins for n, ins in enumerate(instrs) if n not in drop]
+        self._exception_entries_cache = False
+
+    def _async_for_ends(self) -> Dict[int, int]:
+        """
+        ``{index of an ANEXT_EXPR: index of the END_ASYNC_FOR that ends its loop}``: the handler that the table
+        entries around the ANEXT_EXPR lead to (3.11+), or the next unmatched one (3.10, where the loops nest in order).
+        """
+        instrs = self.instructions
+        ends: Dict[int, int] = {}
+        entries = self._exception_entries() if tuple(self.target_version) >= (3, 11) else None
+        if entries is not None:
+            index_at = {ins.offset: n for n, ins in enumerate(instrs)}
+            for n, ins in enumerate(instrs):
+                if ins.opname != "ANEXT_EXPR":
+                    continue
+                handler = next((index_at[e.target] for e in entries
+                                if e.start <= ins.offset < e.end and e.target in index_at
+                                and instrs[index_at[e.target]].opname == "END_ASYNC_FOR"), None)
+                if handler is not None:
+                    ends[n] = handler
+            return ends
+        stack: List[int] = []
+        for n, ins in enumerate(instrs):
+            if ins.opname == "ANEXT_EXPR":
+                stack.append(n)
+            elif ins.opname == "END_ASYNC_FOR" and stack:
+                ends[stack.pop()] = n
+        return ends
+
+    def _move_async_for_ends(self) -> None:
+        """
+        Put each END_ASYNC_FOR right after the jump that ends the body of its loop.
+
+        The compiler lays the handler out after the code that follows a loop that is the last thing in another
+        loop's body (``for k in ks: async for x in xs: ...``): the handler and the jump back of the outer loop
+        come after the outer loop's own end. A `for` ends where its body does, so the two instructions go there,
+        and the offsets are numbered again.
+        """
+        moved = False
+        for _ in range(len(self.instructions)):
+            instrs = self.instructions
+            target = None
+            for head, end in sorted(self._async_for_ends().items(), key=lambda pair: pair[1]):
+                back = max((n for n in range(head + 1, end)
+                            if "JUMP" in instrs[n].opname and self._get_jump_target(instrs[n]) == instrs[head].offset),
+                           default=None)
+                if back is not None and back + 1 != end and not self._reached_from_body(head, back):
+                    target = (back, end)
+                    break
+            if target is None:
+                break
+            back, end = target
+            stop = self._async_for_tail_end(end)
+            if stop is None:
+                break
+            self.instructions = instrs[:back + 1] + instrs[end:stop + 1] + instrs[back + 1:end] + instrs[stop + 1:]
+            self._drop_jump_to_next(back + 1 + (stop - end))
+            moved = True
+        if moved:
+            self._renumber_offsets()
+
+    def _drop_jump_to_next(self, index: int) -> None:
+        """Drop the jump at *index* if it only leads to the instruction after it; the jumps to it go on to there."""
+        instrs = self.instructions
+        jump = instrs[index]
+        if (not jump.opname.startswith("JUMP") or index + 1 >= len(instrs)
+                or self._get_jump_target(jump) != instrs[index + 1].offset):
+            return
+        target, after = jump.offset, instrs[index + 1].offset
+        rest = [x for n, x in enumerate(instrs) if n != index]
+        self.instructions = [replace(x, argval=after) if "JUMP" in x.opname and x.argval == target else x
+                             for x in rest]
+        at = {x.offset: n for n, x in enumerate(self.instructions)}
+        if after in at and jump.is_jump_target:
+            self.instructions[at[after]] = replace(self.instructions[at[after]], is_jump_target=True)
+
+    def _async_for_tail_end(self, end: int) -> Optional[int]:
+        """
+        Index of the last instruction of the code that goes with the END_ASYNC_FOR at index *end*: up to the first
+        jump or return, and on while a jump in it leads to the instruction that comes next.
+        """
+        instrs = self.instructions
+
+        def ends_path(ins):
+            return ins.opname in ("JUMP_FORWARD", "JUMP_BACKWARD", "JUMP_BACKWARD_NO_INTERRUPT", "JUMP_ABSOLUTE",
+                                  "RERAISE", "RAISE_VARARGS") or ins.opname.startswith("RETURN")
+        stop = end
+        while stop < len(instrs):
+            if ends_path(instrs[stop]):
+                led_to = {self._get_jump_target(x) for x in instrs[end:stop + 1] if "JUMP" in x.opname}
+                if stop + 1 < len(instrs) and instrs[stop + 1].offset in led_to:
+                    stop += 1
+                    continue
+                return stop
+            stop += 1
+        return None
+
+    def _reached_from_body(self, head: int, back: int) -> bool:
+        """
+        True if the code after the instruction at index *back* (the jump that ends a loop's body, whose head is at
+        index *head*) is part of the body: a jump or an exception table entry from inside it leads there.
+        """
+        instrs = self.instructions
+        first = instrs[back + 1].offset
+        if any(self._get_jump_target(x) == first for x in instrs[head + 1:back + 1] if "JUMP" in x.opname):
+            return True
+        low, high = instrs[head].offset, instrs[back].offset
+        return any(e.target == first and low <= e.start <= high for e in self._exception_entries() or ())
+
+    def _renumber_offsets(self) -> None:
+        """Number the instructions 0, 2, 4, ... in their present order, and carry every offset along."""
+        old = [ins.offset for ins in self.instructions]
+        new_of = {off: 2 * n for n, off in enumerate(old)}
+
+        def at(off):
+            return new_of.get(off, -1 - off)    # (an instruction that is gone)
+        jumps = ("JUMP", "SEND")
+        self.instructions = [
+            replace(ins, offset=2 * n,
+                    argval=at(ins.argval) if (any(j in ins.opname for j in jumps) or ins.opname == "FOR_ITER")
+                    and isinstance(ins.argval, int) else ins.argval)
+            for n, ins in enumerate(self.instructions)]
+        self._throw_handlers = {at(off) for off in self._throw_handlers}
+        self._async_with_offsets = {at(off) for off in self._async_with_offsets}
+        self._async_for_offsets = {at(off) for off in self._async_for_offsets}
+        self._offset_map = new_of
+        if self._block_entries is not None:
+            self._block_entries = self._remap_entries(self._block_entries)
+        self._exception_entries_cache = False
+
     def _fold_kind(self, k: int) -> Optional[str]:
         """What the instruction at index *k* starts: AWAIT_EXPR, YIELD_FROM_EXPR, "" (an await of an `async with`), or None."""
         opname = self.instructions[k].opname
         if opname == "GET_YIELD_FROM_ITER":
             return "YIELD_FROM_EXPR"
+        if opname == "GET_ANEXT" and self.target_version >= (3, 10):   # (3.9: not read, and reported)
+            return "ANEXT_EXPR"
         if opname != "GET_AWAITABLE":
             return None
         return "" if self._awaits_in_with(k) else "AWAIT_EXPR"
@@ -809,8 +976,10 @@ class DecompilerGeneric(DecompilerBase):
         self._report_version_gaps()
         self._check_jump_targets()
         self._collapse_inlined_comprehensions()
+        self._report_async_comprehensions()
         self._fold_inlined_builtin_calls()
         self._fold_yield_from()
+        self._fold_async_for()
         self._drop_unreachable_handlers()
         self.pc = 0
         self.blocks = []
@@ -2532,6 +2701,36 @@ class DecompilerGeneric(DecompilerBase):
                     i = min(i, len(instrs) - 1)
             i -= 1
 
+    def _report_async_comprehensions(self) -> None:
+        """
+        Report an async comprehension (``[x async for x in xs]``, ``[await f(x) for x in xs]``): not rebuilt yet.
+        It is a coroutine or async generator function of its own before 3.12, and has its variables saved and
+        restored in the enclosing code from 3.12 on, which the collapse above leaves alone when it awaits.
+        """
+        if not self.code_obj.co_flags & (_CO_COROUTINE | _CO_ASYNC_GENERATOR):
+            return
+        if self.code_obj.co_name in ("<listcomp>", "<setcomp>", "<dictcomp>", "<genexpr>"):
+            first = next((ins for ins in self.instructions if ins.opname != "RESUME"), None)
+        else:
+            first = next((self.instructions[n] for n in self._inlined_comprehension_starts()
+                          if self._awaits_before_end(n)), None)
+        if first is not None:
+            self._report(UNSUPPORTED_VERSION_CONSTRUCT, "async comprehensions are not decompiled (issue #85)", first)
+
+    def _inlined_comprehension_starts(self) -> List[int]:
+        """Indexes of the LOAD_FAST_AND_CLEAR that open an inlined comprehension the collapse left alone."""
+        return [n for n, ins in enumerate(self.instructions)
+                if ins.opname == "LOAD_FAST_AND_CLEAR" and not self._continues_save_run(n)]
+
+    def _awaits_before_end(self, start: int) -> bool:
+        """True if an await or an async iteration comes between the instruction at *start* and the end of its loop."""
+        for ins in self.instructions[start:]:
+            if ins.opname in ("GET_AITER", "GET_ANEXT", "GET_AWAITABLE", "SEND", "YIELD_FROM"):
+                return True
+            if ins.opname in ("END_FOR", "END_ASYNC_FOR", "RETURN_VALUE", "RETURN_CONST"):
+                return False
+        return False
+
     def _continues_save_run(self, i: int) -> bool:
         """True if the LOAD_FAST_AND_CLEAR at *i* follows another one (`LOAD_FAST_AND_CLEAR x; MAKE_CELL x; ...`)."""
         instrs = self.instructions
@@ -3046,6 +3245,7 @@ class DecompilerGeneric(DecompilerBase):
         sub.prescan = self.prescan.for_handler_section()
         sub.emit = self.emit.for_handler_section()
         sub._async_with_offsets = self._async_with_offsets
+        sub._async_for_offsets = self._async_for_offsets
         sub._enclosing_locals = self._enclosing_locals
         sub.instructions = instrs
         sub.pc = 0
@@ -5854,6 +6054,7 @@ class DecompilerGeneric(DecompilerBase):
         sub.prescan = self.prescan.for_handler_section()
         sub.emit = self.emit.for_handler_section()
         sub._async_with_offsets = self._async_with_offsets
+        sub._async_for_offsets = self._async_for_offsets
         sub.emit.annotations = self._body_annotations()    # (3.14: an annotation in a handler is written where it ran)
         self._mark_nested_tries(sub, handler_instrs)
         sub._enclosing_locals = self._enclosing_locals
@@ -9178,7 +9379,7 @@ class DecompilerGeneric(DecompilerBase):
                     peek_pc += 1
                 if peek_pc < len(self.instructions):
                     next_instr = self.instructions[peek_pc]
-                    if next_instr.opname in ("STORE_NAME", "STORE_FAST",
+                    if next_instr.opname in ("STORE_NAME", "STORE_FAST", "STORE_DEREF", "STORE_GLOBAL",
                                              "STORE_FAST_STORE_FAST", "STORE_FAST_LOAD_FAST"):
                         if next_instr.opname == "STORE_FAST_STORE_FAST":
                             var_name = ", ".join([str(v) for v in next_instr.argval])
@@ -9193,7 +9394,8 @@ class DecompilerGeneric(DecompilerBase):
                             self.pc = parsed[2]  # skip the targets we parsed
             if var_name is None:
                 var_name = self._loop_placeholder()
-            self._append_reconstructed(f"for {var_name} in {iterator}:")
+            keyword = "async for" if instr.offset in self._async_for_offsets else "for"
+            self._append_reconstructed(f"{keyword} {var_name} in {iterator}:")
             self.indent_level += 1
             jump_target = self._get_jump_target(instr)
             self.blocks.append((jump_target, "for"))
