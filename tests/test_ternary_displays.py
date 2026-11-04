@@ -54,6 +54,14 @@ class TestTernaryInDisplays(unittest.TestCase):
         self.assert_same("    return [10, 20, 30][a if c else b]\n")
         self.assert_same("    return [1, 2, 3, 4][1:a if c else b]\n")
 
+    def test_stored_tuple_with_a_leading_constant(self):
+        self.assert_same("    t = (1, a if c else b)\n    return t\n")
+        self.assert_same("    t = (1, 2, a + 1 if c else b - 1)\n    return t\n")
+
+    def test_two_conditionals_in_one_tuple(self):
+        self.assert_same("    x = (a if c else b, a if b else c)\n    return x\n")
+        self.assert_same("    return ((a if c else b), (b if c else a))\n")
+
 
 if __name__ == "__main__":
     unittest.main()

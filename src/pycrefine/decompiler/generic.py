@@ -3176,7 +3176,7 @@ class DecompilerGeneric(DecompilerBase):
         """
         True if evaluating *seq* would consume values pushed before it, i.e. the branch
         is the tail of a larger expression (`foo(1, a)` where `foo` and `1` were pushed
-        before the test) rather than an expression of its own.
+        before the test, or `(1, a)` where the `1` was) rather than an expression of its own.
         """
         depth = 0
         for ins in seq:
@@ -3187,7 +3187,9 @@ class DecompilerGeneric(DecompilerBase):
                 continue
             if depth < 0:
                 return True
-        return False
+        # a display built from an element pushed before the test (`(1, a)`) takes it without going below zero
+        return (depth < 1 and bool(seq) and seq[-1].opname.startswith("BUILD_")
+                and seq[-1].opname != "BUILD_INTERPOLATION")
 
     def _missing_operand(self, reason: str, instr: BytecodeInstruction):
         """
@@ -3229,8 +3231,11 @@ class DecompilerGeneric(DecompilerBase):
                                    and instrs[k].opname not in ("LOAD_ATTR", "LOAD_METHOD", "LOAD_BUILD_CLASS")):
             loads += 0 if instrs[k].opname in quiet else 1
             k += 1
+        if k + 1 < len(instrs) and instrs[k].opname == "TO_BOOL":
+            k += 1
+        # (a test after the loads leaves the value on the stack: `(a if c else b, a if d else c)`'s first element)
         return (k < len(instrs) and loads > 0 and (instrs[k].arg or 0) >= 0
-                and (instrs[k].opname in ("CALL", "CALL_FUNCTION", "CALL_METHOD", "CALL_KW", "CALL_FUNCTION_KW",
+                and (instrs[k].opname.startswith("POP_JUMP_") or instrs[k].opname in ("CALL", "CALL_FUNCTION", "CALL_METHOD", "CALL_KW", "CALL_FUNCTION_KW",
                                           "COMPARE_OP", "IS_OP", "CONTAINS_OP", "BINARY_SUBSCR", "BUILD_INTERPOLATION",
                                           "BUILD_TUPLE", "BUILD_LIST", "BUILD_SET", "BUILD_MAP", "BUILD_CONST_KEY_MAP",
                                           "BUILD_STRING", "BUILD_SLICE")

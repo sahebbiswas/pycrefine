@@ -22,7 +22,6 @@ These change what the code does, or produce code that does not compile:
 | `match` / `case` | 3.10+ | a single `if` with the wrong condition | [#85](https://github.com/sahebbiswas/pycrefine/issues/85) |
 | `async` comprehensions (`[x async for x in xs]`, `[await f(x) for x in xs]`), and `async for` on 3.9 | all (3.9 for `async for`) | wrong code, with an `unsupported_version_construct` diagnostic | [#85](https://github.com/sahebbiswas/pycrefine/issues/85) |
 | A conditional expression that is the whole condition of a `while` (`while (a if b else c):`), or one operand of `and`/`or` in it | all | the condition is rebuilt as nested `if` statements around the loop, so `b` is tested once instead of on every pass | [#292](https://github.com/sahebbiswas/pycrefine/issues/292) |
-| A conditional expression in a stored tuple (`t = (1, a if c else b)`, 3.10 and 3.12+), or two conditional expressions in one tuple | see left | the element before the conditional is lost, or the first conditional is an empty `if` | [#333](https://github.com/sahebbiswas/pycrefine/issues/333) |
 | `try` nested at the very start of another `try` | 3.12, 3.14 | the outer `except` clauses attach to the inner `try` | [#169](https://github.com/sahebbiswas/pycrefine/issues/169) |
 | Some code in the test corpus | 3.12, 3.14 | output that does not parse | [#91](https://github.com/sahebbiswas/pycrefine/issues/91) |
 
