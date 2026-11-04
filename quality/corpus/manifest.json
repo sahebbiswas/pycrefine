@@ -327,14 +327,7 @@
         "optimize": 0
       },
       "equivalence": "required",
-      "support": "unsupported",
-      "limitations": [
-        {
-          "issue": 147,
-          "versions": "all",
-          "summary": "conditional expression with a list/dict display or call arguments"
-        }
-      ]
+      "support": "supported"
     },
     {
       "id": "features/func_lambda_sorted",

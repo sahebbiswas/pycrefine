@@ -2881,7 +2881,9 @@ class DecompilerGeneric(DecompilerBase):
         True if *seq* (one branch of a conditional expression, ending where its value is
         consumed at *end_offset*) is a pure expression, value-context `and`/`or` included.
         """
-        if any(ins.opname in _TERNARY_SUB_OPS for ins in seq) and self._eval_branch_with_sub(seq) is None:
+        # (an arm of `s += a if c else b` ends in the in-place operator, which applies to the value loaded before the test)
+        value_seq = seq[:-1] if seq and self._has_inplace(seq[-1:]) else seq
+        if any(ins.opname in _TERNARY_SUB_OPS for ins in value_seq) and self._eval_branch_with_sub(value_seq) is None:
             return False        # the small evaluator does not know these opcodes: keep the statements
 
         def lands_in_branch(ins, target):
@@ -7259,10 +7261,26 @@ class DecompilerGeneric(DecompilerBase):
                 "INPLACE_MATRIX_MULTIPLY": "@=",
             }
             op = inplace_map.get(opname, "?=")
-            if self._emit_inplace_to_target(str(left), op, str(right)):
+            if self._emit_inplace_to_target(str(left), op, str(right)) or self._emit_inplace_to_name(str(left), op, str(right)):
                 return
             # Emit as statement directly; the result will be stored by STORE_*
             self.stack.append(f"({left} {op} {right})")
+
+    def _emit_inplace_to_name(self, left: str, op: str, right: str) -> bool:
+        """
+        `x += v` on a name (3.10's INPLACE_* in the 3.11 form): when the next instruction stores the result back
+        to the same name, emit the augmented assignment and consume the store. Left to the store, the result came
+        out as `x = (x += v)` and relied on a clean-up of that line, which a value spanning lines defeats.
+        """
+        instrs = self.instructions
+        k = self.pc
+        while k < len(instrs) and instrs[k].opname in ("NOP", "CACHE"):
+            k += 1
+        if k >= len(instrs) or instrs[k].opname not in self._NAME_STORES or not self._match_augassign_store(left, instrs[k]):
+            return False
+        self._append_reconstructed(f"{left} {op} {right}")
+        self.pc = k + 1
+        return True
 
     def _emit_inplace_to_target(self, left: str, op: str, right: str) -> bool:
         """

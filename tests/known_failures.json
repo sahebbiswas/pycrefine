@@ -1,22 +1,12 @@
 {
   "3.10": [
     {
-      "issue": 197,
-      "reason": "tail-duplicated if/else and conditional expressions come out as separate ifs (or invalid syntax)",
-      "tests": [
-        "tests/test_control_flow.py::TestAugAssignTernary::test_augmented_add_ternary_keeps_augmented_form",
-        "tests/test_integration.py::TestVerifyScenesBugs::test_api_40_pass_in_if_with_else",
-        "tests/test_integration.py::TestVerifyScenesBugs::test_api_41_nested_if_else_preservation",
-        "tests/test_raising_with_in_with.py::TestRaisingWithInWith::test_a_body_that_does_not_raise",
-        "tests/test_raising_with_in_with.py::TestRaisingWithInWith::test_the_reproduction",
-        "tests/test_strings.py::TestStrings::test_conditional_fstring_concat"
-      ]
-    },
-    {
       "issue": 301,
-      "reason": "the code after a try that every path copies is written inside the last handler",
+      "reason": "the code after a try, or after a with, that every path copies is written inside the last handler or body",
       "tests": [
         "tests/test_integration.py::TestVerifyScenesBugs::test_nested_empty_except_pass_api_12",
+        "tests/test_raising_with_in_with.py::TestRaisingWithInWith::test_a_body_that_does_not_raise",
+        "tests/test_raising_with_in_with.py::TestRaisingWithInWith::test_the_reproduction",
         "tests/test_try_in_clause.py::TestTryInClause::test_a_statement_before_the_inner_try",
         "tests/test_try_in_clause.py::TestTryInClause::test_the_inner_clause_does_not_match",
         "tests/test_try_in_clause.py::TestTryInClause::test_the_reproduction"
