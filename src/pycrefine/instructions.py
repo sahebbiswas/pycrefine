@@ -373,7 +373,7 @@ def _render_func_tuple(body_text: str, args: List[str]) -> str:
 
     # ── Case 3: fallback — extract function name if recognisable ─────────
     # e.g. 'def _find_something(...)' used as a first-class callback
-    m = re.match(r"def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", lines[0])
+    m = re.match(r"(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", lines[0])
     if m and "<" not in m.group(1):
         return m.group(1)
 

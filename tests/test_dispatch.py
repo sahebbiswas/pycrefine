@@ -25,6 +25,7 @@ def _sources():
 # entry against `dis.opmap` of the version it comes from (`LOAD_FAST_BORROW_LOAD_FAST_BORROW`,
 # long as it is, is the 3.14 superinstruction). Keep it sorted.
 OPCODES_OF_OTHER_VERSIONS = frozenset((
+    "ASYNC_GEN_WRAP",
     "BEFORE_WITH",
     "BINARY_OP",
     "BINARY_SLICE",
@@ -99,7 +100,7 @@ OPCODES_OF_OTHER_VERSIONS = frozenset((
     "YIELD_FROM",
 ))
 # Instructions the decompiler builds itself (opcode -1), not read from bytecode.
-SYNTHETIC_OPCODES = frozenset(("INLINED_COMPREHENSION", "YIELD_FROM_EXPR"))
+SYNTHETIC_OPCODES = frozenset(("INLINED_COMPREHENSION", "YIELD_FROM_EXPR", "AWAIT_EXPR"))
 
 
 class TestDispatchTable(unittest.TestCase):
