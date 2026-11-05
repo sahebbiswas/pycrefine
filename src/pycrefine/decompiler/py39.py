@@ -554,6 +554,8 @@ class Decompiler39(DecompilerGeneric):
 
     def _op_pop_block_39(self, instr: BytecodeInstruction) -> None:
         """POP_BLOCK: the clean exit from a try body (and the early exits the compiler writes around it)."""
+        # POP_BLOCK: marks the clean exit from a try body in Python 3.9.
+        # Close the try_body block and record the indent level for except headers.
         is_finally_pop = False
         finally_target = None
         _closing_exc_cleanup = False
@@ -904,6 +906,447 @@ class Decompiler39(DecompilerGeneric):
     #   (b) a forward jump at end of except/if body — treat as JUMP_FORWARD
     #   (c) break: forward jump to while-end from inside a try: block
 
+    def _op_jump_absolute_39(self, instr: BytecodeInstruction) -> None:
+        """JUMP_ABSOLUTE: a backward jump (the loop), or the forward jump that ends a branch or leaves a loop."""
+        jump_target = self._get_jump_target(instr)
+        if jump_target <= instr.offset:
+            # Backward JUMP_ABSOLUTE: delegate to the backward-jump handler
+            # in super(). _is_backward_instruction returns True for this case.
+            #
+            # Special case: if this backward jump targets a FOR_ITER AND is
+            # NOT itself a jump target (meaning it's unreachable dead code
+            # after a try-body POP_BLOCK for the clean-exit path), suppress it.
+            # These are CPython 3.9's implicit for-loop back-edges — not user
+            # `continue` statements — and emitting them causes `continue` to
+            # appear outside the `try` block, producing SyntaxError.
+            body_start = jump_target
+            body_instr = next(
+                (ins for ins in self.instructions if ins.offset == body_start), None
+            )
+            _exc_handler_jumps = self.prescan.exc_handler_jump_offsets
+            # Find the previous instruction in bytecode order
+            prev_instr = None
+            for _pi, _ins in enumerate(self.instructions):
+                if _ins.offset == instr.offset and _pi > 0:
+                    prev_instr = self.instructions[_pi - 1]
+                    break
+            if (body_instr
+                    and body_instr.opname == "FOR_ITER"
+                    and not instr.is_jump_target
+                    and self.emit.except_header_indents
+                    and instr.offset not in _exc_handler_jumps
+                    and instr.offset not in self.prescan.inner_back_jumps  # a real `continue`
+                    and prev_instr is not None
+                    and prev_instr.opname == "POP_BLOCK"):
+                # Implicit for-loop continuation after try clean exit — suppress.
+                return
+            super()._dispatch_instruction(instr)
+        else:
+            # Check for break: forward jump whose target matches the enclosing
+            # while-loop end.  This must be tested BEFORE the _except_header_indents
+            # suppression, because break inside try: still sets _except_header_indents
+            # via POP_BLOCK, but the jump is semantically a break not an else:
+            _is_break = False
+            for _b_off, _b_type in reversed(self.blocks):
+                if _b_type == "while" and jump_target == _b_off:
+                    _is_break = True
+                    break
+                if _b_type == "while":
+                    break  # innermost while has a different end
+            if _is_break:
+                self._append_reconstructed("break")
+                return
+
+            # Forward JUMP_ABSOLUTE: in try/except context, suppress else-detection
+            # (same as JUMP_FORWARD suppression below).
+            if self.emit.except_header_indents:
+                pass  # skip else-detection inside try/except context
+            else:
+                fwd_instr = BytecodeInstruction(
+                    instr.opcode, "JUMP_FORWARD",
+                    instr.arg, instr.argval,
+                    instr.offset, instr.starts_line, instr.is_jump_target,
+                )
+                super()._dispatch_instruction(fwd_instr)
+
+
+    def _op_jump_forward_39(self, instr: BytecodeInstruction) -> None:
+        """JUMP_FORWARD: the jump that ends a branch, or a try body over its handlers."""
+        # JUMP_FORWARD: in try/except context (after POP_BLOCK) suppress the
+        # if/else detection logic in the parent handler — it would create spurious
+        # else blocks around the exception handler body.
+        if self.emit.except_header_indents:
+            pass  # suppress else-detection inside try/except context
+        else:
+            super()._dispatch_instruction(instr)
+
+
+    def _op_dup_top_39(self, instr: BytecodeInstruction) -> None:
+        """DUP_TOP: also the start of an except clause's exception match, and of a with statement's exit call."""
+        # DUP_TOP — Python 3.9 typed/bare except handler entry.
+        # Real 3.9.13 bytecode layout for typed except (from dis_out_39.txt):
+        #   DUP_TOP
+        #   LOAD_NAME ExcType
+        #   JUMP_IF_NOT_EXC_MATCH reraise_offset
+        #   POP_TOP   } stack holds (exc_type, exc_value, traceback)
+        #   POP_TOP   } discard all three
+        #   POP_TOP   }
+        #   [STORE_NAME e]  ← only present for 'except X as e:'
+        #   <handler body>
+        # For bare except, DUP_TOP is followed immediately by the handler body
+        # (no LOAD_NAME/type-check sequence).
+        look = self.pc
+        while look < len(self.instructions) and self.instructions[look].opname in (
+            "RESUME", "NOP", "CACHE"
+        ):
+            look += 1
+        # --- Typed except: LOAD_NAME ExcType (or dotted LOAD_ATTR chain) follows ---
+        if (look < len(self.instructions)
+                and self.instructions[look].opname in (
+                    "LOAD_NAME", "LOAD_GLOBAL", "LOAD_FAST",
+                    "LOAD_DEREF", "LOAD_ATTR",
+        )):
+            exc_types = [str(self.instructions[look].argval)]
+            look += 1
+            # Follow any LOAD_ATTR chain for dotted exception names like socket.error
+            while (look < len(self.instructions)
+                   and self.instructions[look].opname == "LOAD_ATTR"):
+                exc_types[-1] = f"{exc_types[-1]}.{self.instructions[look].argval}"
+                look += 1
+            # Collect additional exception types in a tuple (except E1, E2, E3):
+            # Pattern: LOAD E1; LOAD E2; ...; BUILD_TUPLE N; JUMP_IF_NOT_EXC_MATCH
+            while (look < len(self.instructions)
+                   and self.instructions[look].opname in (
+                       "LOAD_NAME", "LOAD_GLOBAL", "LOAD_FAST",
+                       "LOAD_DEREF", "LOAD_ATTR",
+            )):
+                exc_types.append(str(self.instructions[look].argval))
+                look += 1
+                while (look < len(self.instructions)
+                       and self.instructions[look].opname == "LOAD_ATTR"):
+                    exc_types[-1] = f"{exc_types[-1]}.{self.instructions[look].argval}"
+                    look += 1
+            # Skip BUILD_TUPLE if present
+            if (look < len(self.instructions)
+                    and self.instructions[look].opname == "BUILD_TUPLE"):
+                look += 1
+            # Format the exception type string
+            if len(exc_types) == 1:
+                exc_type = exc_types[0]
+            else:
+                exc_type = f"({', '.join(exc_types)})"
+            # 3.9 type-match gate: JUMP_IF_NOT_EXC_MATCH or COMPARE_OP
+            is_exc_match = (
+                look < len(self.instructions)
+                and self.instructions[look].opname in (
+                    "JUMP_IF_NOT_EXC_MATCH", "COMPARE_OP"
+                )
+                and (
+                    self.instructions[look].opname == "JUMP_IF_NOT_EXC_MATCH"
+                    or str(self.instructions[look].argval) == "exception match"
+                )
+            )
+            if is_exc_match:
+                look += 1  # skip the gate
+                # Skip any residual POP_JUMP_IF_FALSE (legacy COMPARE_OP path)
+                while (look < len(self.instructions)
+                       and "POP_JUMP_IF_FALSE" in self.instructions[look].opname):
+                    look += 1
+                # Skip ALL consecutive POP_TOPs (exc_type, exc_value, traceback).
+                # Stop early if a STORE_NAME immediately follows a POP_TOP
+                # — that STORE_NAME is the 'as e' binding and must NOT be skipped.
+                as_name = None
+                while (look < len(self.instructions)
+                       and self.instructions[look].opname == "POP_TOP"):
+                    # Peek one ahead: if the very next instruction is STORE_NAME/FAST,
+                    # the current POP_TOP discards the exc_type result (not the
+                    # binding), so we skip this POP_TOP and then pick up STORE_NAME.
+                    nxt = look + 1
+                    if (nxt < len(self.instructions)
+                            and self.instructions[nxt].opname in (
+                                "STORE_NAME", "STORE_FAST", "STORE_DEREF", "STORE_GLOBAL"
+                    )):
+                        look += 1  # skip this POP_TOP
+                        break      # next iteration: handle STORE_NAME below
+                    look += 1  # skip POP_TOP with no binding after it
+                # Now check for 'as e' STORE_NAME
+                if (look < len(self.instructions)
+                        and self.instructions[look].opname in (
+                            "STORE_NAME", "STORE_FAST", "STORE_DEREF", "STORE_GLOBAL"
+                )):
+                    as_name = str(self.instructions[look].argval)
+                    self.emit.exc_as_store_offset = self.instructions[look].offset
+                    self._record_exc_cleanup_offsets(look, as_name)
+                    self.emit.exc_bound_names.add(as_name)
+                    look += 1
+
+                # Close any still-open try_body block
+                if self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup") and self.blocks[-1][0] == instr.offset:
+                    self.blocks.pop()
+                    self.indent_level -= 1
+
+                # Reset indent to except-header level
+                if self.emit.except_header_indents:
+                    self.indent_level = self.emit.except_header_indents[-1]
+                else:
+                    self.emit.except_header_indents.append(self.indent_level)
+
+                if as_name:
+                    self._append_reconstructed(f"except {exc_type} as {as_name}:")
+                else:
+                    self._append_reconstructed(f"except {exc_type}:")
+                self.indent_level += 1
+                self.stack.append("_exc_match")
+                self.pc = look
+                return
+        # --- Bare except: DUP_TOP not followed by a LOAD (no type check) ---
+        # In this case DUP_TOP is just the handler entry for a bare 'except:'.
+        if self.emit.except_header_indents or (
+            self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup") and self.blocks[-1][0] == instr.offset
+        ):
+            if self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup") and self.blocks[-1][0] == instr.offset:
+                self.blocks.pop()
+                self.indent_level -= 1
+            if self.emit.except_header_indents:
+                self.indent_level = self.emit.except_header_indents[-1]
+            else:
+                self.emit.except_header_indents.append(self.indent_level)
+            self._append_reconstructed("except:")
+            self.indent_level += 1
+            self.stack.append("_exc_match")
+            return
+        # Not an exception-match pattern — real DUP_TOP: duplicate TOS
+        if self.stack:
+            self._duplicate_top()
+
+
+    def _op_exc_match_39(self, instr: BytecodeInstruction) -> None:
+        """JUMP_IF_NOT_EXC_MATCH: the test of an except clause."""
+        # JUMP_IF_NOT_EXC_MATCH: 3.9/3.10 typed-except gate.
+        # This fires when DUP_TOP already consumed the LOAD+JUMP_IF_NOT_EXC_MATCH
+        # sequence and advanced pc past it (pc = look after the gate).
+        # If it arrives here, it means the DUP_TOP pattern didn't fire
+        # (shouldn't happen in well-formed 3.9 bytecode, but handle gracefully).
+        exc_type = str(self._pop())
+        if self.stack:
+            self.stack.pop()  # exc_instance
+        if self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup") and self.blocks[-1][0] == instr.offset:
+            self.blocks.pop()
+            self.indent_level -= 1
+        if self.emit.except_header_indents:
+            self.indent_level = self.emit.except_header_indents[-1]
+        self._append_reconstructed(f"except {exc_type}:")
+        self.indent_level += 1
+        self.stack.append("_exc_match")
+
+
+    def _op_setup_finally_39(self, instr: BytecodeInstruction) -> None:
+        """SETUP_FINALLY and SETUP_EXCEPT: the start of a try body."""
+        # SETUP_FINALLY inside an except handler: Python 3.9 wraps the 'as e'
+        # cleanup in a nested SETUP_FINALLY to guarantee 'e = None; del e' runs
+        # on both normal and reraise paths.  We must NOT emit a second 'try:' here.
+        # ALSO: when the target is a finally-block offset AND there's an immediately
+        # following inner SETUP_FINALLY (the real try: body), this is a silent outer
+        # wrapper.  For plain try/finally (no except), skip this path and use super().
+        jump_target = self._get_jump_target(instr)
+        if self.emit.except_header_indents:
+            # Inside an except handler: check whether the jump target is a real
+            # handler entry (DUP_TOP for typed, POP-POP-POP for bare except,
+            # or a finally: target) = genuine nested try:, or cleanup machinery.
+            target_idx = next(
+                (i for i, x in enumerate(self.instructions) if x.offset == jump_target), -1
+            )
+            is_nested_handler = False
+            if target_idx >= 0:
+                target_ins = self.instructions[target_idx]
+                if target_ins.opname == "DUP_TOP":
+                    is_nested_handler = True
+                elif (target_ins.opname == "POP_TOP"
+                      and target_idx + 2 < len(self.instructions)
+                      and self.instructions[target_idx + 1].opname == "POP_TOP"
+                      and self.instructions[target_idx + 2].opname == "POP_TOP"):
+                    is_nested_handler = True
+                elif jump_target in self.prescan.finally_targets:
+                    is_nested_handler = True
+
+            if is_nested_handler:
+                # Real nested try: inside an except — emit try: normally.
+                super()._dispatch_instruction(instr)
+            else:
+                # 'as e' cleanup guard — silent, track boundary without try:.
+                self.blocks.append((jump_target, "exc_cleanup"))
+        elif jump_target in self.prescan.finally_targets:
+            # Check if the very next real instruction is another SETUP_FINALLY.
+            # If so: this is the outer wrapper, inner will emit try:
+            # If not: this is a plain try/finally — let super() emit try: normally.
+            look = self.pc
+
+            while look < len(self.instructions) and self.instructions[look].opname in _GENERIC_SKIP_OPS:
+                look += 1
+            next_is_setup = (
+                look < len(self.instructions)
+                and self.instructions[look].opname in ("SETUP_FINALLY", "SETUP_EXCEPT")
+            )
+            if next_is_setup:
+                # Outer wrapper only — inner SETUP_FINALLY will emit try:
+                # Save current indent level so POP_BLOCK can correctly emit
+                # finally: at the right level even if _except_header_indents
+                # has been cleared by then.
+                self.emit.finally_wrapper_indent[jump_target] = self.indent_level
+                self.blocks.append((jump_target, "finally_wrapper"))
+            else:
+                # Plain try/finally (no except) — emit try: normally.
+                # POP_BLOCK will see try_body with a finally_targets offset
+                # and emit finally:.
+                super()._dispatch_instruction(instr)
+        else:
+            super()._dispatch_instruction(instr)
+
+
+    def _op_handler_pop_top_39(self, _instr: BytecodeInstruction) -> None:
+        """POP_TOP at the start of an except clause that has no match test."""
+        # POP_TOP at a handler jump-target: Python 3.9 bare except starts with
+        # three consecutive POP_TOPs (exc_type, exc_value, traceback) instead of
+        # DUP_TOP.  Detect when POP_TOP fires at the handler entry point.
+        # Skip the other two POP_TOPs that follow (they discard exc_value
+        # and traceback from the implicit exception tuple).
+        skip = self.pc
+        pops_skipped = 0
+        while (skip < len(self.instructions)
+               and self.instructions[skip].opname == "POP_TOP"
+               and pops_skipped < 2):
+            skip += 1
+            pops_skipped += 1
+        self.pc = skip
+        # Emit bare except header at the correct indent level
+        if self.emit.except_header_indents:
+            self.indent_level = self.emit.except_header_indents[-1]
+        self._append_reconstructed("except:")
+        self.indent_level += 1
+        self.stack.append("_exc_match")
+
+
+    def _op_pop_except_39(self, instr: BytecodeInstruction) -> None:
+        """POP_EXCEPT: the end of an except clause."""
+        # RERAISE (opcode 48 in 3.9, no-arg): re-raises the current exception.
+        # In handlers this appears after a failed JUMP_IF_NOT_EXC_MATCH as the
+        # fall-through re-raise.  Nothing to emit — the decompiler has already
+        # reached this via the jump target path, so just skip silently.
+        _deferred = False
+        _keep_open = False      # a `break` inside an `if` of the clause: the clause goes on after it
+        if self.emit.except_header_indents:
+            # Peek ahead: if the next instruction is a backward JUMP_ABSOLUTE
+            # to a loop head (FOR_ITER, or a `while`'s condition), this POP_EXCEPT is the exit from an
+            # exception handler whose only action is 'continue'.
+            # Emit 'continue' instead of 'pass' in that case.
+            _emitted_continue = False
+            look = self.pc
+            # `e = None; del e` for an `as` name sits before the jump
+            look += self._is_as_name_cleanup(look, self.emit.exc_bound_names)
+            look = self._skip_finally_copy(look)
+            if (look < len(self.instructions)
+                    and self.instructions[look].opname in ("JUMP_ABSOLUTE", "JUMP_BACKWARD")
+                    and isinstance(self.instructions[look].argval, int)
+                    and self.instructions[look].argval < self.instructions[look].offset):
+                jmp = self.instructions[look]
+                jt = self._get_jump_target(jmp)
+                # Check if the target is a loop head
+                _for_iter_offsets = {
+                    fi.offset for fi in self.instructions if fi.opname == "FOR_ITER"
+                }
+                if isinstance(jt, int) and (jt in _for_iter_offsets or self._is_innermost_while_head(jt, jmp.offset)):
+                    self._append_reconstructed("continue")
+                    self.pc = look + 1   # consume the JUMP_ABSOLUTE
+                    _emitted_continue = True
+                elif isinstance(jt, int) and self._is_while_head(jt):
+                    # back to the head of an enclosing `while` that the inner loop ended: it leaves the inner loop
+                    self._append_reconstructed("break")
+                    self.pc = look + 1
+                    _emitted_continue = True
+
+            if not _emitted_continue:
+                # `break`: the loop's iterator is dropped (POP_TOP) before the jump out of the
+                # loop. That is forward to the code after it, or back to the head of an enclosing
+                # loop when the loop ended its body; a `continue` drops no iterator.
+                look = self.pc
+                look += self._is_as_name_cleanup(look, self.emit.exc_bound_names)
+                look = self._skip_finally_copy(look)
+                if (look + 1 < len(self.instructions) and self.instructions[look].opname == "POP_TOP"
+                        and self.instructions[look + 1].opname == "JUMP_ABSOLUTE"):
+                    self._append_reconstructed("break")
+                    self.pc = look + 2
+                    dead = self.instructions[look + 2:look + 4]
+                    if [x.opname for x in dead] == ["POP_EXCEPT", "JUMP_ABSOLUTE"]:
+                        self.pc = look + 4   # the compiler's unreachable copy of the clause exit
+                    _emitted_continue = True
+
+            if not _emitted_continue:
+                # `break` out of a `while`: no iterator to drop, just the jump past the loop
+                look = self.pc
+                look += self._is_as_name_cleanup(look, self.emit.exc_bound_names)
+                look = self._skip_finally_copy(look)
+                look = self._past_with_exit(look)
+                if look < len(self.instructions) and self.instructions[look].offset in self.prescan.exc_handler_break_offsets:
+                    self._append_reconstructed("break")
+                    self.pc = look + 1
+                    after = self.instructions[look + 1] if look + 1 < len(self.instructions) else None
+                    # (a jump to the code right after the break: the `break` ends an `if`, and what follows it,
+                    # such as the clause's own exit, is reached from the other branch)
+                    reached = after is not None and any(
+                        "JUMP" in x.opname and x.offset < instr.offset and self._get_jump_target(x) == after.offset
+                        for x in self.instructions)
+                    dead = self.instructions[look + 1:look + 3]
+                    if reached:
+                        _keep_open = True
+                    elif [x.opname for x in dead] == ["POP_EXCEPT", "JUMP_FORWARD"]:
+                        self.pc = look + 3   # the compiler's unreachable copy of the clause exit
+                    _emitted_continue = True
+
+            if not _emitted_continue:
+                # ── Python 3.9 return-inside-except ─────────────────────────
+                # CPython 3.9 emits: LOAD_FAST x → ROT_FOUR → POP_EXCEPT → RETURN_VALUE
+                # The return value is on the stack but POP_EXCEPT fires first.
+                # Peek: if next instruction is RETURN_VALUE, emit now at handler indent.
+                look = self.pc
+                while (look < len(self.instructions)
+                       and self.instructions[look].opname in ("RESUME", "NOP", "CACHE")):
+                    look += 1
+                if (look < len(self.instructions)
+                        and self.instructions[look].opname in ("RETURN_VALUE", "RETURN_CONST")):
+                    ret_instr = self.instructions[look]
+                    if ret_instr.opname == "RETURN_CONST":
+                        ret_val = self._format_val(ret_instr.argval)
+                    else:
+                        # The return value was loaded before the ROT_FOUR and sits on stack
+                        v = self.stack.pop()
+                        if getattr(self, "target_version", sys.version_info) >= (3, 11):
+                            while self._is_null_sentinel(v) and self.stack:
+                                v = self.stack.pop()
+                        ret_val = str(v)
+                    is_compiler_gen = (ret_val == "None"
+                                       and self.is_compiler_generated_return(look))
+                    if not is_compiler_gen:
+                        self._append_reconstructed(f"return {ret_val}")
+                    self.pc = look + 1  # consume RETURN_VALUE
+                elif self._defer_close_to_handler_return():
+                    # The clause ends in `return` after its clean-up, or computes the
+                    # returned value here: it stays open until that return (#165).
+                    _deferred = True
+                else:
+                    last_idx = len(self.reconstructed) - 1
+                    while last_idx >= 0 and not self.reconstructed[last_idx].strip():
+                        last_idx -= 1
+                    if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
+                        self._append_reconstructed("pass")
+
+            if not _deferred and not _keep_open:
+                self.indent_level = self.emit.except_header_indents.pop()
+        if self.stack and self.stack[-1] == "_exc_match":
+            self.stack.pop()
+        elif _deferred and "_exc_match" in self.stack:
+            # The returned value sits above the match sentinel.
+            del self.stack[len(self.stack) - 1 - self.stack[::-1].index("_exc_match")]
+
     # clean instruction dispatch for 3.9-specific opcodes
     def _dispatch_instruction(self, instr: BytecodeInstruction):
         # Suppress exception-path finally bodies
@@ -943,438 +1386,22 @@ class Decompiler39(DecompilerGeneric):
             self._op_inplace_39(instr)
         elif opname == "COMPARE_OP":
             self._op_compare_39(instr)
-
-        # POP_BLOCK: marks the clean exit from a try body in Python 3.9.
-        # Close the try_body block and record the indent level for except headers.
         elif opname == "POP_BLOCK":
             self._op_pop_block_39(instr)
         elif opname == "JUMP_ABSOLUTE":
-            jump_target = self._get_jump_target(instr)
-            if jump_target <= instr.offset:
-                # Backward JUMP_ABSOLUTE: delegate to the backward-jump handler
-                # in super(). _is_backward_instruction returns True for this case.
-                #
-                # Special case: if this backward jump targets a FOR_ITER AND is
-                # NOT itself a jump target (meaning it's unreachable dead code
-                # after a try-body POP_BLOCK for the clean-exit path), suppress it.
-                # These are CPython 3.9's implicit for-loop back-edges — not user
-                # `continue` statements — and emitting them causes `continue` to
-                # appear outside the `try` block, producing SyntaxError.
-                body_start = jump_target
-                body_instr = next(
-                    (ins for ins in self.instructions if ins.offset == body_start), None
-                )
-                _exc_handler_jumps = self.prescan.exc_handler_jump_offsets
-                # Find the previous instruction in bytecode order
-                prev_instr = None
-                for _pi, _ins in enumerate(self.instructions):
-                    if _ins.offset == instr.offset and _pi > 0:
-                        prev_instr = self.instructions[_pi - 1]
-                        break
-                if (body_instr
-                        and body_instr.opname == "FOR_ITER"
-                        and not instr.is_jump_target
-                        and self.emit.except_header_indents
-                        and instr.offset not in _exc_handler_jumps
-                        and instr.offset not in self.prescan.inner_back_jumps  # a real `continue`
-                        and prev_instr is not None
-                        and prev_instr.opname == "POP_BLOCK"):
-                    # Implicit for-loop continuation after try clean exit — suppress.
-                    return
-                super()._dispatch_instruction(instr)
-            else:
-                # Check for break: forward jump whose target matches the enclosing
-                # while-loop end.  This must be tested BEFORE the _except_header_indents
-                # suppression, because break inside try: still sets _except_header_indents
-                # via POP_BLOCK, but the jump is semantically a break not an else:
-                _is_break = False
-                for _b_off, _b_type in reversed(self.blocks):
-                    if _b_type == "while" and jump_target == _b_off:
-                        _is_break = True
-                        break
-                    if _b_type == "while":
-                        break  # innermost while has a different end
-                if _is_break:
-                    self._append_reconstructed("break")
-                    return
-
-                # Forward JUMP_ABSOLUTE: in try/except context, suppress else-detection
-                # (same as JUMP_FORWARD suppression below).
-                if self.emit.except_header_indents:
-                    pass  # skip else-detection inside try/except context
-                else:
-                    fwd_instr = BytecodeInstruction(
-                        instr.opcode, "JUMP_FORWARD",
-                        instr.arg, instr.argval,
-                        instr.offset, instr.starts_line, instr.is_jump_target,
-                    )
-                    super()._dispatch_instruction(fwd_instr)
-
-        # JUMP_FORWARD: in try/except context (after POP_BLOCK) suppress the
-        # if/else detection logic in the parent handler — it would create spurious
-        # else blocks around the exception handler body.
+            self._op_jump_absolute_39(instr)
         elif opname == "JUMP_FORWARD":
-            if self.emit.except_header_indents:
-                pass  # suppress else-detection inside try/except context
-            else:
-                super()._dispatch_instruction(instr)
-
-        # DUP_TOP — Python 3.9 typed/bare except handler entry.
-        # Real 3.9.13 bytecode layout for typed except (from dis_out_39.txt):
-        #   DUP_TOP
-        #   LOAD_NAME ExcType
-        #   JUMP_IF_NOT_EXC_MATCH reraise_offset
-        #   POP_TOP   } stack holds (exc_type, exc_value, traceback)
-        #   POP_TOP   } discard all three
-        #   POP_TOP   }
-        #   [STORE_NAME e]  ← only present for 'except X as e:'
-        #   <handler body>
-        # For bare except, DUP_TOP is followed immediately by the handler body
-        # (no LOAD_NAME/type-check sequence).
+            self._op_jump_forward_39(instr)
         elif opname == "DUP_TOP":
-            look = self.pc
-            while look < len(self.instructions) and self.instructions[look].opname in (
-                "RESUME", "NOP", "CACHE"
-            ):
-                look += 1
-            # --- Typed except: LOAD_NAME ExcType (or dotted LOAD_ATTR chain) follows ---
-            if (look < len(self.instructions)
-                    and self.instructions[look].opname in (
-                        "LOAD_NAME", "LOAD_GLOBAL", "LOAD_FAST",
-                        "LOAD_DEREF", "LOAD_ATTR",
-            )):
-                exc_types = [str(self.instructions[look].argval)]
-                look += 1
-                # Follow any LOAD_ATTR chain for dotted exception names like socket.error
-                while (look < len(self.instructions)
-                       and self.instructions[look].opname == "LOAD_ATTR"):
-                    exc_types[-1] = f"{exc_types[-1]}.{self.instructions[look].argval}"
-                    look += 1
-                # Collect additional exception types in a tuple (except E1, E2, E3):
-                # Pattern: LOAD E1; LOAD E2; ...; BUILD_TUPLE N; JUMP_IF_NOT_EXC_MATCH
-                while (look < len(self.instructions)
-                       and self.instructions[look].opname in (
-                           "LOAD_NAME", "LOAD_GLOBAL", "LOAD_FAST",
-                           "LOAD_DEREF", "LOAD_ATTR",
-                )):
-                    exc_types.append(str(self.instructions[look].argval))
-                    look += 1
-                    while (look < len(self.instructions)
-                           and self.instructions[look].opname == "LOAD_ATTR"):
-                        exc_types[-1] = f"{exc_types[-1]}.{self.instructions[look].argval}"
-                        look += 1
-                # Skip BUILD_TUPLE if present
-                if (look < len(self.instructions)
-                        and self.instructions[look].opname == "BUILD_TUPLE"):
-                    look += 1
-                # Format the exception type string
-                if len(exc_types) == 1:
-                    exc_type = exc_types[0]
-                else:
-                    exc_type = f"({', '.join(exc_types)})"
-                # 3.9 type-match gate: JUMP_IF_NOT_EXC_MATCH or COMPARE_OP
-                is_exc_match = (
-                    look < len(self.instructions)
-                    and self.instructions[look].opname in (
-                        "JUMP_IF_NOT_EXC_MATCH", "COMPARE_OP"
-                    )
-                    and (
-                        self.instructions[look].opname == "JUMP_IF_NOT_EXC_MATCH"
-                        or str(self.instructions[look].argval) == "exception match"
-                    )
-                )
-                if is_exc_match:
-                    look += 1  # skip the gate
-                    # Skip any residual POP_JUMP_IF_FALSE (legacy COMPARE_OP path)
-                    while (look < len(self.instructions)
-                           and "POP_JUMP_IF_FALSE" in self.instructions[look].opname):
-                        look += 1
-                    # Skip ALL consecutive POP_TOPs (exc_type, exc_value, traceback).
-                    # Stop early if a STORE_NAME immediately follows a POP_TOP
-                    # — that STORE_NAME is the 'as e' binding and must NOT be skipped.
-                    as_name = None
-                    while (look < len(self.instructions)
-                           and self.instructions[look].opname == "POP_TOP"):
-                        # Peek one ahead: if the very next instruction is STORE_NAME/FAST,
-                        # the current POP_TOP discards the exc_type result (not the
-                        # binding), so we skip this POP_TOP and then pick up STORE_NAME.
-                        nxt = look + 1
-                        if (nxt < len(self.instructions)
-                                and self.instructions[nxt].opname in (
-                                    "STORE_NAME", "STORE_FAST", "STORE_DEREF", "STORE_GLOBAL"
-                        )):
-                            look += 1  # skip this POP_TOP
-                            break      # next iteration: handle STORE_NAME below
-                        look += 1  # skip POP_TOP with no binding after it
-                    # Now check for 'as e' STORE_NAME
-                    if (look < len(self.instructions)
-                            and self.instructions[look].opname in (
-                                "STORE_NAME", "STORE_FAST", "STORE_DEREF", "STORE_GLOBAL"
-                    )):
-                        as_name = str(self.instructions[look].argval)
-                        self.emit.exc_as_store_offset = self.instructions[look].offset
-                        self._record_exc_cleanup_offsets(look, as_name)
-                        self.emit.exc_bound_names.add(as_name)
-                        look += 1
-
-                    # Close any still-open try_body block
-                    if self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup") and self.blocks[-1][0] == instr.offset:
-                        self.blocks.pop()
-                        self.indent_level -= 1
-
-                    # Reset indent to except-header level
-                    if self.emit.except_header_indents:
-                        self.indent_level = self.emit.except_header_indents[-1]
-                    else:
-                        self.emit.except_header_indents.append(self.indent_level)
-
-                    if as_name:
-                        self._append_reconstructed(f"except {exc_type} as {as_name}:")
-                    else:
-                        self._append_reconstructed(f"except {exc_type}:")
-                    self.indent_level += 1
-                    self.stack.append("_exc_match")
-                    self.pc = look
-                    return
-            # --- Bare except: DUP_TOP not followed by a LOAD (no type check) ---
-            # In this case DUP_TOP is just the handler entry for a bare 'except:'.
-            if self.emit.except_header_indents or (
-                self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup") and self.blocks[-1][0] == instr.offset
-            ):
-                if self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup") and self.blocks[-1][0] == instr.offset:
-                    self.blocks.pop()
-                    self.indent_level -= 1
-                if self.emit.except_header_indents:
-                    self.indent_level = self.emit.except_header_indents[-1]
-                else:
-                    self.emit.except_header_indents.append(self.indent_level)
-                self._append_reconstructed("except:")
-                self.indent_level += 1
-                self.stack.append("_exc_match")
-                return
-            # Not an exception-match pattern — real DUP_TOP: duplicate TOS
-            if self.stack:
-                self._duplicate_top()
-
-        # JUMP_IF_NOT_EXC_MATCH: 3.9/3.10 typed-except gate.
-        # This fires when DUP_TOP already consumed the LOAD+JUMP_IF_NOT_EXC_MATCH
-        # sequence and advanced pc past it (pc = look after the gate).
-        # If it arrives here, it means the DUP_TOP pattern didn't fire
-        # (shouldn't happen in well-formed 3.9 bytecode, but handle gracefully).
+            self._op_dup_top_39(instr)
         elif opname == "JUMP_IF_NOT_EXC_MATCH":
-            exc_type = str(self._pop())
-            if self.stack:
-                self.stack.pop()  # exc_instance
-            if self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup") and self.blocks[-1][0] == instr.offset:
-                self.blocks.pop()
-                self.indent_level -= 1
-            if self.emit.except_header_indents:
-                self.indent_level = self.emit.except_header_indents[-1]
-            self._append_reconstructed(f"except {exc_type}:")
-            self.indent_level += 1
-            self.stack.append("_exc_match")
-
-        # SETUP_FINALLY inside an except handler: Python 3.9 wraps the 'as e'
-        # cleanup in a nested SETUP_FINALLY to guarantee 'e = None; del e' runs
-        # on both normal and reraise paths.  We must NOT emit a second 'try:' here.
-        # ALSO: when the target is a finally-block offset AND there's an immediately
-        # following inner SETUP_FINALLY (the real try: body), this is a silent outer
-        # wrapper.  For plain try/finally (no except), skip this path and use super().
+            self._op_exc_match_39(instr)
         elif opname in ("SETUP_FINALLY", "SETUP_EXCEPT"):
-            jump_target = self._get_jump_target(instr)
-            if self.emit.except_header_indents:
-                # Inside an except handler: check whether the jump target is a real
-                # handler entry (DUP_TOP for typed, POP-POP-POP for bare except,
-                # or a finally: target) = genuine nested try:, or cleanup machinery.
-                target_idx = next(
-                    (i for i, x in enumerate(self.instructions) if x.offset == jump_target), -1
-                )
-                is_nested_handler = False
-                if target_idx >= 0:
-                    target_ins = self.instructions[target_idx]
-                    if target_ins.opname == "DUP_TOP":
-                        is_nested_handler = True
-                    elif (target_ins.opname == "POP_TOP"
-                          and target_idx + 2 < len(self.instructions)
-                          and self.instructions[target_idx + 1].opname == "POP_TOP"
-                          and self.instructions[target_idx + 2].opname == "POP_TOP"):
-                        is_nested_handler = True
-                    elif jump_target in self.prescan.finally_targets:
-                        is_nested_handler = True
-
-                if is_nested_handler:
-                    # Real nested try: inside an except — emit try: normally.
-                    super()._dispatch_instruction(instr)
-                else:
-                    # 'as e' cleanup guard — silent, track boundary without try:.
-                    self.blocks.append((jump_target, "exc_cleanup"))
-            elif jump_target in self.prescan.finally_targets:
-                # Check if the very next real instruction is another SETUP_FINALLY.
-                # If so: this is the outer wrapper, inner will emit try:
-                # If not: this is a plain try/finally — let super() emit try: normally.
-                look = self.pc
-
-                while look < len(self.instructions) and self.instructions[look].opname in _GENERIC_SKIP_OPS:
-                    look += 1
-                next_is_setup = (
-                    look < len(self.instructions)
-                    and self.instructions[look].opname in ("SETUP_FINALLY", "SETUP_EXCEPT")
-                )
-                if next_is_setup:
-                    # Outer wrapper only — inner SETUP_FINALLY will emit try:
-                    # Save current indent level so POP_BLOCK can correctly emit
-                    # finally: at the right level even if _except_header_indents
-                    # has been cleared by then.
-                    self.emit.finally_wrapper_indent[jump_target] = self.indent_level
-                    self.blocks.append((jump_target, "finally_wrapper"))
-                else:
-                    # Plain try/finally (no except) — emit try: normally.
-                    # POP_BLOCK will see try_body with a finally_targets offset
-                    # and emit finally:.
-                    super()._dispatch_instruction(instr)
-            else:
-                super()._dispatch_instruction(instr)
-
-        # POP_TOP at a handler jump-target: Python 3.9 bare except starts with
-        # three consecutive POP_TOPs (exc_type, exc_value, traceback) instead of
-        # DUP_TOP.  Detect when POP_TOP fires at the handler entry point.
+            self._op_setup_finally_39(instr)
         elif opname == "POP_TOP" and instr.is_jump_target and self.emit.except_header_indents:
-            # Skip the other two POP_TOPs that follow (they discard exc_value
-            # and traceback from the implicit exception tuple).
-            skip = self.pc
-            pops_skipped = 0
-            while (skip < len(self.instructions)
-                   and self.instructions[skip].opname == "POP_TOP"
-                   and pops_skipped < 2):
-                skip += 1
-                pops_skipped += 1
-            self.pc = skip
-            # Emit bare except header at the correct indent level
-            if self.emit.except_header_indents:
-                self.indent_level = self.emit.except_header_indents[-1]
-            self._append_reconstructed("except:")
-            self.indent_level += 1
-            self.stack.append("_exc_match")
-
-        # RERAISE (opcode 48 in 3.9, no-arg): re-raises the current exception.
-        # In handlers this appears after a failed JUMP_IF_NOT_EXC_MATCH as the
-        # fall-through re-raise.  Nothing to emit — the decompiler has already
-        # reached this via the jump target path, so just skip silently.
+            self._op_handler_pop_top_39(instr)
         elif opname == "POP_EXCEPT":
-            _deferred = False
-            _keep_open = False      # a `break` inside an `if` of the clause: the clause goes on after it
-            if self.emit.except_header_indents:
-                # Peek ahead: if the next instruction is a backward JUMP_ABSOLUTE
-                # to a loop head (FOR_ITER, or a `while`'s condition), this POP_EXCEPT is the exit from an
-                # exception handler whose only action is 'continue'.
-                # Emit 'continue' instead of 'pass' in that case.
-                _emitted_continue = False
-                look = self.pc
-                # `e = None; del e` for an `as` name sits before the jump
-                look += self._is_as_name_cleanup(look, self.emit.exc_bound_names)
-                look = self._skip_finally_copy(look)
-                if (look < len(self.instructions)
-                        and self.instructions[look].opname in ("JUMP_ABSOLUTE", "JUMP_BACKWARD")
-                        and isinstance(self.instructions[look].argval, int)
-                        and self.instructions[look].argval < self.instructions[look].offset):
-                    jmp = self.instructions[look]
-                    jt = self._get_jump_target(jmp)
-                    # Check if the target is a loop head
-                    _for_iter_offsets = {
-                        fi.offset for fi in self.instructions if fi.opname == "FOR_ITER"
-                    }
-                    if isinstance(jt, int) and (jt in _for_iter_offsets or self._is_innermost_while_head(jt, jmp.offset)):
-                        self._append_reconstructed("continue")
-                        self.pc = look + 1   # consume the JUMP_ABSOLUTE
-                        _emitted_continue = True
-                    elif isinstance(jt, int) and self._is_while_head(jt):
-                        # back to the head of an enclosing `while` that the inner loop ended: it leaves the inner loop
-                        self._append_reconstructed("break")
-                        self.pc = look + 1
-                        _emitted_continue = True
-
-                if not _emitted_continue:
-                    # `break`: the loop's iterator is dropped (POP_TOP) before the jump out of the
-                    # loop. That is forward to the code after it, or back to the head of an enclosing
-                    # loop when the loop ended its body; a `continue` drops no iterator.
-                    look = self.pc
-                    look += self._is_as_name_cleanup(look, self.emit.exc_bound_names)
-                    look = self._skip_finally_copy(look)
-                    if (look + 1 < len(self.instructions) and self.instructions[look].opname == "POP_TOP"
-                            and self.instructions[look + 1].opname == "JUMP_ABSOLUTE"):
-                        self._append_reconstructed("break")
-                        self.pc = look + 2
-                        dead = self.instructions[look + 2:look + 4]
-                        if [x.opname for x in dead] == ["POP_EXCEPT", "JUMP_ABSOLUTE"]:
-                            self.pc = look + 4   # the compiler's unreachable copy of the clause exit
-                        _emitted_continue = True
-
-                if not _emitted_continue:
-                    # `break` out of a `while`: no iterator to drop, just the jump past the loop
-                    look = self.pc
-                    look += self._is_as_name_cleanup(look, self.emit.exc_bound_names)
-                    look = self._skip_finally_copy(look)
-                    look = self._past_with_exit(look)
-                    if look < len(self.instructions) and self.instructions[look].offset in self.prescan.exc_handler_break_offsets:
-                        self._append_reconstructed("break")
-                        self.pc = look + 1
-                        after = self.instructions[look + 1] if look + 1 < len(self.instructions) else None
-                        # (a jump to the code right after the break: the `break` ends an `if`, and what follows it,
-                        # such as the clause's own exit, is reached from the other branch)
-                        reached = after is not None and any(
-                            "JUMP" in x.opname and x.offset < instr.offset and self._get_jump_target(x) == after.offset
-                            for x in self.instructions)
-                        dead = self.instructions[look + 1:look + 3]
-                        if reached:
-                            _keep_open = True
-                        elif [x.opname for x in dead] == ["POP_EXCEPT", "JUMP_FORWARD"]:
-                            self.pc = look + 3   # the compiler's unreachable copy of the clause exit
-                        _emitted_continue = True
-
-                if not _emitted_continue:
-                    # ── Python 3.9 return-inside-except ─────────────────────────
-                    # CPython 3.9 emits: LOAD_FAST x → ROT_FOUR → POP_EXCEPT → RETURN_VALUE
-                    # The return value is on the stack but POP_EXCEPT fires first.
-                    # Peek: if next instruction is RETURN_VALUE, emit now at handler indent.
-                    look = self.pc
-                    while (look < len(self.instructions)
-                           and self.instructions[look].opname in ("RESUME", "NOP", "CACHE")):
-                        look += 1
-                    if (look < len(self.instructions)
-                            and self.instructions[look].opname in ("RETURN_VALUE", "RETURN_CONST")):
-                        ret_instr = self.instructions[look]
-                        if ret_instr.opname == "RETURN_CONST":
-                            ret_val = self._format_val(ret_instr.argval)
-                        else:
-                            # The return value was loaded before the ROT_FOUR and sits on stack
-                            v = self.stack.pop()
-                            if getattr(self, "target_version", sys.version_info) >= (3, 11):
-                                while self._is_null_sentinel(v) and self.stack:
-                                    v = self.stack.pop()
-                            ret_val = str(v)
-                        is_compiler_gen = (ret_val == "None"
-                                           and self.is_compiler_generated_return(look))
-                        if not is_compiler_gen:
-                            self._append_reconstructed(f"return {ret_val}")
-                        self.pc = look + 1  # consume RETURN_VALUE
-                    elif self._defer_close_to_handler_return():
-                        # The clause ends in `return` after its clean-up, or computes the
-                        # returned value here: it stays open until that return (#165).
-                        _deferred = True
-                    else:
-                        last_idx = len(self.reconstructed) - 1
-                        while last_idx >= 0 and not self.reconstructed[last_idx].strip():
-                            last_idx -= 1
-                        if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
-                            self._append_reconstructed("pass")
-
-                if not _deferred and not _keep_open:
-                    self.indent_level = self.emit.except_header_indents.pop()
-            if self.stack and self.stack[-1] == "_exc_match":
-                self.stack.pop()
-            elif _deferred and "_exc_match" in self.stack:
-                # The returned value sits above the match sentinel.
-                del self.stack[len(self.stack) - 1 - self.stack[::-1].index("_exc_match")]
+            self._op_pop_except_39(instr)
         elif opname == "RERAISE":
             pass  # already handled by the JUMP target structure; no source emission
 
