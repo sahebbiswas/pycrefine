@@ -38,6 +38,7 @@ class PrescanState:  # pylint: disable=too-many-instance-attributes
     while_header_targets: Dict[int, int] = field(default_factory=dict)  # body start -> guard POP_JUMP offset
     while_true_ends: Set[int] = field(default_factory=set)          # end offsets of while-True loops
     inner_back_jumps: Dict[int, int] = field(default_factory=dict)  # inner back-jump -> the back-edge that closes the loop
+    loop_ends: Dict[int, int] = field(default_factory=dict)  # loop head -> offset past its closing back-edge (a cache of `_loop_end_after`, reset with `inner_back_jumps`)
     dup_guard_exits: Set[int] = field(default_factory=set)          # exit targets of suppressed bottom-of-loop condition copies, and (3.10/3.11) the repeated implicit return after one
     for_iter_targets: Set[int] = field(default_factory=set)         # jump targets of FOR_ITER (3.9 break detection)
     # --- `and` / `or` as values (_prescan_value_boolops) -------------------------------

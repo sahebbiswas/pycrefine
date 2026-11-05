@@ -3558,6 +3558,7 @@ class DecompilerGeneric(DecompilerBase):
         self.prescan.while_header_targets = {}  # body_start -> guard_pjif_offset
         self.prescan.while_true_ends = set()     # end offsets of while-True (NOP-driven) loops
         self.prescan.inner_back_jumps = self._find_inner_back_jumps()
+        self.prescan.loop_ends = {}              # (the answers of `_loop_end_after` depend on the jumps just found)
         self.prescan.dup_guard_exits = set()
         self.prescan.inverted_guards = {}
         self.prescan.relocated_exits = {}
@@ -4095,6 +4096,9 @@ class DecompilerGeneric(DecompilerBase):
 
     def _loop_end_after(self, body_start: int) -> int:
         """Offset just past the closing back-edge of the loop headed at `body_start`."""
+        cached = self.prescan.loop_ends.get(body_start)
+        if cached is not None:
+            return cached
         instrs = self.instructions
         last = None
         for k, ins in enumerate(instrs):
@@ -4102,8 +4106,11 @@ class DecompilerGeneric(DecompilerBase):
                     and ins.offset not in self.prescan.inner_back_jumps and self._get_jump_target(ins) == body_start):
                 last = k
         if last is None:
-            return instrs[-1].offset + 2
-        return instrs[last + 1].offset if last + 1 < len(instrs) else instrs[last].offset + 2
+            end = instrs[-1].offset + 2
+        else:
+            end = instrs[last + 1].offset if last + 1 < len(instrs) else instrs[last].offset + 2
+        self.prescan.loop_ends[body_start] = end
+        return end
 
     def _jump_chain_end(self, offset: int) -> int:
         """Where control ends up from `offset`, following unconditional jumps."""
@@ -6242,42 +6249,54 @@ class DecompilerGeneric(DecompilerBase):
             return True
         return False
 
+    # The suppression `_dispatch_instruction` applies, in the order it applies it. Each name is a
+    # prescan field; an instruction in one is left out of the normal flow. The order matters: a
+    # finally-merge label is the first instruction of a suppressed finally body, so the merge step
+    # (which emits the deferred handlers) has to see it before `finally_body_suppress` hides it.
+    # tests/test_suppression_order.py pins this list.
+    SUPPRESSION_ORDER = (
+        "finally_merge_offsets / except_only_merge_offsets",   # emits the deferred handlers and finally
+        "relocated_exit",                                     # emits a relocated exit, then continues
+        "relocated_suppress",
+        "with_exit_suppress_offsets",                         # after the merge step: a try in a with merges at the exit call
+        "finally_body_suppress",
+        "handler_section_suppress",
+        "wrapper_body_suppress",
+    )
+
+    def _suppressed_in_dispatch(self, instr: BytecodeInstruction) -> bool:
+        """Whether `instr` is left out of the normal flow, applying `SUPPRESSION_ORDER` in order."""
+        prescan = self.prescan
+        offset = instr.offset
+        if self._at_merge_label(instr):
+            return True
+        self._emit_relocated_exit(offset)
+        return (offset in prescan.relocated_suppress
+                or offset in prescan.with_exit_suppress_offsets
+                or offset in prescan.finally_body_suppress
+                or offset in prescan.handler_section_suppress
+                or offset in prescan.wrapper_body_suppress)
+
+    def _at_merge_label(self, instr: BytecodeInstruction) -> bool:
+        """At a finally-merge label, emit the pre-decompiled except handlers and finally body in source order.
+
+        Returns whether the instruction itself is hidden too: the label is the first instruction of a
+        suppressed finally body.
+        """
+        offset = instr.offset
+        if offset not in self.prescan.finally_merge_offsets and offset not in self.prescan.except_only_merge_offsets:
+            return False
+        self.prescan.finally_merge_offsets.discard(offset)
+        self.prescan.except_only_merge_offsets.discard(offset)
+        self.emit.pending_finally_merge = None
+        # The block manager has just closed the try_body block, so this indent is the header's.
+        self._emit_deferred_finally(offset, self.indent_level)
+        return offset in self.prescan.finally_body_suppress
+
     def _dispatch_instruction(self, instr: BytecodeInstruction):  # noqa: C901
         """Replay `instr` once the shared suppression has let it through; backends override this."""
         opname = instr.opname
-        # When we reach a finally-merge label, emit the pre-decompiled except
-        # handlers + finally body in source order, then continue normally.
-        # This check MUST come before _finally_body_suppress since the merge-label
-        # instruction is the first instruction of the suppressed finally body range.
-        if instr.offset in self.prescan.finally_merge_offsets or instr.offset in self.prescan.except_only_merge_offsets:
-            if instr.offset in self.prescan.finally_merge_offsets:
-                self.prescan.finally_merge_offsets.discard(instr.offset)
-            if instr.offset in self.prescan.except_only_merge_offsets:
-                self.prescan.except_only_merge_offsets.discard(instr.offset)
-            self.emit.pending_finally_merge = None
-            # self.indent_level at this point is the correct header indent:
-            # the block manager has just closed the try_body block, leaving us
-            # at the same level as the enclosing try:/with: statement.
-            self._emit_deferred_finally(instr.offset, self.indent_level)
-            # Only return (skip instruction) if it was actually a finally merge
-            # (which means this instruction is the start of a suppressed body).
-            if instr.offset in self.prescan.finally_body_suppress:
-                return
-        self._emit_relocated_exit(instr.offset)
-        if instr.offset in self.prescan.relocated_suppress:
-            return
-        # Suppress BEFORE_WITH __exit__(None,None,None) epilogue instructions. This comes
-        # after the merge-label check: a try inside a with merges right at the exit call.
-        if instr.offset in self.prescan.with_exit_suppress_offsets:
-            return
-        # Suppress inlined finally-body instructions (deferred; emitted at merge label)
-        if instr.offset in self.prescan.finally_body_suppress:
-            return
-        # Suppress pre-decompiled except handler instructions (deferred; emitted at merge label)
-        if instr.offset in self.prescan.handler_section_suppress:
-            return
-        # Suppress re-raise wrapper and with-exit handler bodies
-        if instr.offset in self.prescan.wrapper_body_suppress:
+        if self._suppressed_in_dispatch(instr):
             return
 
         handler_name = self._DISPATCH.get(opname)

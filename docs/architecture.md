@@ -63,6 +63,13 @@ source. For the development workflow, see [CONTRIBUTING.md](../CONTRIBUTING.md).
    backend is below). Handlers push expressions on a symbolic stack, emit lines, and
    open blocks that close at a known offset (`_close_blocks`). Nested code objects
    (functions, classes, lambdas, comprehensions) are decompiled by sub-decompilers.
+
+   The generic `_dispatch_instruction` hides the instructions of deferred constructs in a
+   fixed order, named by `DecompilerGeneric.SUPPRESSION_ORDER` and applied by
+   `_suppressed_in_dispatch`: the finally-merge label first (it emits the deferred handlers
+   and finally body, and is the first instruction of a body that `finally_body_suppress`
+   then hides), then relocated exits, then the with-exit, finally-body, handler-section and
+   wrapper-body sets. `tests/test_suppression_order.py` pins the order.
 5. **Post-process** (`postprocess.post_process_source`) the text: compiler-generated
    returns, `elif` flattening at the `core` beautification level, and placeholders for
    constructs that could not be rebuilt.
@@ -138,6 +145,7 @@ What the analysis passes found before emission starts.
 | `while_header_targets` | body start -> guard POP_JUMP offset | `_prescan_while_loops`, `decompile` |
 | `while_true_ends` | end offsets of while-True loops | `_op_nop`, `_open_while_true_39`, `_prescan_while_loops`, `_rewrite_if_as_while` |
 | `inner_back_jumps` | inner back-jump -> the back-edge that closes the loop | `_prescan_while_loops` |
+| `loop_ends` | loop head -> offset past its closing back-edge; a cache of `_loop_end_after`, so replay and the prescans scan the instructions once per loop | `_loop_end_after`, `_prescan_while_loops` |
 | `dup_guard_exits` | exit targets of suppressed bottom-of-loop condition copies | `_prescan_while_loops` |
 | `for_iter_targets` | jump targets of FOR_ITER (3.9 break detection) | `_prescan_try_structure` |
 | `boolop_or_pop` | 3.9-3.10: offset -> (op, target) for *_OR_POP jumps | `_prescan_value_boolops` |
@@ -152,8 +160,8 @@ What the analysis passes found before emission starts.
 | `nop_to_finally_merge` | try NOP -> finally start, for try/finally without except | `_prescan_try_structure` |
 | `suppress_push_exc_offsets` | PUSH_EXC_INFO that opens a handler rendered elsewhere | `_prescan_try_structure` |
 | `push_exc_to_finally_merge` | merge offset -> the handler entry points (sorted) that rejoin there, for a `try` inside a loop whose handlers merge after the loop | `_prescan_try_structure` |
-| `finally_merge_offsets` | merge labels where deferred finally/except text is emitted | `_close_blocks`, `_dispatch_instruction`, `_prescan_try_structure` |
-| `except_only_merge_offsets` | merge offsets that have handlers but no `finally`, so only the handler text is placed there | `_dispatch_instruction`, `_prescan_try_structure` |
+| `finally_merge_offsets` | merge labels where deferred finally/except text is emitted | `_at_merge_label`, `_close_blocks`, `_prescan_try_structure` |
+| `except_only_merge_offsets` | merge offsets that have handlers but no `finally`, so only the handler text is placed there | `_at_merge_label`, `_prescan_try_structure` |
 | `finally_body_suppress` | instructions of an inlined copy of a `finally` body, left out of the normal flow because the text is emitted once at the merge label | `_elide_early_finally_copies`, `_forward_jump`, `_op_setup_with`, `_pop_block_break_from_if_39`, `_pop_block_break_path_39`, `_pop_block_return_39`, `_prescan_try_structure`, `_suppress_copies` |
 | `finally_targets` | 3.9: targets of the `SETUP_FINALLY`s that belong to a user `finally:` rather than to a handler | `_prescan_try_structure` |
 | `finally_from_handler` | 3.9: handler offset -> its RERAISE | `_elide_early_finally_copies`, `_open_finally_from_handler`, `_prescan_try_structure` |
@@ -186,7 +194,7 @@ Bookkeeping that changes while instructions are replayed.
 | `exc_bound_names` | every name bound by `except ... as` | `_op_check_exc_match`, `_op_dup_top_39` |
 | `deferred_finally_lines` | merge offset -> rendered finally body | `_prescan_try_structure` |
 | `deferred_except_lines` | merge offset -> rendered handler | `_prescan_try_structure` |
-| `pending_finally_merge` | merge offset awaiting emission | `_dispatch_instruction`, `_prescan_try_structure` |
+| `pending_finally_merge` | merge offset awaiting emission | `_at_merge_label`, `_prescan_try_structure` |
 | `boolop_pending` | operators opened but not yet joined | `_prescan_value_boolops` |
 | `else_stack_snapshots` | second arm's offset -> stack to restore | `_decompile_step`, `_op_conditional_jump` |
 | `open_with_sentinels` | 3.14: (body end, body start) of open with bodies | `_close_blocks`, `_with_preamble_314` |
