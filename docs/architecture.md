@@ -153,7 +153,7 @@ What the analysis passes found before emission starts.
 | `push_exc_to_finally_merge` | merge offset -> the handler entry points (sorted) that rejoin there, for a `try` inside a loop whose handlers merge after the loop | `_prescan_try_structure` |
 | `finally_merge_offsets` | merge labels where deferred finally/except text is emitted | `_close_blocks`, `_dispatch_instruction`, `_prescan_try_structure` |
 | `except_only_merge_offsets` | merge offsets that have handlers but no `finally`, so only the handler text is placed there | `_dispatch_instruction`, `_prescan_try_structure` |
-| `finally_body_suppress` | instructions of an inlined copy of a `finally` body, left out of the normal flow because the text is emitted once at the merge label | `_elide_early_finally_copies`, `_dispatch_instruction`, `_op_jump`, `_op_setup_with`, `_prescan_try_structure`, `_suppress_copies` |
+| `finally_body_suppress` | instructions of an inlined copy of a `finally` body, left out of the normal flow because the text is emitted once at the merge label | `_elide_early_finally_copies`, `_op_jump`, `_op_pop_block_39`, `_op_setup_with`, `_prescan_try_structure`, `_suppress_copies` |
 | `finally_targets` | 3.9: targets of the `SETUP_FINALLY`s that belong to a user `finally:` rather than to a handler | `_prescan_try_structure` |
 | `finally_from_handler` | 3.9: handler offset -> its RERAISE | `_elide_early_finally_copies`, `_open_finally_from_handler`, `_prescan_try_structure` |
 | `handler_section_suppress` | instructions of an except handler that is decompiled ahead of time as a section, so the main pass skips them | `_prescan_try_structure` |
@@ -178,8 +178,8 @@ Bookkeeping that changes while instructions are replayed.
 
 | Field | Meaning | Written by |
 |---|---|---|
-| `except_header_indents` | indent levels of the except headers being emitted | `_close_except_clause`, `_dispatch_instruction`, `_op_before_with`, `_op_check_exc_match`, `_op_push_exc_info` |
-| `except_end_offsets` | end offsets of exception regions | `_dispatch_instruction` |
+| `except_header_indents` | indent levels of the except headers being emitted | `_close_except_clause`, `_dispatch_instruction`, `_op_before_with`, `_op_check_exc_match`, `_op_pop_block_39`, `_op_push_exc_info` |
+| `except_end_offsets` | end offsets of exception regions | `_dispatch_instruction`, `_op_pop_block_39` |
 | `exc_as_store_offset` | the `as e` STORE to skip | `_dispatch_instruction`, `_op_check_exc_match`, `_op_store` |
 | `exc_bound_names` | every name bound by `except ... as` | `_dispatch_instruction`, `_op_check_exc_match` |
 | `deferred_finally_lines` | merge offset -> rendered finally body | `_prescan_try_structure` |
