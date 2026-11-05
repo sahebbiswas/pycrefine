@@ -7847,6 +7847,81 @@ class DecompilerGeneric(DecompilerBase):
         """
         opname = instr.opname
         num_args = int(instr.arg) if instr.arg is not None else 0
+        final_args, raw_args, ex_operands = self._call_arguments(instr, opname, num_args)
+
+        # Standard functional name is the first pop (or Pattern 2 sentinel).
+        func_val = self._pop()
+        func_val = self._resolve_callee(opname, func_val, raw_args, final_args)
+
+        orig_func_val = func_val
+        func = self._normalize_val(func_val)
+
+        # ── Decorator pattern detection ───────────────────────────────
+        #   func_val = decorator, raw_args = [('func', body)]
+
+        # Pattern A (3.11+ / Generic fallback)
+        if isinstance(orig_func_val, tuple) and orig_func_val[0] in ("func", "class"):
+            body_text = str(orig_func_val[1])
+            first_line = body_text.strip().split("\n")[0] if body_text.strip() else ""
+            if orig_func_val[0] == "class" or not _is_anonymous_func_body(first_line):
+                if self.stack:
+                    decorator_expr = self._normalize_val(self.stack.pop())
+                    deco_line = f"@{decorator_expr}"
+                    self.stack.append((orig_func_val[0], f"{deco_line}\n{body_text}"))
+                    return
+            if orig_func_val[0] == "func":
+                rendered = _render_func_tuple(body_text, final_args)
+                if self._is_async_comprehension(self._parse_expression(rendered)):
+                    rendered = _CoroutineComprehension(rendered)    # (called here: the compiler awaits it next)
+                self.stack.append(rendered)
+                return
+
+        # Pattern B (3.9 specialisation incorporated here)
+        if (len(raw_args) == 1
+                and isinstance(raw_args[0], tuple)
+                and raw_args[0][0] in ("func", "class")):
+            body_val = raw_args[0]
+            body_text = str(body_val[1])
+            first_line = body_text.strip().split("\n")[0] if body_text.strip() else ""
+            if body_val[0] == "class" or not _is_anonymous_func_body(first_line):
+                # Detected as decorator application: @decorator def name... or @decorator class Name...
+                deco_line = f"@{func}"
+                self.stack.append((body_val[0], f"{deco_line}\n{body_text}"))
+                return
+
+        # ── Class builder detection ──────────────────────────────────
+        # Pattern A (3.11+): [__build_class__, ('func', body), 'Name', bases...]
+        # Pattern B (3.9):   [__build_class__, ('func', body), 'Name', bases...]
+        # (Both look similar once positional args are popped)
+        if func == "__build_class__" and len(raw_args) >= 2:
+            body_val = raw_args[0]
+            if isinstance(body_val, tuple) and body_val[0] == "func":
+                body_text = str(body_val[1])
+            else:
+                body_text = str(body_val)
+
+            cls_name = str(self._normalize_val(raw_args[1])).strip("'\"")
+            # Everything after the body and the name is the class's arguments, bases and
+            # keywords alike (`metaclass=Meta`): `final_args` has the keyword names.
+            bases = list(final_args[2:])
+            bases_str = f"({', '.join(bases)})" if bases else ""
+            lines = body_text.split("\n")
+            real_body = "\n".join(lines[1:])
+            if real_body.strip():
+                self.stack.append(("class", f"class {cls_name}{bases_str}:\n{real_body}"))
+            else:
+                # Only the preamble (__module__, __qualname__, ...): an empty body (#167).
+                self.stack.append(("class", f"class {cls_name}{bases_str}:\n    pass"))
+            return
+
+        if func == "super" and not final_args:
+            self.stack.append("super()")
+        else:
+            self.stack.append(with_unknown_origin(f"{self._parenthesize_callee(func)}({', '.join(final_args)})",
+                                                  func_val, *raw_args, *ex_operands))
+
+    def _call_arguments(self, instr: BytecodeInstruction, opname: str, num_args: int):
+        """Pop a call's arguments: returns ``(final_args, raw_args, ex_operands)``, the rendered and raw arguments and the operands of a CALL_FUNCTION_EX."""
         final_args: List[str] = []
         raw_args: List[Any] = []
         ex_operands: List[Any] = []          # the tuple and the dict of a CALL_FUNCTION_EX, which `raw_args` leaves out
@@ -7934,12 +8009,10 @@ class DecompilerGeneric(DecompilerBase):
                     final_args = [self._normalize_val(v) for v in raw_args]
                     raw_args = raw_args
 
-        # Standard functional name is the first pop (or Pattern 2 sentinel).
-        func_val = self._pop()
+        return final_args, raw_args, ex_operands
 
-        # Handle NULL sentinels (e.g. from PUSH_NULL in Python 3.11+).
-        # Pattern 1 (3.11-3.12): Sentinel is BELOW functional name: [obj/NULL, func, args]
-        # Pattern 2 (3.14+):      Sentinel is ABOVE functional name: [func, NULL, args]
+    def _resolve_callee(self, opname: str, func_val, raw_args: List[Any], final_args: List[str]):
+        """The callable of a call, once its arguments are popped: drops a NULL sentinel, binds a method's object, and moves an unbound first argument into the list."""
         is_method_call = False
         def _get_sentinel(v):
             if v is None: return None
@@ -7972,72 +8045,7 @@ class DecompilerGeneric(DecompilerBase):
                     raw_args.insert(0, first_arg)
                     final_args.insert(0, self._normalize_val(first_arg))
 
-        orig_func_val = func_val
-        func = self._normalize_val(func_val)
-
-        # ── Decorator pattern detection ───────────────────────────────
-        #   func_val = decorator, raw_args = [('func', body)]
-
-        # Pattern A (3.11+ / Generic fallback)
-        if isinstance(orig_func_val, tuple) and orig_func_val[0] in ("func", "class"):
-            body_text = str(orig_func_val[1])
-            first_line = body_text.strip().split("\n")[0] if body_text.strip() else ""
-            if orig_func_val[0] == "class" or not _is_anonymous_func_body(first_line):
-                if self.stack:
-                    decorator_expr = self._normalize_val(self.stack.pop())
-                    deco_line = f"@{decorator_expr}"
-                    self.stack.append((orig_func_val[0], f"{deco_line}\n{body_text}"))
-                    return
-            if orig_func_val[0] == "func":
-                rendered = _render_func_tuple(body_text, final_args)
-                if self._is_async_comprehension(self._parse_expression(rendered)):
-                    rendered = _CoroutineComprehension(rendered)    # (called here: the compiler awaits it next)
-                self.stack.append(rendered)
-                return
-
-        # Pattern B (3.9 specialisation incorporated here)
-        if (len(raw_args) == 1
-                and isinstance(raw_args[0], tuple)
-                and raw_args[0][0] in ("func", "class")):
-            body_val = raw_args[0]
-            body_text = str(body_val[1])
-            first_line = body_text.strip().split("\n")[0] if body_text.strip() else ""
-            if body_val[0] == "class" or not _is_anonymous_func_body(first_line):
-                # Detected as decorator application: @decorator def name... or @decorator class Name...
-                deco_line = f"@{func}"
-                self.stack.append((body_val[0], f"{deco_line}\n{body_text}"))
-                return
-
-        # ── Class builder detection ──────────────────────────────────
-        # Pattern A (3.11+): [__build_class__, ('func', body), 'Name', bases...]
-        # Pattern B (3.9):   [__build_class__, ('func', body), 'Name', bases...]
-        # (Both look similar once positional args are popped)
-        if func == "__build_class__" and len(raw_args) >= 2:
-            body_val = raw_args[0]
-            if isinstance(body_val, tuple) and body_val[0] == "func":
-                body_text = str(body_val[1])
-            else:
-                body_text = str(body_val)
-
-            cls_name = str(self._normalize_val(raw_args[1])).strip("'\"")
-            # Everything after the body and the name is the class's arguments, bases and
-            # keywords alike (`metaclass=Meta`): `final_args` has the keyword names.
-            bases = list(final_args[2:])
-            bases_str = f"({', '.join(bases)})" if bases else ""
-            lines = body_text.split("\n")
-            real_body = "\n".join(lines[1:])
-            if real_body.strip():
-                self.stack.append(("class", f"class {cls_name}{bases_str}:\n{real_body}"))
-            else:
-                # Only the preamble (__module__, __qualname__, ...): an empty body (#167).
-                self.stack.append(("class", f"class {cls_name}{bases_str}:\n    pass"))
-            return
-
-        if func == "super" and not final_args:
-            self.stack.append("super()")
-        else:
-            self.stack.append(with_unknown_origin(f"{self._parenthesize_callee(func)}({', '.join(final_args)})",
-                                                  func_val, *raw_args, *ex_operands))
+        return func_val
 
     @staticmethod
     def _parenthesize_callee(func: Any) -> str:
@@ -8497,93 +8505,7 @@ class DecompilerGeneric(DecompilerBase):
 
         # Detect `break`: forward jump that lands at the exact end of a while/for loop.
         if instr.opname in ("JUMP_FORWARD", "JUMP_ABSOLUTE") and isinstance(jump_target, int) and jump_target > instr.offset:
-            matched_while = False
-            matched_b_type = None
-            for b_off, b_type in reversed(self.blocks):
-                if b_type in ("while", "for") and jump_target >= b_off:
-                    self._append_reconstructed("break")
-                    matched_while = True
-                    matched_b_type = b_type
-                    break
-                if b_type in ("while", "for"):
-                    break  # only check innermost loop
-
-            if matched_while:
-                # Python 3.9: a break from a for-loop emits:
-                #   POP_TOP (pops the iterator) + JUMP_ABSOLUTE(past_end) + JUMP_ABSOLUTE(for_head)
-                # The last JUMP_ABSOLUTE is dead/unreachable but will be processed next.
-                # Suppress it so the backward-jump handler doesn't retroactively rewrite
-                # the preceding `if` block header to `while`.
-                if matched_b_type == "for" and self.pc < len(self.instructions):
-                    nxt = self.instructions[self.pc]
-                    if (not nxt.is_jump_target
-                            and "JUMP" in nxt.opname
-                            and isinstance(self._get_jump_target(nxt), int)
-                            and self._get_jump_target(nxt) <= nxt.offset):
-                        _fb = self.prescan.finally_body_suppress
-                        _fb.add(nxt.offset)
-                        self.prescan.finally_body_suppress = _fb
-                return
-
-            # Non-break forward jump -> reconstruct as else-branch only when a
-            # prior if-block whose target matches jump_target is actually open.
-            # (Exception-handler jumps are always excluded.)
-            if instr.offset not in self.prescan.exc_handler_jump_offsets:
-                next_offset = -1
-                nxt = self.pc
-                # (a `with` block's exception handler, hidden, may sit between the jump and the else)
-                while (nxt < len(self.instructions)
-                       and self.instructions[nxt].offset in self.prescan.finally_body_suppress):
-                    nxt += 1
-                if nxt < len(self.instructions):
-                    next_offset = self.instructions[nxt].offset
-
-                matched_bi = None
-                for bi in range(len(self.blocks)-1, -1, -1):
-                    if self.blocks[bi][1] == "if" and self.blocks[bi][0] == next_offset:
-                        matched_bi = bi
-                        break
-
-                if matched_bi is not None:
-                    # Force close any blocks nested INSIDE (above) the matched if block.
-                    # Only pop interior 'if' blocks — stop at any outer structural block
-                    # (else, while, for, try_body, etc.) which we must NOT collapse.
-                    while len(self.blocks) - 1 > matched_bi:
-                        _, cb_type = self.blocks[-1]
-                        # Stop if we hit a block that is not an inner if/else branch
-                        # (a `with` whose exit handler is hidden ends at this jump too)
-                        if cb_type not in ("if", "else") and not (
-                                cb_type == "with" and self.blocks[-1][0] < next_offset
-                                and self.target_version < (3, 11)):
-                            break
-                        self.blocks.pop()
-                        if cb_type not in _NO_PASS_TYPES:
-                            last_idx = len(self.reconstructed) - 1
-                            while last_idx >= 0 and not self.reconstructed[last_idx].strip():
-                                last_idx -= 1
-                            if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
-                                self._append_reconstructed("pass")
-                        if cb_type not in _NO_INDENT_TYPES:
-                            self.indent_level -= 1
-
-                    if matched_bi != len(self.blocks) - 1:
-                        return
-
-                    last_idx = len(self.reconstructed) - 1
-                    while last_idx >= 0 and not self.reconstructed[last_idx].strip():
-                        last_idx -= 1
-                    if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
-                        self._append_reconstructed("pass")
-
-                    self.indent_level -= 1
-                    self._append_reconstructed("else:")
-                    self.indent_level += 1
-                    self.blocks.pop(matched_bi)  # pop the matched 'if' block
-                    # (when this `if`/`else` is the last statement of an enclosing branch, the
-                    # jump is threaded past the code that follows that branch: the `else:` still
-                    # ends where the branch does)
-                    else_end = self._clip_else_end(instr.offset, jump_target)
-                    self.blocks.append((else_end, "else"))
+            self._forward_jump(instr, jump_target)
             return
         # detect while loop.
         # 3.11+ CPython compiles `while cond: body` as:
@@ -8643,57 +8565,7 @@ class DecompilerGeneric(DecompilerBase):
                     self._append_reconstructed("continue")
                 return  # prescan handled it
 
-            # Fallback for Python 3.14+ where the prescan could not identify
-            # the guard (e.g. guard offset >= body_start in a do-while layout,
-            # or argval unresolved in a way the broadened search still misses).
-            # Retroactively rewrite the most recent "if" header → "while".
-            # Also suppress dup-condition instructions that already executed:
-            # find where the dup region starts (first instruction after the
-            # last STORE in the body) and drain extra stack items.
-            dup_start = instr.offset
-            for ins in self.instructions:
-                if body_start <= ins.offset < instr.offset:
-                    if ins.opname in (
-                        "STORE_NAME", "STORE_FAST", "STORE_GLOBAL",
-                        "STORE_ATTR", "STORE_SUBSCR",
-                    ):
-                        dup_start = ins.offset + 2
-
-            dup_depth = 0
-            for ins in self.instructions:
-                if dup_start <= ins.offset < instr.offset:
-                    if ins.opname in (
-                        "LOAD_CONST", "LOAD_NAME", "LOAD_FAST",
-                        "LOAD_GLOBAL", "LOAD_DEREF", "LOAD_SMALL_INT",
-                    ):
-                        dup_depth += 1
-                    elif ins.opname in ("COMPARE_OP", "BINARY_OP"):
-                        dup_depth -= 1
-            for _ in range(max(0, dup_depth)):
-                if self.stack:
-                    self.stack.pop()
-
-            # Find the most recently emitted "if" header and rewrite it.
-            head_instr = next((i for i in self.instructions if i.offset == body_start), None)
-            for bi in range(len(self.blocks) - 1, -1, -1):
-                boff, btype = self.blocks[bi]
-                if btype == "if" and boff > instr.offset and head_instr is not None and head_instr.opname == "FOR_ITER":
-                    # An `if` that is still open at a jump back to a `for` head is a body
-                    # statement ending in `continue` (`if c: return x` as the last
-                    # statement compiles to `if not c: continue`), not a `while` guard.
-                    self._append_reconstructed("continue")
-                    return
-                if btype == "if" and boff >= instr.offset:
-                    for idx in range(len(self.reconstructed) - 1, -1, -1):
-                        if self.reconstructed[idx].lstrip().startswith("if "):
-                            self.reconstructed[idx] = self.reconstructed[idx].replace(
-                                "if ", "while ", 1
-                            )
-                            self.blocks[bi] = boff, "while"
-                            self.prescan.while_true_ends.discard(boff)
-                            break
-                    break
-
+            self._rewrite_if_as_while(instr, body_start)
             return  # never treat JUMP_BACKWARD as else-opener
 
         # ── no-ops ─────────────────────────────────────────────────────
@@ -9087,6 +8959,144 @@ class DecompilerGeneric(DecompilerBase):
             return idx
         return -1
 
+    def _forward_jump(self, instr: BytecodeInstruction, jump_target: int) -> None:
+        """A forward jump: a `break` when it lands past the end of the innermost loop, else the `else:` that follows an `if`."""
+        matched_while = False
+        matched_b_type = None
+        for b_off, b_type in reversed(self.blocks):
+            if b_type in ("while", "for") and jump_target >= b_off:
+                self._append_reconstructed("break")
+                matched_while = True
+                matched_b_type = b_type
+                break
+            if b_type in ("while", "for"):
+                break  # only check innermost loop
+
+        if matched_while:
+            # Python 3.9: a break from a for-loop emits:
+            #   POP_TOP (pops the iterator) + JUMP_ABSOLUTE(past_end) + JUMP_ABSOLUTE(for_head)
+            # The last JUMP_ABSOLUTE is dead/unreachable but will be processed next.
+            # Suppress it so the backward-jump handler doesn't retroactively rewrite
+            # the preceding `if` block header to `while`.
+            if matched_b_type == "for" and self.pc < len(self.instructions):
+                nxt = self.instructions[self.pc]
+                if (not nxt.is_jump_target
+                        and "JUMP" in nxt.opname
+                        and isinstance(self._get_jump_target(nxt), int)
+                        and self._get_jump_target(nxt) <= nxt.offset):
+                    _fb = self.prescan.finally_body_suppress
+                    _fb.add(nxt.offset)
+                    self.prescan.finally_body_suppress = _fb
+            return
+
+        # Non-break forward jump -> reconstruct as else-branch only when a
+        # prior if-block whose target matches jump_target is actually open.
+        # (Exception-handler jumps are always excluded.)
+        if instr.offset not in self.prescan.exc_handler_jump_offsets:
+            next_offset = -1
+            nxt = self.pc
+            # (a `with` block's exception handler, hidden, may sit between the jump and the else)
+            while (nxt < len(self.instructions)
+                   and self.instructions[nxt].offset in self.prescan.finally_body_suppress):
+                nxt += 1
+            if nxt < len(self.instructions):
+                next_offset = self.instructions[nxt].offset
+
+            matched_bi = None
+            for bi in range(len(self.blocks)-1, -1, -1):
+                if self.blocks[bi][1] == "if" and self.blocks[bi][0] == next_offset:
+                    matched_bi = bi
+                    break
+
+            if matched_bi is not None:
+                # Force close any blocks nested INSIDE (above) the matched if block.
+                # Only pop interior 'if' blocks — stop at any outer structural block
+                # (else, while, for, try_body, etc.) which we must NOT collapse.
+                while len(self.blocks) - 1 > matched_bi:
+                    _, cb_type = self.blocks[-1]
+                    # Stop if we hit a block that is not an inner if/else branch
+                    # (a `with` whose exit handler is hidden ends at this jump too)
+                    if cb_type not in ("if", "else") and not (
+                            cb_type == "with" and self.blocks[-1][0] < next_offset
+                            and self.target_version < (3, 11)):
+                        break
+                    self.blocks.pop()
+                    if cb_type not in _NO_PASS_TYPES:
+                        last_idx = len(self.reconstructed) - 1
+                        while last_idx >= 0 and not self.reconstructed[last_idx].strip():
+                            last_idx -= 1
+                        if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
+                            self._append_reconstructed("pass")
+                    if cb_type not in _NO_INDENT_TYPES:
+                        self.indent_level -= 1
+
+                if matched_bi != len(self.blocks) - 1:
+                    return
+
+                last_idx = len(self.reconstructed) - 1
+                while last_idx >= 0 and not self.reconstructed[last_idx].strip():
+                    last_idx -= 1
+                if last_idx >= 0 and self.reconstructed[last_idx].strip().endswith(":"):
+                    self._append_reconstructed("pass")
+
+                self.indent_level -= 1
+                self._append_reconstructed("else:")
+                self.indent_level += 1
+                self.blocks.pop(matched_bi)  # pop the matched 'if' block
+                # (when this `if`/`else` is the last statement of an enclosing branch, the
+                # jump is threaded past the code that follows that branch: the `else:` still
+                # ends where the branch does)
+                else_end = self._clip_else_end(instr.offset, jump_target)
+                self.blocks.append((else_end, "else"))
+        return
+
+    def _rewrite_if_as_while(self, instr: BytecodeInstruction, body_start: int) -> None:
+        """A jump back with no recorded loop guard (3.14 do-while layouts): drain the duplicated condition and turn the open `if` into `while`."""
+        dup_start = instr.offset
+        for ins in self.instructions:
+            if body_start <= ins.offset < instr.offset:
+                if ins.opname in (
+                    "STORE_NAME", "STORE_FAST", "STORE_GLOBAL",
+                    "STORE_ATTR", "STORE_SUBSCR",
+                ):
+                    dup_start = ins.offset + 2
+
+        dup_depth = 0
+        for ins in self.instructions:
+            if dup_start <= ins.offset < instr.offset:
+                if ins.opname in (
+                    "LOAD_CONST", "LOAD_NAME", "LOAD_FAST",
+                    "LOAD_GLOBAL", "LOAD_DEREF", "LOAD_SMALL_INT",
+                ):
+                    dup_depth += 1
+                elif ins.opname in ("COMPARE_OP", "BINARY_OP"):
+                    dup_depth -= 1
+        for _ in range(max(0, dup_depth)):
+            if self.stack:
+                self.stack.pop()
+
+        # Find the most recently emitted "if" header and rewrite it.
+        head_instr = next((i for i in self.instructions if i.offset == body_start), None)
+        for bi in range(len(self.blocks) - 1, -1, -1):
+            boff, btype = self.blocks[bi]
+            if btype == "if" and boff > instr.offset and head_instr is not None and head_instr.opname == "FOR_ITER":
+                # An `if` that is still open at a jump back to a `for` head is a body
+                # statement ending in `continue` (`if c: return x` as the last
+                # statement compiles to `if not c: continue`), not a `while` guard.
+                self._append_reconstructed("continue")
+                return
+            if btype == "if" and boff >= instr.offset:
+                for idx in range(len(self.reconstructed) - 1, -1, -1):
+                    if self.reconstructed[idx].lstrip().startswith("if "):
+                        self.reconstructed[idx] = self.reconstructed[idx].replace(
+                            "if ", "while ", 1
+                        )
+                        self.blocks[bi] = boff, "while"
+                        self.prescan.while_true_ends.discard(boff)
+                        break
+                break
+
+
     def _op_conditional_jump(self, instr: BytecodeInstruction):
         """
         Handle a conditional jump instruction, emitting reconstructed `if`, `while`, or ternary code and updating decompiler state.
@@ -9109,38 +9119,7 @@ class DecompilerGeneric(DecompilerBase):
         # the stack instead of opening a control-flow block.
 
         if instr.offset in self.prescan.ternary_jumps:
-            store_name, then_instrs, else_instrs, is_true, aug_op = \
-                self.prescan.ternary_jumps[instr.offset]
-            cond_expr = str(self._pop())
-            # For POP_JUMP_IF_NONE / POP_JUMP_IF_NOT_NONE the raw condition
-            # on the stack is the *value* being tested (not a bool expression).
-            # Rewrite it to the appropriate 'is None' / 'is not None' form
-            # so the emitted ternary reads correctly.
-            if "IF_NOT_NONE" in opname and "is " not in cond_expr:
-                cond_expr = f"{cond_expr} is None"
-            elif "IF_NONE" in opname and "NOT" not in opname and "is " not in cond_expr:
-                cond_expr = f"{cond_expr} is not None"
-            then_expr = self._eval_ternary_branch(then_instrs)
-            else_expr = self._eval_ternary_branch(else_instrs)
-
-            ternary = f"{then_expr} if {'not ' if is_true else ''}{cond_expr} else {else_expr}"
-
-            if aug_op:
-                # Augmented ternary: the target variable was loaded onto the stack
-                # before the jump. Pop it now so we can emit the assignment statement.
-                target_var = self.stack.pop() if self.stack else store_name
-                self._append_reconstructed(f"{target_var} {aug_op} {ternary}")
-            else:
-                # Regular ternary expr: push to stack for a following STORE to pick up.
-                self.stack.append(ternary)
-            # Skip past the else-branch instructions up to (but not including)
-            # the else-STORE: they have already been evaluated speculatively.
-            # The else-STORE fires normally and emits the assignment.
-            jump_target = self._get_jump_target(instr)
-            while self.pc < len(self.instructions):
-                if self.instructions[self.pc].offset >= jump_target:
-                    break
-                self.pc += 1
+            self._conditional_ternary(instr, opname)
             return
 
         # Suppress dup-condition instructions pre-identified by pre-scan.
@@ -9176,41 +9155,8 @@ class DecompilerGeneric(DecompilerBase):
             # The body_start is jump_target's complement: right after this instr.
             next_body_offset = instr.offset + 4  # skip past COMPARE_OP cache slot
             # Use the pre-scanned mapping: guard_offset -> body_start
-            for bs, go in self.prescan.while_header_targets.items():
-                if go == instr.offset:
-                    # This POP_JUMP is the while-loop guard
-                    if self._falls_to_outer_back_jump(instr, bs) and jump_target > instr.offset:
-                        # Inverted guard: the jump enters the body and the
-                        # fall-through leaves the loop via a back-jump to an
-                        # enclosing loop's head.
-                        loop_end = self._loop_end_after(bs)
-                        text = cond if (is_true or compound_precomputed) else f"not {cond}"
-                        self._append_reconstructed(f"while {text}:")
-                        self.indent_level += 1
-                        self.blocks.append((loop_end, "while"))
-                        return
-                    if jump_target < bs and jump_target < instr.offset:
-                        # Exit is a conditional jump back to an enclosing loop head.
-                        text = f"not {cond}" if is_true and not compound_precomputed else cond
-                        self._append_reconstructed(f"while {text}:")
-                        self.indent_level += 1
-                        self.blocks.append((self._loop_end_after(bs), "while"))
-                        return
-                    if compound_precomputed:
-                        self._append_reconstructed(f"while {cond}:")
-                    elif is_true:
-                        self._append_reconstructed(f"while not {cond}:")
-                    else:
-                        self._append_reconstructed(f"while {cond}:")
-                    self.indent_level += 1
-                    # (a guard that leaves to a `return` placed inside the loop's range: the loop ends at its back-edge)
-                    in_range = jump_target in self.prescan.relocated_suppress
-                    end = self._while_block_end(bs, jump_target)
-                    if in_range:
-                        end = next(at for at, block in self.prescan.relocated_exits.items() if block[0] == jump_target)
-                        self.emit.relocated_indent[end] = self.indent_level - 1
-                    self.blocks.append((end, "while"))
-                    return
+            if self._conditional_while_guard(instr, cond, is_true, jump_target, compound_precomputed):
+                return
 
             # and/or chain: same target as current if-block
             if self.blocks and self.blocks[-1][1] == "if" and self.blocks[-1][0] == jump_target:
@@ -9291,6 +9237,80 @@ class DecompilerGeneric(DecompilerBase):
                     return
 
             self.blocks.append((if_block_end, "if"))
+
+    def _conditional_ternary(self, instr: BytecodeInstruction, opname: str) -> None:
+        """A conditional jump the prescan found to be a ternary: evaluate both arms and push (or assign) the expression."""
+        store_name, then_instrs, else_instrs, is_true, aug_op = \
+            self.prescan.ternary_jumps[instr.offset]
+        cond_expr = str(self._pop())
+        # For POP_JUMP_IF_NONE / POP_JUMP_IF_NOT_NONE the raw condition
+        # on the stack is the *value* being tested (not a bool expression).
+        # Rewrite it to the appropriate 'is None' / 'is not None' form
+        # so the emitted ternary reads correctly.
+        if "IF_NOT_NONE" in opname and "is " not in cond_expr:
+            cond_expr = f"{cond_expr} is None"
+        elif "IF_NONE" in opname and "NOT" not in opname and "is " not in cond_expr:
+            cond_expr = f"{cond_expr} is not None"
+        then_expr = self._eval_ternary_branch(then_instrs)
+        else_expr = self._eval_ternary_branch(else_instrs)
+
+        ternary = f"{then_expr} if {'not ' if is_true else ''}{cond_expr} else {else_expr}"
+
+        if aug_op:
+            # Augmented ternary: the target variable was loaded onto the stack
+            # before the jump. Pop it now so we can emit the assignment statement.
+            target_var = self.stack.pop() if self.stack else store_name
+            self._append_reconstructed(f"{target_var} {aug_op} {ternary}")
+        else:
+            # Regular ternary expr: push to stack for a following STORE to pick up.
+            self.stack.append(ternary)
+        # Skip past the else-branch instructions up to (but not including)
+        # the else-STORE: they have already been evaluated speculatively.
+        # The else-STORE fires normally and emits the assignment.
+        jump_target = self._get_jump_target(instr)
+        while self.pc < len(self.instructions):
+            if self.instructions[self.pc].offset >= jump_target:
+                break
+            self.pc += 1
+
+    def _conditional_while_guard(self, instr: BytecodeInstruction, cond, is_true: bool, jump_target, compound_precomputed: bool) -> bool:
+        """Open a `while` when the prescan named this jump a loop guard; returns whether it did."""
+        for bs, go in self.prescan.while_header_targets.items():
+            if go == instr.offset:
+                # This POP_JUMP is the while-loop guard
+                if self._falls_to_outer_back_jump(instr, bs) and jump_target > instr.offset:
+                    # Inverted guard: the jump enters the body and the
+                    # fall-through leaves the loop via a back-jump to an
+                    # enclosing loop's head.
+                    loop_end = self._loop_end_after(bs)
+                    text = cond if (is_true or compound_precomputed) else f"not {cond}"
+                    self._append_reconstructed(f"while {text}:")
+                    self.indent_level += 1
+                    self.blocks.append((loop_end, "while"))
+                    return True
+                if jump_target < bs and jump_target < instr.offset:
+                    # Exit is a conditional jump back to an enclosing loop head.
+                    text = f"not {cond}" if is_true and not compound_precomputed else cond
+                    self._append_reconstructed(f"while {text}:")
+                    self.indent_level += 1
+                    self.blocks.append((self._loop_end_after(bs), "while"))
+                    return True
+                if compound_precomputed:
+                    self._append_reconstructed(f"while {cond}:")
+                elif is_true:
+                    self._append_reconstructed(f"while not {cond}:")
+                else:
+                    self._append_reconstructed(f"while {cond}:")
+                self.indent_level += 1
+                # (a guard that leaves to a `return` placed inside the loop's range: the loop ends at its back-edge)
+                in_range = jump_target in self.prescan.relocated_suppress
+                end = self._while_block_end(bs, jump_target)
+                if in_range:
+                    end = next(at for at, block in self.prescan.relocated_exits.items() if block[0] == jump_target)
+                    self.emit.relocated_indent[end] = self.indent_level - 1
+                self.blocks.append((end, "while"))
+                return True
+        return False
 
     def _unthread_return(self, by_offset: Dict[int, int], after: int, target: int) -> int:
         """

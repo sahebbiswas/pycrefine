@@ -136,7 +136,7 @@ What the analysis passes found before emission starts.
 |---|---|---|
 | `while_body_offsets` | where a while body starts, to drop the repeated condition | `_prescan_while_loops` |
 | `while_header_targets` | body start -> guard POP_JUMP offset | `_prescan_while_loops`, `decompile` |
-| `while_true_ends` | end offsets of while-True loops | `_open_while_true_39`, `_op_jump`, `_op_nop`, `_prescan_while_loops` |
+| `while_true_ends` | end offsets of while-True loops | `_op_nop`, `_open_while_true_39`, `_prescan_while_loops`, `_rewrite_if_as_while` |
 | `inner_back_jumps` | inner back-jump -> the back-edge that closes the loop | `_prescan_while_loops` |
 | `dup_guard_exits` | exit targets of suppressed bottom-of-loop condition copies | `_prescan_while_loops` |
 | `for_iter_targets` | jump targets of FOR_ITER (3.9 break detection) | `_prescan_try_structure` |
@@ -154,7 +154,7 @@ What the analysis passes found before emission starts.
 | `push_exc_to_finally_merge` | merge offset -> the handler entry points (sorted) that rejoin there, for a `try` inside a loop whose handlers merge after the loop | `_prescan_try_structure` |
 | `finally_merge_offsets` | merge labels where deferred finally/except text is emitted | `_close_blocks`, `_dispatch_instruction`, `_prescan_try_structure` |
 | `except_only_merge_offsets` | merge offsets that have handlers but no `finally`, so only the handler text is placed there | `_dispatch_instruction`, `_prescan_try_structure` |
-| `finally_body_suppress` | instructions of an inlined copy of a `finally` body, left out of the normal flow because the text is emitted once at the merge label | `_elide_early_finally_copies`, `_op_jump`, `_op_setup_with`, `_pop_block_break_from_if_39`, `_pop_block_break_path_39`, `_pop_block_return_39`, `_prescan_try_structure`, `_suppress_copies` |
+| `finally_body_suppress` | instructions of an inlined copy of a `finally` body, left out of the normal flow because the text is emitted once at the merge label | `_elide_early_finally_copies`, `_forward_jump`, `_op_setup_with`, `_pop_block_break_from_if_39`, `_pop_block_break_path_39`, `_pop_block_return_39`, `_prescan_try_structure`, `_suppress_copies` |
 | `finally_targets` | 3.9: targets of the `SETUP_FINALLY`s that belong to a user `finally:` rather than to a handler | `_prescan_try_structure` |
 | `finally_from_handler` | 3.9: handler offset -> its RERAISE | `_elide_early_finally_copies`, `_open_finally_from_handler`, `_prescan_try_structure` |
 | `handler_section_suppress` | instructions of an except handler that is decompiled ahead of time as a section, so the main pass skips them | `_prescan_try_structure` |
@@ -192,7 +192,7 @@ Bookkeeping that changes while instructions are replayed.
 | `open_with_sentinels` | 3.14: (body end, body start) of open with bodies | `_close_blocks`, `_dispatch_instruction` |
 | `pei_indents` | `PUSH_EXC_INFO` offset -> indent of the `try:` that precedes it, which its `except` headers use | `_op_nop` |
 | `finally_wrapper_indent` | 3.9: wrapper jump target -> indent at which `finally:` is written when its `POP_BLOCK` is reached | `_op_setup_finally_39` |
-| `kw_names` | keyword names of the call being built | `_op_call`, `_op_kw_names` |
+| `kw_names` | keyword names of the call being built | `_call_arguments`, `_op_kw_names` |
 
 #### `DocState` (`self.doc`)
 
