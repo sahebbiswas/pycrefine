@@ -560,6 +560,57 @@ class Decompiler39(DecompilerGeneric):
         finally_target = None
         _closing_exc_cleanup = False
 
+        if self._pop_block_continue_39():
+            return
+        if self._pop_block_break_from_if_39(instr):
+            return
+
+        _top_is_try = (self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup"))
+        _inner_try = (
+            self.blocks
+            and self.blocks[-1][1] in ("for", "if", "while")
+            and any(b[1] in ("try_body", "exc_cleanup") for b in self.blocks[:-1])
+        )
+        if _top_is_try or _inner_try:
+            if self._pop_block_return_39():
+                return
+            self._pop_block_break_path_39(instr)
+            finally_target, is_finally_pop, _closing_exc_cleanup = self._close_try_body_39()
+
+        elif self.blocks and self.blocks[-1][1] == "finally_wrapper":
+            finally_target = self.blocks[-1][0]
+            is_finally_pop = True
+            self.blocks.pop()
+
+        # Record the indent level where except/finally headers should appear.
+        # In nested scenarios, each try body's POP_BLOCK records its parent's indent.
+        # The `except X as e:` cleanup guard is not a try body: no header follows
+        # it, and recording the handler body's indent there put a later `finally:`
+        # inside the except clause.
+        if _closing_exc_cleanup:
+            return
+        self.emit.except_header_indents.append(self.indent_level)
+        # Peek ahead for JUMP_FORWARD at end of try block to establish scope.
+        look = self.pc
+        while (look < len(self.instructions) and
+               self.instructions[look].opname in ("RESUME", "NOP", "CACHE")):
+            look += 1
+        if look < len(self.instructions) and self.instructions[look].opname == "JUMP_FORWARD":
+            self.emit.except_end_offsets.append(self._get_jump_target(self.instructions[look]))
+
+        if is_finally_pop:
+            # establish the correct indent for finally: header
+            if self.emit.except_header_indents:
+                self.indent_level = self.emit.except_header_indents[-1]
+
+            self._append_reconstructed("finally:")
+            self.indent_level += 1
+            self.blocks.append((finally_target, "finally_body"))
+            self.emit.except_header_indents.pop()
+
+
+    def _pop_block_continue_39(self) -> bool:
+        """A `continue` inside a try body: POP_BLOCK leaves the try, then the jump re-enters the loop."""
         # `continue` inside a try body: POP_BLOCK leaves the try, then the jump
         # re-enters the loop. It closes nothing; the jump emits the `continue`.
         if self.pc < len(self.instructions):
@@ -569,8 +620,12 @@ class Decompiler39(DecompilerGeneric):
                               and self.instructions[self.pc + 1].offset == self.blocks[-1][0])
             if (_nxt.opname == "JUMP_ABSOLUTE" and _nxt.offset in self.prescan.inner_back_jumps
                     and not _empty_finally and any(b[1] == "try_body" for b in self.blocks)):
-                return
+                return True
 
+        return False
+
+    def _pop_block_break_from_if_39(self, instr: BytecodeInstruction) -> bool:
+        """A `break` inside an `if` within a try in a `for` loop (3.9): emit it now and hide the implementation instructions."""
         # ── Early-exit: for-loop break inside if-within-try (Python 3.9) ──────
         # Pattern:
         #   for x in ...:
@@ -629,277 +684,251 @@ class Decompiler39(DecompilerGeneric):
                         self.prescan.finally_body_suppress = _fb
                         # Return early: do NOT pop the 'if' block.
                         # The natural POP_BLOCK will follow and handle the try_body exit appropriately.
-                        return
+                        return True
 
-        _top_is_try = (self.blocks and self.blocks[-1][1] in ("try_body", "exc_cleanup"))
-        _inner_try = (
-            self.blocks
-            and self.blocks[-1][1] in ("for", "if", "while")
-            and any(b[1] in ("try_body", "exc_cleanup") for b in self.blocks[:-1])
-        )
-        if _top_is_try or _inner_try:
-            # ── Python 3.9 early-exit return from for-inside-try ───────────
-            # Pattern:
-            #   48 POP_TOP            ← pop DUP_TOP from chained comparison
-            #   50 POP_BLOCK          ← THIS (VM cleanup for early-exit)
-            #   52 LOAD_CONST False   ← return value loads
-            #   54 RETURN_VALUE       ← actual return
-            #   56 JUMP_ABSOLUTE 14   ← dead code
-            #   58 POP_BLOCK          ← structural try_body exit (jump_target=True)
-            # Strategy:
-            #  (a) Emit `return <val>` at CURRENT indent (inside if body)
-            #  (b) Suppress 52..56 from dispatch (push to _finally_body_suppress)
-            #  (c) Return early; structural POP_BLOCK at 58 fires correctly.
-            look = self.pc
-            ret_idx = -1
-            while look < len(self.instructions):
-                op = self.instructions[look].opname
-                if op in ("RETURN_VALUE", "RETURN_CONST"):
-                    ret_idx = look
-                    break
-                # Skip over ops that build the return expression
-                if ("LOAD_" in op or op in
-                        ("POP_TOP", "RESUME", "NOP", "CACHE", "DUP_TOP", "ROT_THREE")):
-                    look += 1
-                else:
-                    break
+        return False
 
-            if ret_idx >= 0:
-                ret_instr = self.instructions[ret_idx]
-                if ret_instr.opname == "RETURN_CONST":
-                    ret_val = self._format_val(ret_instr.argval)
-                else:
-                    # The LOAD instructions between here and RETURN_VALUE
-                    # haven't been dispatched yet — evaluate them into a
-                    # temporary mini-stack to get the actual return value.
-                    mini_stack = list(self.stack)  # copy current state
-                    for mi in range(self.pc, ret_idx):
-                        mi_instr = self.instructions[mi]
-                        mi_op = mi_instr.opname
-                        if mi_op in ("RESUME", "NOP", "CACHE", "POP_TOP"):
-                            if mini_stack and mi_op == "POP_TOP":
-                                mini_stack.pop()
-                        elif "LOAD_CONST" == mi_op:
-                            mini_stack.append(self._format_val(mi_instr.argval))
-                        elif "LOAD_" in mi_op:
-                            mini_stack.append(str(mi_instr.argval))
-                    ret_val = str(mini_stack[-1]) if mini_stack else "None"
-
-                is_compiler_gen = (ret_val == "None"
-                                   and self.is_compiler_generated_return(ret_idx))
-                if not is_compiler_gen:
-                    # If the last emitted line is an unclosed block header
-                    # (e.g. 'if cond:') that never got a body, emit the
-                    # return at one extra indent level to place it inside that block.
-                    last_real = -1
-                    for li in range(len(self.reconstructed) - 1, -1, -1):
-                        if self.reconstructed[li].strip():
-                            last_real = li
-                            break
-                    last_line = self.reconstructed[last_real].strip() if last_real >= 0 else ""
-                    extra_indent = 0
-                    if last_line.endswith(":") and last_line.startswith(("if ", "elif ", "else:", "while ")):
-                        extra_indent = 1
-
-                    saved_indent = self.indent_level
-                    self.indent_level += extra_indent
-                    self._append_reconstructed(f"return {ret_val}")
-                    self.indent_level = saved_indent
-
-                # Suppress all instructions from pc up to ret_instr
-                # plus dead code until the next jump target.
-                _fb = self.prescan.finally_body_suppress
-                sup = self.pc
-                while sup < len(self.instructions):
-                    ins_s = self.instructions[sup]
-                    _fb.add(ins_s.offset)
-                    sup += 1
-                    if ins_s.offset == ret_instr.offset:
-                        while (sup < len(self.instructions)
-                               and not self.instructions[sup].is_jump_target):
-                            _fb.add(self.instructions[sup].offset)
-                            sup += 1
-                        break
-                self.prescan.finally_body_suppress = _fb
-                return
-
-            # Peek ahead for break/loop patterns (existing logic)
-            look = self.pc
-            while (look < len(self.instructions)
-                   and self.instructions[look].opname in ("RESUME", "NOP", "CACHE")):
+    def _pop_block_return_39(self) -> bool:
+        """A `return` that leaves a `for` loop inside a try (3.9): emit it here and hide the instructions that build it."""
+        # ── Python 3.9 early-exit return from for-inside-try ───────────
+        # Pattern:
+        #   48 POP_TOP            ← pop DUP_TOP from chained comparison
+        #   50 POP_BLOCK          ← THIS (VM cleanup for early-exit)
+        #   52 LOAD_CONST False   ← return value loads
+        #   54 RETURN_VALUE       ← actual return
+        #   56 JUMP_ABSOLUTE 14   ← dead code
+        #   58 POP_BLOCK          ← structural try_body exit (jump_target=True)
+        # Strategy:
+        #  (a) Emit `return <val>` at CURRENT indent (inside if body)
+        #  (b) Suppress 52..56 from dispatch (push to _finally_body_suppress)
+        #  (c) Return early; structural POP_BLOCK at 58 fires correctly.
+        look = self.pc
+        ret_idx = -1
+        while look < len(self.instructions):
+            op = self.instructions[look].opname
+            if op in ("RETURN_VALUE", "RETURN_CONST"):
+                ret_idx = look
+                break
+            # Skip over ops that build the return expression
+            if ("LOAD_" in op or op in
+                    ("POP_TOP", "RESUME", "NOP", "CACHE", "DUP_TOP", "ROT_THREE")):
                 look += 1
-            if look < len(self.instructions):
-                nxt = self.instructions[look]
-                if nxt.opname == "JUMP_ABSOLUTE":
-                    nxt_target = self._get_jump_target(nxt)
-                    # Is this JUMP_ABSOLUTE a break to the while-end?
-                    _while_end = next(
-                        (b[0] for b in reversed(self.blocks) if b[1] == "while"), -1
-                    )
-                    if nxt_target > instr.offset and nxt_target == _while_end:
-                        # Emit break while still inside the try body
-                        self._append_reconstructed("break")
-                        # Advance past the JUMP_ABSOLUTE
-                        self.pc = look + 1
-                        # Suppress the dead-code POP_BLOCK + JUMP_ABSOLUTE backward
-                        # that follows (unreachable fallthrough path)
-                        sup = self.pc
+            else:
+                break
+
+        if ret_idx >= 0:
+            ret_instr = self.instructions[ret_idx]
+            if ret_instr.opname == "RETURN_CONST":
+                ret_val = self._format_val(ret_instr.argval)
+            else:
+                # The LOAD instructions between here and RETURN_VALUE
+                # haven't been dispatched yet — evaluate them into a
+                # temporary mini-stack to get the actual return value.
+                mini_stack = list(self.stack)  # copy current state
+                for mi in range(self.pc, ret_idx):
+                    mi_instr = self.instructions[mi]
+                    mi_op = mi_instr.opname
+                    if mi_op in ("RESUME", "NOP", "CACHE", "POP_TOP"):
+                        if mini_stack and mi_op == "POP_TOP":
+                            mini_stack.pop()
+                    elif "LOAD_CONST" == mi_op:
+                        mini_stack.append(self._format_val(mi_instr.argval))
+                    elif "LOAD_" in mi_op:
+                        mini_stack.append(str(mi_instr.argval))
+                ret_val = str(mini_stack[-1]) if mini_stack else "None"
+
+            is_compiler_gen = (ret_val == "None"
+                               and self.is_compiler_generated_return(ret_idx))
+            if not is_compiler_gen:
+                # If the last emitted line is an unclosed block header
+                # (e.g. 'if cond:') that never got a body, emit the
+                # return at one extra indent level to place it inside that block.
+                last_real = -1
+                for li in range(len(self.reconstructed) - 1, -1, -1):
+                    if self.reconstructed[li].strip():
+                        last_real = li
+                        break
+                last_line = self.reconstructed[last_real].strip() if last_real >= 0 else ""
+                extra_indent = 0
+                if last_line.endswith(":") and last_line.startswith(("if ", "elif ", "else:", "while ")):
+                    extra_indent = 1
+
+                saved_indent = self.indent_level
+                self.indent_level += extra_indent
+                self._append_reconstructed(f"return {ret_val}")
+                self.indent_level = saved_indent
+
+            # Suppress all instructions from pc up to ret_instr
+            # plus dead code until the next jump target.
+            _fb = self.prescan.finally_body_suppress
+            sup = self.pc
+            while sup < len(self.instructions):
+                ins_s = self.instructions[sup]
+                _fb.add(ins_s.offset)
+                sup += 1
+                if ins_s.offset == ret_instr.offset:
+                    while (sup < len(self.instructions)
+                           and not self.instructions[sup].is_jump_target):
+                        _fb.add(self.instructions[sup].offset)
+                        sup += 1
+                    break
+            self.prescan.finally_body_suppress = _fb
+            return True
+
+        return False
+
+    def _pop_block_break_path_39(self, instr: BytecodeInstruction) -> None:
+        """A `break` out of a loop around the try body: emit it while still inside the body, and hide its jumps."""
+        # Peek ahead for break/loop patterns (existing logic)
+        look = self.pc
+        while (look < len(self.instructions)
+               and self.instructions[look].opname in ("RESUME", "NOP", "CACHE")):
+            look += 1
+        if look < len(self.instructions):
+            nxt = self.instructions[look]
+            if nxt.opname == "JUMP_ABSOLUTE":
+                nxt_target = self._get_jump_target(nxt)
+                # Is this JUMP_ABSOLUTE a break to the while-end?
+                _while_end = next(
+                    (b[0] for b in reversed(self.blocks) if b[1] == "while"), -1
+                )
+                if nxt_target > instr.offset and nxt_target == _while_end:
+                    # Emit break while still inside the try body
+                    self._append_reconstructed("break")
+                    # Advance past the JUMP_ABSOLUTE
+                    self.pc = look + 1
+                    # Suppress the dead-code POP_BLOCK + JUMP_ABSOLUTE backward
+                    # that follows (unreachable fallthrough path)
+                    sup = self.pc
+                    while (sup < len(self.instructions)
+                           and self.instructions[sup].opname in ("RESUME", "NOP", "CACHE")):
+                        sup += 1
+                    if (sup < len(self.instructions)
+                            and self.instructions[sup].opname == "POP_BLOCK"):
+                        _fb = self.prescan.finally_body_suppress
+                        _fb.add(self.instructions[sup].offset)
+                        sup += 1
                         while (sup < len(self.instructions)
                                and self.instructions[sup].opname in ("RESUME", "NOP", "CACHE")):
                             sup += 1
                         if (sup < len(self.instructions)
-                                and self.instructions[sup].opname == "POP_BLOCK"):
-                            _fb = self.prescan.finally_body_suppress
+                                and self.instructions[sup].opname == "JUMP_ABSOLUTE"):
                             _fb.add(self.instructions[sup].offset)
-                            sup += 1
-                            while (sup < len(self.instructions)
-                                   and self.instructions[sup].opname in ("RESUME", "NOP", "CACHE")):
-                                sup += 1
-                            if (sup < len(self.instructions)
-                                    and self.instructions[sup].opname == "JUMP_ABSOLUTE"):
-                                _fb.add(self.instructions[sup].offset)
                             
-                            dead = sup + 1
-                            while dead < len(self.instructions) and not self.instructions[dead].is_jump_target:
-                                _fb.add(self.instructions[dead].offset)
-                                dead += 1
+                        dead = sup + 1
+                        while dead < len(self.instructions) and not self.instructions[dead].is_jump_target:
+                            _fb.add(self.instructions[dead].offset)
+                            dead += 1
 
-                            self.prescan.finally_body_suppress = _fb
-                            # Fall through to pop the try_body block
+                        self.prescan.finally_body_suppress = _fb
+                        # Fall through to pop the try_body block
 
-                # Python 3.9 for-loop break inside try: the break path is
-                # POP_BLOCK -> POP_TOP -> JUMP_ABSOLUTE(past FOR_ITER end).
-                # The POP_TOP pops the for-iterator off the operand stack.
-                elif nxt.opname == "POP_TOP":
-                    look2 = look + 1
-                    while (look2 < len(self.instructions)
-                           and self.instructions[look2].opname in ("RESUME", "NOP", "CACHE")):
-                        look2 += 1
-                    if (look2 < len(self.instructions)
-                            and self.instructions[look2].opname == "JUMP_ABSOLUTE"):
-                        jmp = self.instructions[look2]
-                        jmp_target = self._get_jump_target(jmp)
-                        # Confirm this is a forward break jump that lands beyond or
-                        # at the enclosing FOR_ITER end (i.e. exits the for loop).
-                        _for_end = next(
-                            (b[0] for b in reversed(self.blocks) if b[1] == "try_body"), -1
-                        )
-                        for_iter_end = -1
-                        for fi in self.instructions:
-                            if fi.opname == "FOR_ITER":
-                                t = self._get_jump_target(fi)
-                                if isinstance(t, int) and t > instr.offset:
-                                    if for_iter_end < 0 or t < for_iter_end:
-                                        for_iter_end = t
-                        if (isinstance(jmp_target, int)
-                                and jmp_target > instr.offset
-                                and for_iter_end > 0
-                                and jmp_target >= for_iter_end):
-                            # Emit break while still inside the try body
-                            self._append_reconstructed("break")
-                            # Suppress POP_TOP and JUMP_ABSOLUTE (they are implementation
-                            # details of breaking out of a for-loop-within-try)
-                            _fb = self.prescan.finally_body_suppress
-                            _fb.add(nxt.offset)                    # POP_TOP
-                            _fb.add(jmp.offset)                    # JUMP_ABSOLUTE
+            # Python 3.9 for-loop break inside try: the break path is
+            # POP_BLOCK -> POP_TOP -> JUMP_ABSOLUTE(past FOR_ITER end).
+            # The POP_TOP pops the for-iterator off the operand stack.
+            elif nxt.opname == "POP_TOP":
+                look2 = look + 1
+                while (look2 < len(self.instructions)
+                       and self.instructions[look2].opname in ("RESUME", "NOP", "CACHE")):
+                    look2 += 1
+                if (look2 < len(self.instructions)
+                        and self.instructions[look2].opname == "JUMP_ABSOLUTE"):
+                    jmp = self.instructions[look2]
+                    jmp_target = self._get_jump_target(jmp)
+                    # Confirm this is a forward break jump that lands beyond or
+                    # at the enclosing FOR_ITER end (i.e. exits the for loop).
+                    _for_end = next(
+                        (b[0] for b in reversed(self.blocks) if b[1] == "try_body"), -1
+                    )
+                    for_iter_end = -1
+                    for fi in self.instructions:
+                        if fi.opname == "FOR_ITER":
+                            t = self._get_jump_target(fi)
+                            if isinstance(t, int) and t > instr.offset:
+                                if for_iter_end < 0 or t < for_iter_end:
+                                    for_iter_end = t
+                    if (isinstance(jmp_target, int)
+                            and jmp_target > instr.offset
+                            and for_iter_end > 0
+                            and jmp_target >= for_iter_end):
+                        # Emit break while still inside the try body
+                        self._append_reconstructed("break")
+                        # Suppress POP_TOP and JUMP_ABSOLUTE (they are implementation
+                        # details of breaking out of a for-loop-within-try)
+                        _fb = self.prescan.finally_body_suppress
+                        _fb.add(nxt.offset)                    # POP_TOP
+                        _fb.add(jmp.offset)                    # JUMP_ABSOLUTE
                             
-                            dead = look2 + 1
-                            while dead < len(self.instructions) and not self.instructions[dead].is_jump_target:
-                                _fb.add(self.instructions[dead].offset)
-                                dead += 1
+                        dead = look2 + 1
+                        while dead < len(self.instructions) and not self.instructions[dead].is_jump_target:
+                            _fb.add(self.instructions[dead].offset)
+                            dead += 1
 
-                            self.prescan.finally_body_suppress = _fb
-                            self.pc = look2 + 1
-                            # Do NOT return here! This POP_BLOCK is the structural exit of the try_body
-                            # for this execution path. Fall through to pop the block.
+                        self.prescan.finally_body_suppress = _fb
+                        self.pc = look2 + 1
+                        # Do NOT return here! This POP_BLOCK is the structural exit of the try_body
+                        # for this execution path. Fall through to pop the block.
 
-            finally_target = self.blocks[-1][0]
-            _finally_ts = self.prescan.finally_targets
-            if _finally_ts and finally_target in _finally_ts:
+
+    def _close_try_body_39(self):
+        """Close the try body that POP_BLOCK ends: returns ``(finally_target, is_finally_pop, closing_exc_cleanup)``."""
+        is_finally_pop = False
+        finally_target = self.blocks[-1][0]
+        _finally_ts = self.prescan.finally_targets
+        if _finally_ts and finally_target in _finally_ts:
+            is_finally_pop = True
+
+        # Check for 3.9 implicit finally (SETUP_FINALLY target reachable after POP_BLOCK fallthrough)
+        if not is_finally_pop:
+            look = self.pc
+            while look < len(self.instructions) and self.instructions[look].opname in ("NOP", "RESUME", "CACHE"):
+                look += 1
+            if look < len(self.instructions) and self.instructions[look].offset == finally_target:
+                # Guard: if the target instruction looks like an except-handler entry
+                # (DUP_TOP for typed except, three POP_TOPs for bare except,
+                # or WITH_EXCEPT_START), this is NOT a finally block — it's the
+                # except clause that coincidentally lands right after POP_BLOCK.
+                target_op = self.instructions[look].opname
+                is_handler_entry = (
+                    target_op == "DUP_TOP"
+                    or target_op == "WITH_EXCEPT_START"
+                    or (target_op == "POP_TOP"
+                        and look + 2 < len(self.instructions)
+                        and self.instructions[look + 1].opname == "POP_TOP"
+                        and self.instructions[look + 2].opname == "POP_TOP")
+                )
+                if not is_handler_entry:
+                    is_finally_pop = True
+            elif (look + 1 < len(self.instructions) and self.instructions[look].opname == "JUMP_ABSOLUTE"
+                  and self.instructions[look + 1].offset == finally_target
+                  and self.instructions[look + 1].opname == "RERAISE"):
+                # `finally: pass` leaves no copy after the POP_BLOCK, only the loop's jump back
                 is_finally_pop = True
 
-            # Check for 3.9 implicit finally (SETUP_FINALLY target reachable after POP_BLOCK fallthrough)
-            if not is_finally_pop:
-                look = self.pc
-                while look < len(self.instructions) and self.instructions[look].opname in ("NOP", "RESUME", "CACHE"):
-                    look += 1
-                if look < len(self.instructions) and self.instructions[look].offset == finally_target:
-                    # Guard: if the target instruction looks like an except-handler entry
-                    # (DUP_TOP for typed except, three POP_TOPs for bare except,
-                    # or WITH_EXCEPT_START), this is NOT a finally block — it's the
-                    # except clause that coincidentally lands right after POP_BLOCK.
-                    target_op = self.instructions[look].opname
-                    is_handler_entry = (
-                        target_op == "DUP_TOP"
-                        or target_op == "WITH_EXCEPT_START"
-                        or (target_op == "POP_TOP"
-                            and look + 2 < len(self.instructions)
-                            and self.instructions[look + 1].opname == "POP_TOP"
-                            and self.instructions[look + 2].opname == "POP_TOP")
-                    )
-                    if not is_handler_entry:
-                        is_finally_pop = True
-                elif (look + 1 < len(self.instructions) and self.instructions[look].opname == "JUMP_ABSOLUTE"
-                      and self.instructions[look + 1].offset == finally_target
-                      and self.instructions[look + 1].opname == "RERAISE"):
-                    # `finally: pass` leaves no copy after the POP_BLOCK, only the loop's jump back
-                    is_finally_pop = True
+        _closing_exc_cleanup = self.blocks[-1][1] == "exc_cleanup"
 
-            _closing_exc_cleanup = self.blocks[-1][1] == "exc_cleanup"
+        # ── Empty try body: emit `pass` if needed ────────────────────
+        # Python 3.9 compiles `try: pass` to SETUP_FINALLY → POP_BLOCK with
+        # no intervening instructions. The decompiler has opened the block
+        # (emitted "try:") but never emitted a body line — the output would
+        # be a bare "try:" with no body, which is a SyntaxError. Detect this
+        # by checking whether the last non-blank reconstructed line is still
+        # a block-opening header and we are about to close the block.
+        if not _closing_exc_cleanup:
+            last_non_blank = next(
+                (self.reconstructed[li] for li in range(len(self.reconstructed) - 1, -1, -1)
+                 if self.reconstructed[li].strip()),
+                ""
+            ).strip()
+            # Block headers that need at least one body statement
+            _BLOCK_HEADERS = ("try:", "if ", "elif ", "else:", "for ", "while ", "finally:", "with ")
+            if last_non_blank.endswith(":") and any(last_non_blank.startswith(h) for h in _BLOCK_HEADERS):
+                self._append_reconstructed("pass")
 
-            # ── Empty try body: emit `pass` if needed ────────────────────
-            # Python 3.9 compiles `try: pass` to SETUP_FINALLY → POP_BLOCK with
-            # no intervening instructions. The decompiler has opened the block
-            # (emitted "try:") but never emitted a body line — the output would
-            # be a bare "try:" with no body, which is a SyntaxError. Detect this
-            # by checking whether the last non-blank reconstructed line is still
-            # a block-opening header and we are about to close the block.
-            if not _closing_exc_cleanup:
-                last_non_blank = next(
-                    (self.reconstructed[li] for li in range(len(self.reconstructed) - 1, -1, -1)
-                     if self.reconstructed[li].strip()),
-                    ""
-                ).strip()
-                # Block headers that need at least one body statement
-                _BLOCK_HEADERS = ("try:", "if ", "elif ", "else:", "for ", "while ", "finally:", "with ")
-                if last_non_blank.endswith(":") and any(last_non_blank.startswith(h) for h in _BLOCK_HEADERS):
-                    self._append_reconstructed("pass")
-
-            self.blocks.pop()
-            if not _closing_exc_cleanup:
-                self.indent_level -= 1
-
-
-        elif self.blocks and self.blocks[-1][1] == "finally_wrapper":
-            finally_target = self.blocks[-1][0]
-            is_finally_pop = True
-            self.blocks.pop()
-
-        # Record the indent level where except/finally headers should appear.
-        # In nested scenarios, each try body's POP_BLOCK records its parent's indent.
-        # The `except X as e:` cleanup guard is not a try body: no header follows
-        # it, and recording the handler body's indent there put a later `finally:`
-        # inside the except clause.
-        if _closing_exc_cleanup:
-            return
-        self.emit.except_header_indents.append(self.indent_level)
-        # Peek ahead for JUMP_FORWARD at end of try block to establish scope.
-        look = self.pc
-        while (look < len(self.instructions) and
-               self.instructions[look].opname in ("RESUME", "NOP", "CACHE")):
-            look += 1
-        if look < len(self.instructions) and self.instructions[look].opname == "JUMP_FORWARD":
-            self.emit.except_end_offsets.append(self._get_jump_target(self.instructions[look]))
-
-        if is_finally_pop:
-            # establish the correct indent for finally: header
-            if self.emit.except_header_indents:
-                self.indent_level = self.emit.except_header_indents[-1]
-
-            self._append_reconstructed("finally:")
-            self.indent_level += 1
-            self.blocks.append((finally_target, "finally_body"))
-            self.emit.except_header_indents.pop()
+        self.blocks.pop()
+        if not _closing_exc_cleanup:
+            self.indent_level -= 1
+        return finally_target, is_finally_pop, _closing_exc_cleanup
 
     # JUMP_ABSOLUTE: in 3.9 this is used both as:
     #   (a) a loop back-edge (target <= current offset) — treat as JUMP_BACKWARD
