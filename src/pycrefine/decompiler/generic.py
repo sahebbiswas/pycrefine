@@ -4677,6 +4677,7 @@ class DecompilerGeneric(DecompilerBase):
         # and the code that follows the try. It is set aside to be written after the handlers, and
         # the try's normal path then ends where the clause does.
         self.prescan.try_else = {}
+        self.prescan.try_else_handlers = {}
         exit_only = self._prescan_exit_only_finally(_exc_entries, real_push_exc, _body_end_by_target)
         outer_handlers, outer_inner = self._outer_handler_map(real_push_exc)  # (outer NOP -> handler, handler -> inner handler)
         if self._has_exception_table():
@@ -4692,6 +4693,7 @@ class DecompilerGeneric(DecompilerBase):
                     region = None
                 if region is not None:
                     self.prescan.try_else[region[0]] = region[1]
+                    self.prescan.try_else_handlers[region[0]] = handler
                     _body_end_by_target[handler] = region[1]
 
         # Map: first real PUSH_EXC_INFO → finally-merge offset
@@ -4722,13 +4724,16 @@ class DecompilerGeneric(DecompilerBase):
                     # Use the FOR_ITER's jump target (loop-exit) as the merge.
                     # Only accept FOR_ITER — not conditional jumps inside outer
                     # except handlers, which would give false positives.
+                    # (a loop inside the body is not one around it: a range of the body that is left out
+                    # of the first one, such as the end of a nested loop, starts inside the loops it ends)
+                    body_first = min(x.start for x in _exc_entries if x.target == e.target)
                     for ins in instrs:
-                        if ins.offset >= e.start:
+                        if ins.offset >= body_first:
                             break
                         if ins.opname != "FOR_ITER":
                             continue
                         t = self._get_jump_target(ins)
-                        if isinstance(t, int) and t > e.start:
+                        if isinstance(t, int) and t > body_first:
                             if merge is None or t < merge:
                                 merge = t
                     # Code after the try inside the loop body: the body's normal path
@@ -4737,7 +4742,7 @@ class DecompilerGeneric(DecompilerBase):
                     if merge is not None and rejoin is not None and rejoin < merge:
                         merge = rejoin
                     elif (merge is None and rejoin is not None
-                          and any(bs < e.start < self._loop_end_after(bs) and rejoin < self._loop_end_after(bs)
+                          and any(bs < body_first < self._loop_end_after(bs) and rejoin < self._loop_end_after(bs)
                               for bs in self.prescan.while_header_targets)):
                         merge = rejoin   # (a `while` body: there is no FOR_ITER to bound it)
                 if merge is not None:
@@ -5340,7 +5345,9 @@ class DecompilerGeneric(DecompilerBase):
         hidden = self.prescan.finally_body_suppress | self.prescan.handler_section_suppress
         body = [ins for ins in self.instructions[start_idx:end_idx] if ins.offset not in hidden]
         lines = [ln for ln in self._render_handler_section(body, 0) if ln.strip()]
-        self.emit.pending_else.append((self.indent_level - 1, lines or ["return None"]))
+        owner = self.prescan.try_else_handlers.get(instr.offset)
+        self.emit.pending_else.append((self.emit.pei_indents.get(owner, self.indent_level - 1) if owner is not None
+                                       else self.indent_level - 1, lines or ["return None"]))
         self.pc = end_idx
 
     def _flush_pending_else(self, upto: int = -1) -> None:
@@ -8087,7 +8094,8 @@ class DecompilerGeneric(DecompilerBase):
             if k >= len(instrs) or instrs[k].opname != "POP_TOP":
                 return None
             k += 1
-            while k < len(instrs) and instrs[k].opname in _GENERIC_SKIP_OPS:
+            # (3.9 closes the `try` that holds the loop between the last iterator and the return)
+            while k < len(instrs) and (instrs[k].opname in _GENERIC_SKIP_OPS or instrs[k].opname == "POP_BLOCK"):
                 k += 1
             if k < len(instrs) and instrs[k].opname == "RETURN_VALUE":
                 return k
