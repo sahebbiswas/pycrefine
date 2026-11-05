@@ -6617,6 +6617,24 @@ class DecompilerGeneric(DecompilerBase):
 
         # ── exceptions ─────────────────────────────────────────────────
 
+    def _close_clause_after_raise(self, instr: BytecodeInstruction) -> None:
+        """
+        End the except clause a `raise` ends, when it is the last one (3.10, 3.11; #344).
+
+        A clause that ends in `raise` has no POP_EXCEPT and no jump to the code after the statement, so nothing closed
+        it and that code was written inside it. The last clause is followed by the re-raise of an exception no clause
+        matched (`RERAISE 0`) or, with a bare clause last, by the clean-up handler.
+        """
+        if not self.emit.except_header_indents or self.indent_level != self.emit.except_header_indents[-1] + 1:
+            return
+        ahead = self.pc
+        while ahead < len(self.instructions) and self.instructions[ahead].opname in _FILLER_OPS:
+            ahead += 1
+        ahead += self._is_as_name_cleanup(ahead, self.emit.exc_bound_names)    # (`e = None; del e` of an `as` name)
+        following = self.instructions[ahead] if ahead < len(self.instructions) else None
+        if following is not None and (following.opname == "RERAISE" or (following.opname == "COPY" and following.arg == 3)):
+            self.prescan.handler_return_close.add(instr.offset)
+
     def _op_raise_varargs(self, instr: BytecodeInstruction):
         opname = instr.opname
         num = int(instr.arg) if instr.arg is not None else 0
@@ -6638,6 +6656,7 @@ class DecompilerGeneric(DecompilerBase):
             self._append_reconstructed(f"raise {val}")
         else:
             self._append_reconstructed("raise")
+        self._close_clause_after_raise(instr)
 
         # try/except/finally structural blocks.
         # Modern CPython (3.11+) exception handling structure:
