@@ -18,6 +18,7 @@ except ImportError:
     from collections import namedtuple
     _Entry = namedtuple("_ExceptionTableEntry", "start end target depth lasti")  # type: ignore[misc]
 
+_TEST_OPS = frozenset(("DUP_TOP", "BUILD_TUPLE", "LOAD_GLOBAL", "LOAD_NAME", "LOAD_FAST", "LOAD_DEREF", "LOAD_ATTR", "LOAD_CONST"))
 _SETUP_OPS = frozenset(("SETUP_FINALLY", "SETUP_WITH", "SETUP_ASYNC_WITH"))
 _TERMINATORS = frozenset(("RETURN_VALUE", "RAISE_VARARGS", "RERAISE", "JUMP_FORWARD", "JUMP_ABSOLUTE"))
 _STORES = frozenset(("STORE_FAST", "STORE_NAME", "STORE_GLOBAL", "STORE_DEREF"))
@@ -185,8 +186,77 @@ class _Rewriter:  # pylint: disable=too-many-instance-attributes,too-few-public-
         self.next_clause = {self.by_offset[ins.argval] for ins in instructions
                             if ins.opname == "JUMP_IF_NOT_EXC_MATCH" and ins.argval in self.by_offset}
         self.copies = _copied_exits(instructions)
+        self.hoisted: Dict[int, int] = {}       # index of a shared exit that moves -> its length
+        self.hoist_at: Dict[int, List[int]] = {}    # index the exits move to -> their indexes
+        self._hoist_shared_exits()
         self.out: List[Tuple[BytecodeInstruction, Optional[int]]] = []   # (new instruction, old index)
         self.first_new: Dict[int, int] = {}     # old index -> position in out of its first replacement
+
+    def _clause_chain_end(self, handler: int) -> Optional[int]:
+        """Index of the `RERAISE` that ends the typed `except` clauses of the handler at index *handler*, or None."""
+        instructions = self.instructions
+        k = handler
+        for _ in range(len(instructions)):
+            j = k
+            while j < len(instructions) and instructions[j].opname in _TEST_OPS:
+                j += 1
+            if j >= len(instructions) or instructions[j].opname != "JUMP_IF_NOT_EXC_MATCH":
+                return self._bare_clause_end(k) if [x.opname for x in instructions[k:k + 3]] == ["POP_TOP"] * 3 else None
+            nxt = self.by_offset.get(instructions[j].argval)
+            if nxt is None:
+                return None
+            if instructions[nxt].opname == "RERAISE":
+                return nxt
+            k = nxt
+        return None
+
+    def _bare_clause_end(self, start: int) -> Optional[int]:
+        """Index of the instruction that ends the bare `except:` clause that starts at index *start*."""
+        instructions = self.instructions
+        furthest = start
+        for k in range(start, len(instructions)):
+            ins = instructions[k]
+            target = self.by_offset.get(ins.argval) if isinstance(ins.argval, int) and (
+                ins.opname in _JUMPS or "JUMP" in ins.opname) else None
+            if target is not None and target > k:
+                furthest = max(furthest, target)
+            if ins.opname in _END_OF_PATH | {"JUMP_FORWARD", "JUMP_ABSOLUTE"} and k >= furthest - (1 if ins.opname == "JUMP_FORWARD" else 0):
+                return k
+        return None
+
+    def _hoist_shared_exits(self) -> None:
+        """
+        Move the shared copy of an exit out of the except clauses when every copy lies inside them.
+
+        3.10 copies a short exit (a `return`) onto each path and keeps no copy after the statement when the clauses
+        that remain end in `raise`, so the last copy, which the others take for the shared one, sits between two clauses
+        or in the last one. 3.11 has it after the clauses (#344, #301).
+        """
+        instructions = self.instructions
+        chains = sorted((h, end) for h in self.handlers
+                        for end in [self._clause_chain_end(h)] if end is not None)
+        for target, length in set(self.copies.values()):
+            m = self.by_offset.get(target)
+            if m is None or _follows_with_exit_call(instructions, m) or m in self.hoisted:
+                continue
+            outer = next(((h, end) for h, end in chains if h < m < end), None)
+            if outer is not None:
+                self.hoisted[m] = length
+                self.hoist_at.setdefault(outer[1] + 1, []).append(m)
+
+    def _place_hoisted(self, i: int) -> None:
+        """Write the exits that move to index *i*."""
+        for m in self.hoist_at.get(i, ()):
+            base = len(self.out)
+            length = self.hoisted.pop(m)
+            k = m
+            while k < m + length:
+                self.first_new[k] = len(self.out)
+                k = self._step(k)
+            self.hoisted[m] = length
+            for j in range(m, m + length):
+                self.first_new.setdefault(j, base)
+            self.first_new[m] = base
 
     def _guards_async_for(self, ins: BytecodeInstruction) -> bool:
         """True for the SETUP_FINALLY that guards the `GET_ANEXT` of an `async for`: its handler is END_ASYNC_FOR."""
@@ -203,8 +273,10 @@ class _Rewriter:  # pylint: disable=too-many-instance-attributes,too-few-public-
         n = len(self.instructions)
         i = 0
         while i < n:
+            self._place_hoisted(i)
             self.first_new[i] = len(self.out)
             i = self._step(i)
+        self._place_hoisted(n)
         self.first_new[n] = len(self.out)
         # an old index that was dropped continues at the next kept one
         for k in range(n - 1, -1, -1):
@@ -219,6 +291,11 @@ class _Rewriter:  # pylint: disable=too-many-instance-attributes,too-few-public-
             self.first_new[k] = len(self.out)
 
     def _step(self, i: int) -> int:
+        if i in self.hoisted:
+            # (the exit itself moves; the path that fell into it jumps to it)
+            self.out.append((replace(self.instructions[i], opname="JUMP_FORWARD", opcode=110, arg=None,
+                                     argval=self.instructions[i].offset, argrepr="", starts_line=None), i))
+            return i + self.hoisted[i]
         for rule in (self._setup, self._with, self._copy, self._handler_start, self._match):
             following = rule(i, self.instructions[i])
             if following is not None:
