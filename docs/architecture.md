@@ -141,7 +141,7 @@ What the analysis passes found before emission starts.
 
 | Field | Meaning | Written by |
 |---|---|---|
-| `while_body_offsets` | where a while body starts, to drop the repeated condition | `_prescan_while_loops` |
+| `while_body_offsets` | where a while body starts, to drop the repeated condition | `_register_while_guard` |
 | `while_header_targets` | body start -> guard POP_JUMP offset | `_prescan_while_loops`, `decompile` |
 | `while_true_ends` | end offsets of while-True loops | `_op_nop`, `_open_while_true_39`, `_prescan_while_loops`, `_rewrite_if_as_while` |
 | `inner_back_jumps` | inner back-jump -> the back-edge that closes the loop | `_prescan_while_loops` |
@@ -162,13 +162,13 @@ What the analysis passes found before emission starts.
 | `push_exc_to_finally_merge` | merge offset -> the handler entry points (sorted) that rejoin there, for a `try` inside a loop whose handlers merge after the loop | `_map_handlers_to_merge_labels` |
 | `finally_merge_offsets` | merge labels where deferred finally/except text is emitted | `_at_merge_label`, `_close_blocks`, `_find_finally_merge_labels`, `_map_try_nops` |
 | `except_only_merge_offsets` | merge offsets that have handlers but no `finally`, so only the handler text is placed there | `_at_merge_label`, `_find_finally_merge_labels`, `_map_handlers_to_merge_labels` |
-| `finally_body_suppress` | instructions of an inlined copy of a `finally` body, left out of the normal flow because the text is emitted once at the merge label | `_elide_early_finally_copies`, `_forward_jump`, `_op_setup_with`, `_pop_block_break_from_if_39`, `_pop_block_break_path_39`, `_pop_block_return_39`, `_prescan_try_structure`, `_suppress_copies` |
+| `finally_body_suppress` | instructions of an inlined copy of a `finally` body, left out of the normal flow because the text is emitted once at the merge label | `_elide_early_finally_copies`, `_forward_jump`, `_map_handlers_to_merge_labels`, `_map_try_nops`, `_mark_user_finally`, `_op_setup_with`, `_pop_block_break_from_if_39`, `_pop_block_break_path_39`, `_pop_block_return_39`, `_render_finally_bodies`, `_render_handler_sections`, `_suppress_copies` |
 | `finally_targets` | 3.9: targets of the `SETUP_FINALLY`s that belong to a user `finally:` rather than to a handler | `_prescan_try_structure` |
 | `finally_from_handler` | 3.9: handler offset -> its RERAISE | `_elide_early_finally_copies`, `_open_finally_from_handler`, `_prescan_try_structure` |
 | `handler_section_suppress` | instructions of an except handler that is decompiled ahead of time as a section, so the main pass skips them | `_map_handlers_to_merge_labels`, `_render_handler_sections` |
 | `wrapper_body_suppress` | bodies of the compiler's `RERAISE` and with-exit wrappers | `_map_handlers_to_merge_labels`, `_suppress_reraise_wrappers` |
-| `exc_handler_jump_offsets` | jumps that leave a handler | `_emit_empty_try`, `_prescan_try_structure` |
-| `exc_handler_continue_offsets` | ... and those that are a `continue` | `_emit_empty_try`, `_prescan_try_structure` |
+| `exc_handler_jump_offsets` | jumps that leave a handler | `_classify_handler_exit_jumps`, `_emit_empty_try`, `_scan_except_clause` |
+| `exc_handler_continue_offsets` | ... and those that are a `continue` | `_classify_handler_exit_jumps`, `_emit_empty_try`, `_scan_except_clause` |
 | `exc_cleanup_offsets` | compiler-generated `e = None; del e` | `_record_exc_cleanup_offsets` |
 | `header_indent_by_cleanup` | exception clean-up handler -> indent of its try's `except` headers, so a later clause of the same try reopens at the right level | `_op_push_exc_info` |
 | `bare_clause_entries` | the `POP_TOP` that opens a bare `except:` clause reached when the clause before it does not match | `_prescan_bare_clauses` |
@@ -176,7 +176,7 @@ What the analysis passes found before emission starts.
 | `explicit_returns` | `return None` that is in the source | `_defer_close_to_handler_return` |
 | `empty_try_handlers` | try NOP -> handler of a `try: pass` | `_drop_unreachable_handlers`, `_emit_empty_try` |
 | `empty_try_skip` | NOPs of such a statement | `_drop_unreachable_handlers` |
-| `else_starts` | else start offset -> else end offset | `_prescan_try_structure` |
+| `else_starts` | else start offset -> else end offset | `_scan_except_clause` |
 | `with_exit_suppress_offsets` | with-exit epilogue instructions | `_prescan_with_exits`, `_suppress_with_exit_epilogues` |
 | `with_exit_suppress` | 3.14: the inlined `__exit__` clean-up instructions of a with statement, up to and including its `POP_TOP` | `_suppress_with_exit_314` |
 | `with_body_end` | first protected offset of a with body -> where it ends | `_prescan_with_exits` |

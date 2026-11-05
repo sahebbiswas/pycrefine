@@ -30,6 +30,8 @@ _TERNARY_STORES = frozenset(("STORE_FAST", "STORE_NAME", "STORE_GLOBAL", "STORE_
 
 
 _TERNARY_SKIP = frozenset(("CACHE", "RESUME", "NOT_TAKEN", "COPY_FREE_VARS"))
+# what ends an arm that carries its own tail (3.12+ copies `return y` into both arms of `y = a if c else b`)
+_TERNARY_ARM_ENDS = frozenset(("RETURN_VALUE", "RETURN_CONST", "RAISE_VARARGS", "RERAISE"))
 
 
 _TERNARY_TERM = frozenset(("RETURN_CONST", "RETURN_VALUE"))
