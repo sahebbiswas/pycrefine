@@ -191,6 +191,16 @@ class TestInstructionTemplate(unittest.TestCase):
         for backend in BACKENDS:
             self.assertIs(backend._handle_instruction, DecompilerGeneric._handle_instruction)
 
+    def test_no_handler_or_dispatch_method_is_over_150_lines(self):
+        long = []
+        for path, text in _sources().items():
+            for node in ast.walk(ast.parse(text)):
+                if (isinstance(node, ast.FunctionDef)
+                        and (node.name.startswith(("_op_", "_handle")) or "dispatch" in node.name)
+                        and node.end_lineno - node.lineno + 1 > 150):
+                    long.append((path.name, node.name, node.end_lineno - node.lineno + 1))
+        self.assertEqual(long, [], "split these into helpers (#119, #223)")
+
     def test_suppression_preamble_exists_once(self):
         text = "\n".join(_sources().values())
         self.assertEqual(len(re.findall(r"if instr\.offset in self\.prescan\.ternary_suppress:", text)), 1)
