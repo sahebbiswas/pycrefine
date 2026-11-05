@@ -105,16 +105,15 @@ class Decompiler314(Decompiler311Plus):
                     if next_instr and next_instr.opname in ("STORE_NAME", "STORE_FAST", "STORE_GLOBAL", "STORE_ATTR"):
                         as_name = f" as {next_instr.argval}"
                         self.pc += 1
-                    elif next_instr and next_instr.opname in ("STORE_DEREF", "UNPACK_SEQUENCE", "UNPACK_EX"):
+                    elif next_instr and (next_instr.opname in ("STORE_DEREF", "UNPACK_SEQUENCE", "UNPACK_EX")
+                                         or self._stores_into_attribute_or_subscript(self.pc)):
                         pending: List[str] = []
-                        parsed = self._parse_store_target(self.instructions, self.pc, pending)
+                        parsed = self._parse_store_target(self.instructions, self.pc, pending, members=True)
                         if parsed is not None and not pending:
                             as_name = f" as ({parsed[0]})" if "," in parsed[0] else f" as {parsed[0]}"
                             self.pc = parsed[2]
                         else:
                             as_name = self._placeholder_target()
-                    elif next_instr and self._stores_into_attribute_or_subscript(self.pc):
-                        as_name = self._placeholder_target()
                     elif next_instr and next_instr.opname == "POP_TOP":
                         self.pc += 1
 
