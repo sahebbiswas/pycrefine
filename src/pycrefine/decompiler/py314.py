@@ -35,6 +35,147 @@ class Decompiler314(Decompiler311Plus):
                 still_open.append((end, with_id))
         self.emit.open_with_sentinels = still_open
 
+    def _with_as_target_314(self, next_instr) -> str:
+        """The ` as <target>` of a `with` header (3.14), moving past the stores that bind it."""
+        as_name = ""
+        if next_instr and next_instr.opname in ("STORE_NAME", "STORE_FAST", "STORE_GLOBAL", "STORE_ATTR"):
+            as_name = f" as {next_instr.argval}"
+            self.pc += 1
+        elif next_instr and (next_instr.opname in ("STORE_DEREF", "UNPACK_SEQUENCE", "UNPACK_EX")
+                             or self._stores_into_attribute_or_subscript(self.pc)):
+            pending: List[str] = []
+            parsed = self._parse_store_target(self.instructions, self.pc, pending, members=True)
+            if parsed is not None and not pending:
+                as_name = f" as ({parsed[0]})" if "," in parsed[0] else f" as {parsed[0]}"
+                self.pc = parsed[2]
+            else:
+                as_name = self._placeholder_target()
+        elif next_instr and next_instr.opname == "POP_TOP":
+            self.pc += 1
+        return as_name
+
+    def _suppress_with_exit_314(self, exit_body_start: int) -> None:
+        """Hide the normal-path `__exit__` call that follows a `with` body (3.14), up to its POP_TOP."""
+        idx = next((i for i, x in enumerate(self.instructions) if x.offset == exit_body_start), None)
+        if idx is not None:
+            # Suppress up to the end of the cleanup sequence
+            for j in range(idx, len(self.instructions)):
+                instr_j = self.instructions[j]
+                op_j = instr_j.opname
+                self.prescan.with_exit_suppress.add(instr_j.offset)
+                # ONLY suppress until the end of the __exit__ cleanup call (POP_TOP).
+                # Do NOT include RETURN_VALUE or any following instructions.
+                if op_j == "POP_TOP":
+                    break
+                # Safety break if it looks like we're going too far
+                if op_j in ("RETURN_VALUE", "RETURN_CONST", "RESUME"):
+                    break
+
+    def _with_preamble_314(self, instr: BytecodeInstruction) -> bool:
+        """A `with` preamble at a COPY 1 (3.14): emit the header and open the body; returns whether the sequence matched."""
+        if self.pc + 4 < len(self.instructions):
+            seq = self.instructions[self.pc: self.pc + 5]
+            # Pattern: LOAD_SPECIAL 1 (__exit__), SWAP 2, SWAP 3, LOAD_SPECIAL 0 (__enter__), CALL 0
+            if (seq[0].opcode == 95 and seq[0].arg == 1 and
+                seq[1].opname == "SWAP" and seq[1].arg == 2 and
+                seq[2].opname == "SWAP" and seq[2].arg == 3 and
+                seq[3].opcode == 95 and seq[3].arg == 0 and
+                    seq[4].opname == "CALL" and seq[4].arg == 0):
+
+                ctx_mgr = str(self._pop())
+                # Push internal sentinel representing EX and CM that stay on stack
+                body_start = self.instructions[self.pc + 5].offset if self.pc + 5 < len(self.instructions) else instr.offset
+                self.stack.append(("_with_info", ctx_mgr, body_start))
+
+                self.pc += 5
+                next_instr = self.instructions[self.pc] if self.pc < len(self.instructions) else None
+                body_end = self.prescan.with_body_end.get(next_instr.offset) if next_instr is not None else None
+                as_name = self._with_as_target_314(next_instr)
+
+                keyword = "async with" if instr.offset in self._async_with_offsets else "with"
+                self._append_reconstructed(f"{keyword} {ctx_mgr}{as_name}:")
+                self.indent_level += 1
+
+                try_end = None
+                exit_body_start = None
+                # The exception table (3.11+), read once and shared by every pass. It is read
+                # outside the `try` below: in strict mode an unreadable table raises
+                # DecompilationError, a ValueError, which that handler would swallow.
+                entries = self._exception_entries()
+                try:
+                    curr_offset = self.instructions[self.pc].offset if self.pc < len(
+                        self.instructions) else getattr(instr, "offset", 0)
+                    if entries is not None:
+                        handler_target = None
+                        for e in entries:
+                            # Re-sync with exception table: the protected range
+                            # usually starts at the first real instruction after CALL.
+                            if e.start >= instr.offset and e.start <= instr.offset + 20:
+                                handler_target = e.target
+                                break
+                        if handler_target is not None:
+                            try_end = handler_target
+                            normal_ends = [e.end for e in entries if e.target ==
+                                           handler_target and e.end < handler_target]
+                            if normal_ends:
+                                exit_body_start = max(normal_ends)
+                except (AttributeError, IndexError, TypeError, ValueError):
+                    pass
+
+                if body_end is not None:
+                    # The prescan knows where the body really ends (after its last
+                    # __exit__ call, or at the handler when that call carries a return).
+                    try_end, exit_body_start = body_end, None
+                if try_end is not None:
+                    self.blocks.append((try_end, "with_body"))
+                    self.emit.open_with_sentinels.append((try_end, body_start))
+                if exit_body_start is not None:
+                    self._suppress_with_exit_314(exit_body_start)
+                return True
+        return False
+
+    def _store_fast_store_fast_314(self, instr: BytecodeInstruction) -> None:
+        """The fused store of two names (3.14): a chained assignment, an unpacking, a swap or a plain tuple target."""
+        names = instr.argval if isinstance(instr.argval, (tuple, list)) else ()
+        waiting = self.stack[-len(names):] if names else []
+        if (len(names) >= 2 and len(waiting) == len(names)
+                and any(isinstance(v, _ChainedValue) for v in waiting)
+                and all(isinstance(v, (_ChainedValue, _UnpackAccessor)) for v in waiting)):
+            # `a = b = value`: one value, kept on the stack once per target
+            for name in names:
+                self._emit_assignment(str(name), self.stack.pop())
+            return
+        # Python 3.14 combined store for tuple unpacking (after UNPACK_SEQUENCE)
+        if (isinstance(instr.argval, (tuple, list)) and len(instr.argval) >= 2
+                and len(self.stack) >= len(instr.argval)
+                and all(isinstance(v, _UnpackAccessor) for v in self.stack[-len(instr.argval):])):
+            # A fallback unpacking left one value per target. The fused store takes
+            # the first name from the top of the stack and the next from below it.
+            for name in instr.argval:
+                self._append_reconstructed(f"{name} = {self.stack.pop()}")
+            return
+        names_in_store = instr.argval if isinstance(instr.argval, (tuple, list)) else ()
+        idx = self.pc - 1
+        if (len(names_in_store) >= 2 and len(self.stack) >= len(names_in_store)
+                and all(type(v) is str for v in self.stack[-len(names_in_store):])  # pylint: disable=unidiomatic-typecheck
+                and not (idx > 0 and self.instructions[idx - 1].opname.startswith("UNPACK"))):
+            # `a, b = b, a`: the values are waiting side by side. The fused store takes
+            # the first name from the top of the stack and the next from below it.
+            self._begin_name_batch()
+            for name in names_in_store:
+                self._append_reconstructed(f"{name} = {self.stack.pop()}")
+            return
+        if isinstance(instr.argval, (tuple, list)) and len(instr.argval) >= 2:
+            names = ", ".join(str(x) for x in instr.argval)
+            expr = str(self._pop())
+            self._append_reconstructed(f"{names} = {expr}")
+        else:
+            expr = str(self._pop())
+            # Use argrepr which contains the original target text like "(foo, bar)"
+            targets = instr.argrepr if instr.argrepr else "var1, var2"
+            self._append_reconstructed(f"{targets} = {expr}")
+        return
+
     def _dispatch_instruction(self, instr: BytecodeInstruction):
         """
         Dispatch a single bytecode instruction to the decompiler, handling Python 3.14-specific with-statement preambles and cleanup suppression before delegating to the generic handler.
@@ -84,92 +225,8 @@ class Decompiler314(Decompiler311Plus):
                 instr.offset in self.prescan.handler_section_suppress
                 or instr.offset in self.prescan.finally_body_suppress
                 or instr.offset in self.prescan.wrapper_body_suppress):
-            if self.pc + 4 < len(self.instructions):
-                seq = self.instructions[self.pc: self.pc + 5]
-                # Pattern: LOAD_SPECIAL 1 (__exit__), SWAP 2, SWAP 3, LOAD_SPECIAL 0 (__enter__), CALL 0
-                if (seq[0].opcode == 95 and seq[0].arg == 1 and
-                    seq[1].opname == "SWAP" and seq[1].arg == 2 and
-                    seq[2].opname == "SWAP" and seq[2].arg == 3 and
-                    seq[3].opcode == 95 and seq[3].arg == 0 and
-                        seq[4].opname == "CALL" and seq[4].arg == 0):
-
-                    ctx_mgr = str(self._pop())
-                    # Push internal sentinel representing EX and CM that stay on stack
-                    body_start = self.instructions[self.pc + 5].offset if self.pc + 5 < len(self.instructions) else instr.offset
-                    self.stack.append(("_with_info", ctx_mgr, body_start))
-
-                    self.pc += 5
-                    next_instr = self.instructions[self.pc] if self.pc < len(self.instructions) else None
-                    body_end = self.prescan.with_body_end.get(next_instr.offset) if next_instr is not None else None
-                    as_name = ""
-                    if next_instr and next_instr.opname in ("STORE_NAME", "STORE_FAST", "STORE_GLOBAL", "STORE_ATTR"):
-                        as_name = f" as {next_instr.argval}"
-                        self.pc += 1
-                    elif next_instr and (next_instr.opname in ("STORE_DEREF", "UNPACK_SEQUENCE", "UNPACK_EX")
-                                         or self._stores_into_attribute_or_subscript(self.pc)):
-                        pending: List[str] = []
-                        parsed = self._parse_store_target(self.instructions, self.pc, pending, members=True)
-                        if parsed is not None and not pending:
-                            as_name = f" as ({parsed[0]})" if "," in parsed[0] else f" as {parsed[0]}"
-                            self.pc = parsed[2]
-                        else:
-                            as_name = self._placeholder_target()
-                    elif next_instr and next_instr.opname == "POP_TOP":
-                        self.pc += 1
-
-                    keyword = "async with" if instr.offset in self._async_with_offsets else "with"
-                    self._append_reconstructed(f"{keyword} {ctx_mgr}{as_name}:")
-                    self.indent_level += 1
-
-                    try_end = None
-                    exit_body_start = None
-                    # The exception table (3.11+), read once and shared by every pass. It is read
-                    # outside the `try` below: in strict mode an unreadable table raises
-                    # DecompilationError, a ValueError, which that handler would swallow.
-                    entries = self._exception_entries()
-                    try:
-                        curr_offset = self.instructions[self.pc].offset if self.pc < len(
-                            self.instructions) else getattr(instr, "offset", 0)
-                        if entries is not None:
-                            handler_target = None
-                            for e in entries:
-                                # Re-sync with exception table: the protected range
-                                # usually starts at the first real instruction after CALL.
-                                if e.start >= instr.offset and e.start <= instr.offset + 20:
-                                    handler_target = e.target
-                                    break
-                            if handler_target is not None:
-                                try_end = handler_target
-                                normal_ends = [e.end for e in entries if e.target ==
-                                               handler_target and e.end < handler_target]
-                                if normal_ends:
-                                    exit_body_start = max(normal_ends)
-                    except (AttributeError, IndexError, TypeError, ValueError):
-                        pass
-
-                    if body_end is not None:
-                        # The prescan knows where the body really ends (after its last
-                        # __exit__ call, or at the handler when that call carries a return).
-                        try_end, exit_body_start = body_end, None
-                    if try_end is not None:
-                        self.blocks.append((try_end, "with_body"))
-                        self.emit.open_with_sentinels.append((try_end, body_start))
-                    if exit_body_start is not None:
-                        idx = next((i for i, x in enumerate(self.instructions) if x.offset == exit_body_start), None)
-                        if idx is not None:
-                            # Suppress up to the end of the cleanup sequence
-                            for j in range(idx, len(self.instructions)):
-                                instr_j = self.instructions[j]
-                                op_j = instr_j.opname
-                                self.prescan.with_exit_suppress.add(instr_j.offset)
-                                # ONLY suppress until the end of the __exit__ cleanup call (POP_TOP).
-                                # Do NOT include RETURN_VALUE or any following instructions.
-                                if op_j == "POP_TOP":
-                                    break
-                                # Safety break if it looks like we're going too far
-                                if op_j in ("RETURN_VALUE", "RETURN_CONST", "RESUME"):
-                                    break
-                    return
+            if self._with_preamble_314(instr):
+                return
 
         # Suppress normal-path cleanup calls: LOAD_CONST None (x3) + CALL 3 + POP_TOP
         elif opname == "LOAD_CONST" and instr.argval is None:
@@ -213,44 +270,7 @@ class Decompiler314(Decompiler311Plus):
             return      # (the exception a clause matched, which the model never pushed: not the `with`'s own entry)
 
         elif opname == "STORE_FAST_STORE_FAST":
-            names = instr.argval if isinstance(instr.argval, (tuple, list)) else ()
-            waiting = self.stack[-len(names):] if names else []
-            if (len(names) >= 2 and len(waiting) == len(names)
-                    and any(isinstance(v, _ChainedValue) for v in waiting)
-                    and all(isinstance(v, (_ChainedValue, _UnpackAccessor)) for v in waiting)):
-                # `a = b = value`: one value, kept on the stack once per target
-                for name in names:
-                    self._emit_assignment(str(name), self.stack.pop())
-                return
-            # Python 3.14 combined store for tuple unpacking (after UNPACK_SEQUENCE)
-            if (isinstance(instr.argval, (tuple, list)) and len(instr.argval) >= 2
-                    and len(self.stack) >= len(instr.argval)
-                    and all(isinstance(v, _UnpackAccessor) for v in self.stack[-len(instr.argval):])):
-                # A fallback unpacking left one value per target. The fused store takes
-                # the first name from the top of the stack and the next from below it.
-                for name in instr.argval:
-                    self._append_reconstructed(f"{name} = {self.stack.pop()}")
-                return
-            names_in_store = instr.argval if isinstance(instr.argval, (tuple, list)) else ()
-            idx = self.pc - 1
-            if (len(names_in_store) >= 2 and len(self.stack) >= len(names_in_store)
-                    and all(type(v) is str for v in self.stack[-len(names_in_store):])  # pylint: disable=unidiomatic-typecheck
-                    and not (idx > 0 and self.instructions[idx - 1].opname.startswith("UNPACK"))):
-                # `a, b = b, a`: the values are waiting side by side. The fused store takes
-                # the first name from the top of the stack and the next from below it.
-                self._begin_name_batch()
-                for name in names_in_store:
-                    self._append_reconstructed(f"{name} = {self.stack.pop()}")
-                return
-            if isinstance(instr.argval, (tuple, list)) and len(instr.argval) >= 2:
-                names = ", ".join(str(x) for x in instr.argval)
-                expr = str(self._pop())
-                self._append_reconstructed(f"{names} = {expr}")
-            else:
-                expr = str(self._pop())
-                # Use argrepr which contains the original target text like "(foo, bar)"
-                targets = instr.argrepr if instr.argrepr else "var1, var2"
-                self._append_reconstructed(f"{targets} = {expr}")
+            self._store_fast_store_fast_314(instr)
             return
 
         super()._dispatch_instruction(instr)
