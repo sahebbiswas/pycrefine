@@ -4449,10 +4449,25 @@ class DecompilerGeneric(DecompilerBase):
         self.prescan.for_iter_targets = {
             self._get_jump_target(fi) for fi in self.instructions if fi.opname == "FOR_ITER"
         }
-        
+        try_covered_starts, except_entry_targets, reraise_wrapper_targets = self._classify_exception_entries()
+        self._classify_push_exc_info(except_entry_targets, reraise_wrapper_targets)
+        self._classify_try_nops(try_covered_starts)
+        self._find_finally_merge_labels()
+        self._classify_handler_exit_jumps()
+        real_push_exc, outer_handlers = self._map_handlers_to_merge_labels()
+        self._suppress_reraise_wrappers()
+        self._render_handler_sections(real_push_exc)
+        self._render_finally_bodies()
+        self._map_try_nops(real_push_exc)
+        self._prescan_outer_finally()
+        self.prescan.nop_to_push_exc.update(outer_handlers)
+        self.prescan.try_nop_offsets.update(outer_handlers)    # (the outer try has no protected range, so only this finds its NOP)
+        self._suppress_with_exit_epilogues()
+
+    def _classify_exception_entries(self):
+        """Read the exception table: the offsets where a covered range starts, and the handler targets that are real `except` clauses or re-raise wrappers."""
         instrs = self.instructions
         n = len(instrs)
-
         # ── 0. Try to get exception table coverage from dis ─────────────
         # exception_entries available on Python 3.11+ (same versions that use
         # NOP / PUSH_EXC_INFO rather than SETUP_FINALLY).
@@ -4505,7 +4520,12 @@ class DecompilerGeneric(DecompilerBase):
             _try_covered_starts = set()
             _except_entry_targets = set()
             _reraise_wrapper_targets = set()
+        return _try_covered_starts, _except_entry_targets, _reraise_wrapper_targets
 
+    def _classify_push_exc_info(self, _except_entry_targets: set, _reraise_wrapper_targets: set):
+        """Mark the PUSH_EXC_INFO of re-raise wrappers and with-exit handlers, which are not source `except` clauses."""
+        instrs = self.instructions
+        n = len(instrs)
         # ── 1. Classify PUSH_EXC_INFO offsets ───────────────────────────
         self.prescan.suppress_push_exc_offsets = set()
         for ins in instrs:
@@ -4540,6 +4560,10 @@ class DecompilerGeneric(DecompilerBase):
                             if not found_cem:
                                 self.prescan.suppress_push_exc_offsets.add(ins.offset)
 
+    def _classify_try_nops(self, _try_covered_starts: set):
+        """Tell the NOP that opens a try apart from the other NOPs (a `with` body's `pass`, the epilogue)."""
+        instrs = self.instructions
+        n = len(instrs)
         # ── 2. Classify NOP instructions as try-entry vs. epilogue ──────
         # The `pass` of a `with` body is a NOP too: the exit call comes right after it, and in an
         # except clause the compiler leaves the NOP out of the with's protected range.
@@ -4566,6 +4590,10 @@ class DecompilerGeneric(DecompilerBase):
                                for ins2 in instrs):
                             self.prescan.try_nop_offsets.add(ins.offset)
 
+    def _find_finally_merge_labels(self):
+        """Find the labels where the handlers of a try, and its inline `finally` body, are written in source order."""
+        instrs = self.instructions
+        n = len(instrs)
         # ── 3. Find finally-merge labels ─────────────────────────────────
         # A finally-merge label is an instruction offset O such that:
         #   - At least one JUMP_BACKWARD from inside an except-handler zone targets O
@@ -4581,15 +4609,6 @@ class DecompilerGeneric(DecompilerBase):
         off2idx = {ins.offset: i for i, ins in enumerate(instrs)}
         # Loop/iter opcodes that can never be finally-merge labels
         # Opcodes that appear in exception-handler cleanup just before the JB
-
-        def _is_with_cleanup_jump(instrs: list, idx: int) -> bool:
-            """Return True when the jump at instrs[idx] is a with-block natural exit (POP_EXCEPT -> POP_TOP -> JUMP), not a user 'continue'."""
-            if idx >= 2 and instrs[idx - 1].opname == "POP_TOP" and instrs[idx - 2].opname == "POP_EXCEPT":
-                return True
-            # 3.11 ends the exit handler with `POP_TOP; POP_EXCEPT; POP_TOP; POP_TOP`
-            return (self.target_version < (3, 12) and idx >= 4
-                    and [i.opname for i in instrs[idx - 4:idx]] == ["POP_TOP", "POP_EXCEPT", "POP_TOP", "POP_TOP"])
-
         from collections import Counter
         jb_targets: Counter = Counter()
         for jb in instrs:
@@ -4605,7 +4624,7 @@ class DecompilerGeneric(DecompilerBase):
                 continue
             # The JB must be preceded by POP_EXCEPT or handler cleanup within 6 steps
             jb_idx = off2idx.get(jb.offset, -1)
-            if self._handler_exit_before(jb_idx) and not _is_with_cleanup_jump(instrs, jb_idx):
+            if self._handler_exit_before(jb_idx) and not self._is_with_cleanup_jump(instrs, jb_idx):
                 jb_targets[target] += 1
 
         for target_off, count in jb_targets.items():
@@ -4633,6 +4652,19 @@ class DecompilerGeneric(DecompilerBase):
                     and self._has_exceptional_finally_copy(target_off)):
                 self.prescan.finally_merge_offsets.add(target_off)
 
+    def _is_with_cleanup_jump(self, instrs: list, idx: int) -> bool:
+        """Return True when the jump at instrs[idx] is a with-block natural exit (POP_EXCEPT -> POP_TOP -> JUMP), not a user 'continue'."""
+        if idx >= 2 and instrs[idx - 1].opname == "POP_TOP" and instrs[idx - 2].opname == "POP_EXCEPT":
+            return True
+        # 3.11 ends the exit handler with `POP_TOP; POP_EXCEPT; POP_TOP; POP_TOP`
+        return (self.target_version < (3, 12) and idx >= 4
+                and [i.opname for i in instrs[idx - 4:idx]] == ["POP_TOP", "POP_EXCEPT", "POP_TOP", "POP_TOP"])
+
+    def _classify_handler_exit_jumps(self):
+        """Classify the jumps that leave an except clause: a back-jump that is not a loop's own, a `continue` and a `break`."""
+        instrs = self.instructions
+        n = len(instrs)
+        off2idx = {ins.offset: i for i, ins in enumerate(instrs)}
         # ── 4. Classify JUMP_BACKWARD as exc-handler exits ───────────────
         self.prescan.exc_handler_jump_offsets = set()
         for jb in instrs:
@@ -4651,7 +4683,7 @@ class DecompilerGeneric(DecompilerBase):
             if not has_pei:
                 continue
             jb_idx = off2idx.get(jb.offset, -1)
-            if self._handler_exit_before(jb_idx) and not _is_with_cleanup_jump(instrs, jb_idx):
+            if self._handler_exit_before(jb_idx) and not self._is_with_cleanup_jump(instrs, jb_idx):
                 self.prescan.exc_handler_jump_offsets.add(jb.offset)
                 # A jump is a continue if its target is a loop head (FOR_ITER or while header)
                 loop_heads = {ins.offset for ins in instrs if ins.opname == "FOR_ITER"}
@@ -4679,6 +4711,10 @@ class DecompilerGeneric(DecompilerBase):
                 self.prescan.exc_handler_jump_offsets.add(jf.offset)
                 self.prescan.exc_handler_break_offsets.add(jf.offset)
 
+    def _map_handlers_to_merge_labels(self):
+        """Map each real handler to the label where its try's paths rejoin; returns the real handlers and the outer-try handler map."""
+        instrs = self.instructions
+        n = len(instrs)
         # ── 6. Build deferred-finally mappings ───────────────────────────
         # For try/except/finally patterns, the inlined finally code sits
         # physically between the try body and the except handlers in the
@@ -4807,7 +4843,12 @@ class DecompilerGeneric(DecompilerBase):
                     handlers.append(outer_handler)
                     handlers.sort()
                     break
+        return real_push_exc, outer_handlers
 
+    def _suppress_reraise_wrappers(self):
+        """Hide the whole bodies of re-raise wrappers and with-exit handlers."""
+        instrs = self.instructions
+        n = len(instrs)
         # ── Suppress full bodies of re-raise wrappers and with-exit handler
         for pei_off in sorted(self.prescan.suppress_push_exc_offsets):
             pei_idx = next((i for i, ins in enumerate(instrs) if ins.offset == pei_off), None)
@@ -4838,6 +4879,10 @@ class DecompilerGeneric(DecompilerBase):
                 if pei_off <= ins.offset < end_off:
                     self.prescan.wrapper_body_suppress.add(ins.offset)
 
+    def _render_handler_sections(self, real_push_exc: set):
+        """Pre-render each except-clause section and hide its instructions; they are written at the merge label."""
+        instrs = self.instructions
+        n = len(instrs)
         # ── Find end of each handler section and pre-decompile it
         sorted_real_pei = sorted(real_push_exc)
         for merge_off, targets in self.prescan.push_exc_to_finally_merge.items():
@@ -4882,6 +4927,11 @@ class DecompilerGeneric(DecompilerBase):
                 else:
                     self.emit.deferred_except_lines[merge_off].extend(handler_lines)
 
+    def _render_finally_bodies(self):
+        """Pre-render each inline `finally` body and hide its instructions; it is written at the merge label."""
+        instrs = self.instructions
+        n = len(instrs)
+        _exc_entries = self._exception_entries() or []
         # ── Find and suppress finally body instructions
         for merge_off, targets in self.prescan.push_exc_to_finally_merge.items():
             if merge_off in self.prescan.except_only_merge_offsets:
@@ -4923,6 +4973,10 @@ class DecompilerGeneric(DecompilerBase):
             lines = self._render_finally_body(sub_instrs) or ["pass"]
             self.emit.deferred_finally_lines[merge_off] = lines
 
+    def _map_try_nops(self, real_push_exc: set):
+        """Tie each try-entry NOP to the handler of its body, and handle a try/finally with no except clause."""
+        instrs = self.instructions
+        n = len(instrs)
         # ── 7. Build nop_to_push_exc: maps each try-entry NOP to the correct
         #       PUSH_EXC_INFO that handles its try body, using the exception table.
         self.prescan.nop_to_push_exc = {}  # nop_offset → push_exc_info_offset
@@ -5016,9 +5070,11 @@ class DecompilerGeneric(DecompilerBase):
                     # (no real PUSH_EXC_INFO), so no handler lines to pre-decompile.
                     self.emit.deferred_except_lines[finally_start] = []
                     break
-        self._prescan_outer_finally()
-        self.prescan.nop_to_push_exc.update(outer_handlers)
-        self.prescan.try_nop_offsets.update(outer_handlers)    # (the outer try has no protected range, so only this finds its NOP)
+
+    def _suppress_with_exit_epilogues(self):
+        """Hide the `None, None, None` call that exits a `with` block on its normal path."""
+        instrs = self.instructions
+        n = len(instrs)
         # The normal-exit epilogue for a `with` block is:
         #   LOAD_CONST None; LOAD_CONST None; LOAD_CONST None; CALL 2; POP_TOP
         # Suppress the LOAD_CONSTs and the CALL to prevent ``None(None, None)``.

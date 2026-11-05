@@ -157,16 +157,16 @@ What the analysis passes found before emission starts.
 | `compound_suppress` | instruction offsets a compound condition already covers | `_prescan_compound_conds` |
 | `try_nop_offsets` | NOPs that mark where a try starts | `_prescan_try_structure` |
 | `nop_to_push_exc` | try NOP -> its PUSH_EXC_INFO | `_prescan_try_structure` |
-| `nop_to_finally_merge` | try NOP -> finally start, for try/finally without except | `_prescan_try_structure` |
-| `suppress_push_exc_offsets` | PUSH_EXC_INFO that opens a handler rendered elsewhere | `_prescan_try_structure` |
-| `push_exc_to_finally_merge` | merge offset -> the handler entry points (sorted) that rejoin there, for a `try` inside a loop whose handlers merge after the loop | `_prescan_try_structure` |
-| `finally_merge_offsets` | merge labels where deferred finally/except text is emitted | `_at_merge_label`, `_close_blocks`, `_prescan_try_structure` |
-| `except_only_merge_offsets` | merge offsets that have handlers but no `finally`, so only the handler text is placed there | `_at_merge_label`, `_prescan_try_structure` |
+| `nop_to_finally_merge` | try NOP -> finally start, for try/finally without except | `_map_try_nops` |
+| `suppress_push_exc_offsets` | PUSH_EXC_INFO that opens a handler rendered elsewhere | `_classify_push_exc_info` |
+| `push_exc_to_finally_merge` | merge offset -> the handler entry points (sorted) that rejoin there, for a `try` inside a loop whose handlers merge after the loop | `_map_handlers_to_merge_labels` |
+| `finally_merge_offsets` | merge labels where deferred finally/except text is emitted | `_at_merge_label`, `_close_blocks`, `_find_finally_merge_labels`, `_map_try_nops` |
+| `except_only_merge_offsets` | merge offsets that have handlers but no `finally`, so only the handler text is placed there | `_at_merge_label`, `_find_finally_merge_labels`, `_map_handlers_to_merge_labels` |
 | `finally_body_suppress` | instructions of an inlined copy of a `finally` body, left out of the normal flow because the text is emitted once at the merge label | `_elide_early_finally_copies`, `_forward_jump`, `_op_setup_with`, `_pop_block_break_from_if_39`, `_pop_block_break_path_39`, `_pop_block_return_39`, `_prescan_try_structure`, `_suppress_copies` |
 | `finally_targets` | 3.9: targets of the `SETUP_FINALLY`s that belong to a user `finally:` rather than to a handler | `_prescan_try_structure` |
 | `finally_from_handler` | 3.9: handler offset -> its RERAISE | `_elide_early_finally_copies`, `_open_finally_from_handler`, `_prescan_try_structure` |
-| `handler_section_suppress` | instructions of an except handler that is decompiled ahead of time as a section, so the main pass skips them | `_prescan_try_structure` |
-| `wrapper_body_suppress` | bodies of the compiler's `RERAISE` and with-exit wrappers | `_prescan_try_structure` |
+| `handler_section_suppress` | instructions of an except handler that is decompiled ahead of time as a section, so the main pass skips them | `_map_handlers_to_merge_labels`, `_render_handler_sections` |
+| `wrapper_body_suppress` | bodies of the compiler's `RERAISE` and with-exit wrappers | `_map_handlers_to_merge_labels`, `_suppress_reraise_wrappers` |
 | `exc_handler_jump_offsets` | jumps that leave a handler | `_emit_empty_try`, `_prescan_try_structure` |
 | `exc_handler_continue_offsets` | ... and those that are a `continue` | `_emit_empty_try`, `_prescan_try_structure` |
 | `exc_cleanup_offsets` | compiler-generated `e = None; del e` | `_record_exc_cleanup_offsets` |
@@ -177,7 +177,7 @@ What the analysis passes found before emission starts.
 | `empty_try_handlers` | try NOP -> handler of a `try: pass` | `_drop_unreachable_handlers`, `_emit_empty_try` |
 | `empty_try_skip` | NOPs of such a statement | `_drop_unreachable_handlers` |
 | `else_starts` | else start offset -> else end offset | `_prescan_try_structure` |
-| `with_exit_suppress_offsets` | with-exit epilogue instructions | `_prescan_try_structure`, `_prescan_with_exits` |
+| `with_exit_suppress_offsets` | with-exit epilogue instructions | `_prescan_with_exits`, `_suppress_with_exit_epilogues` |
 | `with_exit_suppress` | 3.14: the inlined `__exit__` clean-up instructions of a with statement, up to and including its `POP_TOP` | `_suppress_with_exit_314` |
 | `with_body_end` | first protected offset of a with body -> where it ends | `_prescan_with_exits` |
 | `with_exit_owner` | POP_TOP of an inlined __exit__ call -> its with's body start | `_prescan_with_exits` |
@@ -192,9 +192,9 @@ Bookkeeping that changes while instructions are replayed.
 | `except_end_offsets` | end offsets of exception regions | `_dispatch_instruction`, `_op_pop_block_39` |
 | `exc_as_store_offset` | the `as e` STORE to skip | `_op_check_exc_match`, `_op_dup_top_39`, `_op_store` |
 | `exc_bound_names` | every name bound by `except ... as` | `_op_check_exc_match`, `_op_dup_top_39` |
-| `deferred_finally_lines` | merge offset -> rendered finally body | `_prescan_try_structure` |
-| `deferred_except_lines` | merge offset -> rendered handler | `_prescan_try_structure` |
-| `pending_finally_merge` | merge offset awaiting emission | `_at_merge_label`, `_prescan_try_structure` |
+| `deferred_finally_lines` | merge offset -> rendered finally body | `_map_handlers_to_merge_labels`, `_map_try_nops`, `_render_finally_bodies` |
+| `deferred_except_lines` | merge offset -> rendered handler | `_map_handlers_to_merge_labels`, `_map_try_nops`, `_render_handler_sections` |
+| `pending_finally_merge` | merge offset awaiting emission | `_at_merge_label`, `_map_handlers_to_merge_labels` |
 | `boolop_pending` | operators opened but not yet joined | `_prescan_value_boolops` |
 | `else_stack_snapshots` | second arm's offset -> stack to restore | `_decompile_step`, `_op_conditional_jump` |
 | `open_with_sentinels` | 3.14: (body end, body start) of open with bodies | `_close_blocks`, `_with_preamble_314` |
