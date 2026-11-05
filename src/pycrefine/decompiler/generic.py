@@ -42,7 +42,7 @@ from ..diagnostics import (AMBIGUOUS_EXPRESSION, INTERNAL_ERROR, STACK_UNDERFLOW
                            UNSUPPORTED_OPCODE, UNSUPPORTED_VERSION_CONSTRUCT, DecompilationError)
 from .state import DocState, EmissionState, PrescanState
 from ..instructions import (BytecodeInstruction, _const_repr, _copy_signature, _is_anonymous_func_body,
-                            _match_finally_copy, _render_func_tuple)
+                            _match_finally_copy, _render_func_tuple, _without_await_parentheses)
 from ..postprocess import _string_continuation_rows, collapse_chained_comparisons, post_process_source
 
 
@@ -107,6 +107,10 @@ _UNSUPPORTED_CONSTRUCTS = {
     **dict.fromkeys(("LOAD_FROM_DICT_OR_DEREF", "CALL_INTRINSIC_2"),
                     "type parameters (PEP 695) are not decompiled (issue #85)"),
 }
+
+class _CoroutineComprehension(str):
+    """The text of an async list, set or dict comprehension that was just called (before 3.12): a coroutine."""
+
 
 # `async def` functions (CO_COROUTINE, CO_ASYNC_GENERATOR): found by their flags when the function is made.
 _CO_COROUTINE = 0x80
@@ -725,6 +729,10 @@ class DecompilerGeneric(DecompilerBase):
         self._move_async_for_ends()
         instrs = self.instructions
         ends = self._async_for_ends()
+        # (the async iterator an async generator expression is called with: no loop of its own, just the iterable)
+        for n, ins in enumerate(instrs[:-1]):
+            if ins.opname == "GET_AITER" and instrs[n + 1].opname.startswith(("CALL", "PRECALL")):
+                instrs[n] = replace(ins, opname="GET_ITER", opcode=-1)
         if not ends:
             return
         drop: Set[int] = set()
@@ -975,11 +983,11 @@ class DecompilerGeneric(DecompilerBase):
         self._compiled_instructions = list(self.instructions)
         self._report_version_gaps()
         self._check_jump_targets()
+        self._fold_yield_from()
+        self._fold_async_for()
         self._collapse_inlined_comprehensions()
         self._report_async_comprehensions()
         self._fold_inlined_builtin_calls()
-        self._fold_yield_from()
-        self._fold_async_for()
         self._drop_unreachable_handlers()
         self.pc = 0
         self.blocks = []
@@ -2705,19 +2713,15 @@ class DecompilerGeneric(DecompilerBase):
 
     def _report_async_comprehensions(self) -> None:
         """
-        Report an async comprehension (``[x async for x in xs]``, ``[await f(x) for x in xs]``): not rebuilt yet.
-        It is a coroutine or async generator function of its own before 3.12, and has its variables saved and
-        restored in the enclosing code from 3.12 on, which the collapse above leaves alone when it awaits.
+        Report an inlined (3.12+) comprehension that awaits and was not rebuilt: its loop is written out as
+        statements over temporaries, which is not what the source says. The ones that were rebuilt are gone by now.
         """
         if not self.code_obj.co_flags & (_CO_COROUTINE | _CO_ASYNC_GENERATOR):
             return
-        if self.code_obj.co_name in ("<listcomp>", "<setcomp>", "<dictcomp>", "<genexpr>"):
-            first = next((ins for ins in self.instructions if ins.opname != "RESUME"), None)
-        else:
-            first = next((self.instructions[n] for n in self._inlined_comprehension_starts()
-                          if self._awaits_before_end(n)), None)
+        first = next((self.instructions[n] for n in self._inlined_comprehension_starts()
+                      if self._awaits_before_end(n)), None)
         if first is not None:
-            self._report(UNSUPPORTED_VERSION_CONSTRUCT, "async comprehensions are not decompiled (issue #85)", first)
+            self._report(UNSUPPORTED_VERSION_CONSTRUCT, "this async comprehension is not decompiled (issue #85)", first)
 
     def _inlined_comprehension_starts(self) -> List[int]:
         """Indexes of the LOAD_FAST_AND_CLEAR that open an inlined comprehension the collapse left alone."""
@@ -2727,7 +2731,8 @@ class DecompilerGeneric(DecompilerBase):
     def _awaits_before_end(self, start: int) -> bool:
         """True if an await or an async iteration comes between the instruction at *start* and the end of its loop."""
         for ins in self.instructions[start:]:
-            if ins.opname in ("GET_AITER", "GET_ANEXT", "GET_AWAITABLE", "SEND", "YIELD_FROM"):
+            if (ins.opname in ("GET_AITER", "GET_ANEXT", "GET_AWAITABLE", "SEND", "YIELD_FROM", "ANEXT_EXPR", "AWAIT_EXPR")
+                    or ins.offset in self._async_for_offsets):    # (the awaiting loops are folded by now)
                 return True
             if ins.opname in ("END_FOR", "END_ASYNC_FOR", "RETURN_VALUE", "RETURN_CONST"):
                 return False
@@ -2805,6 +2810,7 @@ class DecompilerGeneric(DecompilerBase):
         if (j < n_ins and self.target_version >= (3, 13)
                 and instrs[j].opname in ("POP_TOP", "POP_ITER")):
             j += 1
+        j = self._past_comprehension_handler(j)
         consumer = None
         if j < n_ins and instrs[j].opname == "SWAP":
             j += 1
@@ -2828,8 +2834,24 @@ class DecompilerGeneric(DecompilerBase):
         parsed = self._parse_comprehension_body(body, head, acc_op)
         if parsed is None:
             return None
-        first_target, clauses, element = parsed
-        return j - 1, (open_, element, clauses, close, first_target), consumer
+        first_target, clauses, element, is_async = parsed
+        return j - 1, (open_, element, clauses, close, first_target, "async for" if is_async else "for"), consumer
+
+    def _past_comprehension_handler(self, j: int) -> int:
+        """
+        Index after the cleanup handler (`SWAP; POP_TOP; SWAP; STORE_FAST...; RERAISE`) that a jump at *j* skips,
+        or *j*: an async comprehension ends with its `END_ASYNC_FOR`, so the compiler jumps over the handler.
+        """
+        instrs = self.instructions
+        if j >= len(instrs) or instrs[j].opname != "JUMP_FORWARD":
+            return j
+        target = self._get_jump_target(instrs[j])
+        end = next((n for n, ins in enumerate(instrs) if ins.offset == target), None)
+        if end is None or end <= j + 1 or instrs[end - 1].opname != "RERAISE" or instrs[j + 1].opname != "SWAP":
+            return j
+        if [x.opname for x in instrs[j + 2:j + 4]] != ["POP_TOP", "SWAP"]:
+            return j
+        return end
 
     def _split_superinstructions(self, body: list) -> list:
         """
@@ -2964,6 +2986,7 @@ class DecompilerGeneric(DecompilerBase):
         first_target, pos = parsed
         clauses: List[str] = []
         n = len(body)
+        async_flags = [head.offset in self._async_for_offsets]
 
         def is_back_to_head(ins):
             return ins.opname.startswith("JUMP_BACKWARD") and self._get_jump_target(ins) == heads[-1]
@@ -2997,7 +3020,7 @@ class DecompilerGeneric(DecompilerBase):
                 vals = self._eval_comp_slice(body[pos:k], 2 if acc_op == "MAP_ADD" else 1, ctl)
                 if vals is None:
                     return None
-                element = f"{vals[0]}: {vals[1]}" if acc_op == "MAP_ADD" else vals[0]
+                element = f"{vals[0]}: {vals[1]}" if acc_op == "MAP_ADD" else _without_await_parentheses(vals[0])
                 # The rest must be the back-jumps closing each nested loop.
                 rest = [x for x in body[k + 1:] if x.opname not in self._COMP_SKIP]
                 expect = list(reversed(heads))
@@ -3010,7 +3033,7 @@ class DecompilerGeneric(DecompilerBase):
                     closing.append(self._get_jump_target(x))
                 if closing != expect:
                     return None
-                return first_target, "".join(clauses), element
+                return first_target, "".join(clauses), element, async_flags[0]
             if ctl.opname == "GET_ITER":
                 vals = self._eval_comp_slice(body[pos:k])
                 if vals is None:
@@ -3019,7 +3042,7 @@ class DecompilerGeneric(DecompilerBase):
                 tgt = self._parse_comp_target(body, k + 2)
                 if tgt is None:
                     return None
-                clauses.append(f" for {tgt[0]} in {vals[0]}")
+                clauses.append(f" {'async ' if inner_head.offset in self._async_for_offsets else ''}for {tgt[0]} in {vals[0]}")
                 heads.append(inner_head.offset)
                 pos = tgt[1]
                 continue
@@ -3056,9 +3079,9 @@ class DecompilerGeneric(DecompilerBase):
         return None
 
     def _op_inlined_comprehension(self, instr: BytecodeInstruction):
-        open_, element, clauses, close, target = instr.argval
+        open_, element, clauses, close, target, keyword = instr.argval
         iterable = str(self._pop())
-        self.stack.append(f"{open_}{element} for {target} in {iterable}{clauses}{close}")
+        self.stack.append(f"{open_}{element} {keyword} {target} in {iterable}{clauses}{close}")
 
     def _eval_cond_expr(self, instrs: list) -> str:
         """
@@ -7807,6 +7830,8 @@ class DecompilerGeneric(DecompilerBase):
                     return
             if orig_func_val[0] == "func":
                 rendered = _render_func_tuple(body_text, final_args)
+                if self._is_async_comprehension(self._parse_expression(rendered)):
+                    rendered = _CoroutineComprehension(rendered)    # (called here: the compiler awaits it next)
                 self.stack.append(rendered)
                 return
 
@@ -9914,14 +9939,35 @@ class DecompilerGeneric(DecompilerBase):
         self.stack.append(_YieldExpr("yield" if bare else f"yield {val}"))
 
     def _op_await(self, _instr: BytecodeInstruction):
-        awaited = str(self._pop())
-        try:
-            primary = isinstance(ast.parse(awaited, mode="eval").body,
-                                 (ast.Name, ast.Attribute, ast.Call, ast.Subscript, ast.Constant, ast.Await))
-        except SyntaxError:
-            primary = False
+        operand = self._pop()
+        awaited = str(operand)
+        if isinstance(operand, _CoroutineComprehension):
+            # (before 3.12 an async list, set or dict comprehension is a coroutine that the compiler awaits right
+            # after calling it: the source has no `await` for that one. An `await` the source writes in front of
+            # the comprehension is a second one, and stays.)
+            self.stack.append(awaited)
+            return
+        node = self._parse_expression(awaited)
+        primary = isinstance(node, (ast.Name, ast.Attribute, ast.Call, ast.Subscript, ast.Constant, ast.Await,
+                                    ast.List, ast.Set, ast.Dict, ast.ListComp, ast.SetComp, ast.DictComp))
         # (`await a + b` awaits `a` only, so an operand that is not a primary is grouped)
         self.stack.append(_AwaitExpr(f"await {awaited}" if primary else f"await ({awaited})"))
+
+    @staticmethod
+    def _parse_expression(text: str) -> Optional[ast.AST]:
+        """The ``ast`` node of the expression *text*, or None when it is not one."""
+        try:
+            return ast.parse(text, mode="eval").body
+        except SyntaxError:
+            return None
+
+    @staticmethod
+    def _is_async_comprehension(node: Optional[ast.AST]) -> bool:
+        """True if *node* is a list, set or dict comprehension that is async or awaits (a coroutine when it runs)."""
+        if not isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp)):
+            return False
+        return any((isinstance(part, ast.comprehension) and part.is_async) or isinstance(part, ast.Await)
+                   for part in ast.walk(node))
 
     def _op_yield_from(self, _instr: BytecodeInstruction):
         iterable = self._pop()
