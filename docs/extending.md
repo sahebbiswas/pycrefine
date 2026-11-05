@@ -84,6 +84,11 @@ Support for a new CPython has these parts, in this order:
    being brought up, `tested` once CI and the baselines exist). A backend that is a new class is
    also added to `loader._BACKENDS`. Magic numbers above the table are refused, not sent to the
    newest backend, so a new Python is rejected until it has a row.
+   The support levels mean: `recognized` (the magic number is named and refused), `reconstructable`
+   (decompiles, with known gaps), `tested` (CI and baselines exist). Where the new version
+   changes how bytecode is shaped, add or extend an entry in `versions.CAPABILITIES` (an interval
+   of versions per behaviour) and ask `self._supports("name")` in the decompiler; do not compare
+   `target_version` tuples.
 2. **A backend.** Start from the closest one: `Decompiler311Plus` covers 3.10–3.12 and
    `Decompiler314` covers 3.13–3.14. Copy only what differs. Opcodes that were renamed
    or fused (the 3.13 `LOAD_FAST_LOAD_FAST` family, 3.14's `LOAD_SPECIAL`) are handled by

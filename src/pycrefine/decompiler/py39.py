@@ -1365,7 +1365,7 @@ class Decompiler39(DecompilerGeneric):
                     else:
                         # The return value was loaded before the ROT_FOUR and sits on stack
                         v = self.stack.pop()
-                        if getattr(self, "target_version", sys.version_info) >= (3, 11):
+                        if self._supports("null_sentinels"):
                             while self._is_null_sentinel(v) and self.stack:
                                 v = self.stack.pop()
                         ret_val = str(v)
