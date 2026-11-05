@@ -231,10 +231,12 @@ class _Rewriter:  # pylint: disable=too-many-instance-attributes,too-few-public-
         if name == "SETUP_FINALLY" and self._guards_async_for(ins):
             return i + 1    # (3.11 has the loop's handler in the table only, and it is no source)
         if name == "SETUP_FINALLY":
-            after_setup = i > 0 and self.instructions[i - 1].opname == "SETUP_FINALLY"
+            after_setup = (i > 0 and self.instructions[i - 1].opname == "SETUP_FINALLY"
+                           and not self._opens_except_clause(self.instructions[i - 1]))
             if self.by_offset.get(ins.argval) not in self.cleanups and not after_setup:
                 # (the cleanup of `except ... as name` has only a table entry in 3.11, and the
-                # pair of a `try`/`except`/`finally` has one NOP)
+                # pair of a `try`/`except`/`finally` has one NOP; a try whose body is another try
+                # has two, the first being a try/except whose handler opens an except clause)
                 self._emit(ins, i, opname="NOP", opcode=9, arg=None, argval=None, argrepr="")
             return i + 1
         if name == "SETUP_WITH":
@@ -243,7 +245,18 @@ class _Rewriter:  # pylint: disable=too-many-instance-attributes,too-few-public-
         if name == "SETUP_ASYNC_WITH":
             # (an `async with` has BEFORE_ASYNC_WITH and the awaited entry before it, and only a table entry in 3.11)
             return i + 1
+        if name == "POP_BLOCK" and i > 0 and self.instructions[i - 1].opname == "POP_BLOCK":
+            # (the end of an outer block that closes with an inner one: 3.11's table keeps the outer range going to here)
+            self._emit(ins, i, opname="NOP", opcode=9, arg=None, argval=None, argrepr="")
         return i + 1 if name == "POP_BLOCK" else None
+
+    def _opens_except_clause(self, setup: BytecodeInstruction) -> bool:
+        """True if the handler that *setup* (a SETUP_FINALLY) guards begins an except clause: `DUP_TOP` or three `POP_TOP`."""
+        at = self.by_offset.get(setup.argval)
+        if at is None:
+            return False
+        window = [x.opname for x in self.instructions[at:at + 3]]
+        return window[:1] == ["DUP_TOP"] or window == ["POP_TOP"] * 3
 
     def _with(self, i: int, ins: BytecodeInstruction) -> Optional[int]:
         instructions, name = self.instructions, ins.opname

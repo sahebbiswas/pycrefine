@@ -4969,6 +4969,7 @@ class DecompilerGeneric(DecompilerBase):
                     break
         self._prescan_outer_finally()
         self.prescan.nop_to_push_exc.update(outer_handlers)
+        self.prescan.try_nop_offsets.update(outer_handlers)    # (the outer try has no protected range, so only this finds its NOP)
         # The normal-exit epilogue for a `with` block is:
         #   LOAD_CONST None; LOAD_CONST None; LOAD_CONST None; CALL 2; POP_TOP
         # Suppress the LOAD_CONSTs and the CALL to prevent ``None(None, None)``.
@@ -5030,11 +5031,12 @@ class DecompilerGeneric(DecompilerBase):
         handler starts after the inner one, and every range that leads to it begins in the
         inner handler's section.
         """
-        entries = self._exception_entries() or []
         by_off = {ins.offset: ins for ins in self.instructions}
-        nops = set(self.prescan.try_nop_offsets) | {2}
+        # (a range that is only the inner try's NOP, which 3.10's block stack gives to the outer handler, protects no body)
+        every = self._exception_entries() or []
+        entries = [e for e in every if e.start not in by_off or by_off[e.start].opname != "NOP"]
         inner_handlers = {}
-        for nop in nops:
+        for nop in self.prescan.try_nop_offsets:
             if nop in by_off and by_off[nop].opname == "NOP":
                 cover = next((e.target for e in entries if e.start <= nop + 2 < e.end and e.target in real_push_exc), None)
                 if cover is not None:
@@ -5043,17 +5045,24 @@ class DecompilerGeneric(DecompilerBase):
         found: Dict[int, int] = {}
         inner_of_outer: Dict[int, int] = {}
         for inner, inner_handler in sorted(inner_handlers.items()):
-            outer = by_off.get(inner - 2)
-            if outer is None or outer.opname != "NOP" or outer.offset in inner_handlers or outer.offset not in nops:
-                continue
-            body_end = max(e.end for e in entries if e.target == inner_handler)
-            handler = min((b for b in real_push_exc if b > inner_handler and b not in taken
-                           and any(e.target == b for e in entries)
-                           and all(body_end <= e.start < b for e in entries if e.target == b)), default=None)
-            if handler is not None:
+            # A try whose body is only a try whose body is only a try has a NOP per level, and the
+            # search goes on from each outer level it finds.
+            while True:
+                # (the outer try has no protected range of its own, so only the NOP before the inner one marks it; the handler
+                # test below is what tells a nested try from a no-op that merely precedes one)
+                outer = by_off.get(inner - 2)
+                if outer is None or outer.opname != "NOP" or outer.offset in inner_handlers:
+                    break
+                body_end = max(e.end for e in entries if e.target == inner_handler)
+                handler = min((b for b in real_push_exc if b > inner_handler and b not in taken
+                               and any(e.target == b for e in every)
+                               and all(body_end <= e.start < b for e in entries if e.target == b)), default=None)
+                if handler is None:
+                    break
                 found[outer.offset] = handler
                 inner_of_outer[handler] = inner_handler
                 taken.add(handler)
+                inner, inner_handler = outer.offset, handler
         return found, inner_of_outer
 
     def _wrapper_cleanup_end(self, wrapper_off: int, default: int) -> int:
