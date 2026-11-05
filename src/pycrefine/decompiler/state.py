@@ -78,6 +78,7 @@ class PrescanState:  # pylint: disable=too-many-instance-attributes
     empty_try_skip: Set[int] = field(default_factory=set)           # NOPs of such a statement
     else_starts: Dict[int, int] = field(default_factory=dict)       # else start offset -> else end offset
     try_else: Dict[int, int] = field(default_factory=dict)          # 3.11+: where a try's else clause starts -> where it ends
+    try_else_handlers: Dict[int, int] = field(default_factory=dict)  # 3.11+: where a try's else clause starts -> the offset of that try's first handler
     exit_only_finally: Dict[int, int] = field(default_factory=dict)  # 3.11+: try/except/finally nothing leaves normally: handlers start -> its re-raise handler
     with_exit_suppress_offsets: Set[int] = field(default_factory=set)  # with-exit epilogue instructions
     with_exit_suppress: Set[int] = field(default_factory=set)       # 3.14
