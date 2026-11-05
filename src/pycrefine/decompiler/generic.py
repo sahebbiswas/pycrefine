@@ -988,6 +988,7 @@ class DecompilerGeneric(DecompilerBase):
         self._collapse_inlined_comprehensions()
         self._report_async_comprehensions()
         self._fold_inlined_builtin_calls()
+        self._prescan_bare_clauses()      # (before the handlers of a `try: pass` leave the stream)
         self._drop_unreachable_handlers()
         self.pc = 0
         self.blocks = []
@@ -3778,8 +3779,7 @@ class DecompilerGeneric(DecompilerBase):
             return None
         if not self._handlers_all_leave(instrs[after_block].offset):
             return None
-        reraise = next((n for n in range(after_block, len(instrs))
-                        if instrs[n].opname == "RERAISE" and instrs[n].arg == 0), None)
+        reraise = self._handlers_end_index(after_block)
         return None if reraise is None else (target, block, instrs[reraise].offset)
 
     def _close_with_block(self, block_type: str, block_end: int) -> None:
@@ -5833,6 +5833,33 @@ class DecompilerGeneric(DecompilerBase):
                 return None
         return self._loop_end_after(inner)
 
+    def _handlers_end_index(self, start: int) -> Optional[int]:
+        """
+        Index of the instruction that ends the except clauses of the try whose first handler is at index *start* (3.11+).
+
+        With no bare clause last, it is the ``RERAISE 0`` that re-raises an exception no clause matched. A bare
+        ``except:`` last matches everything, so that re-raise does not exist (#342), and the clauses end where the
+        clean-up handler they share begins (``COPY 3; POP_EXCEPT; RERAISE 1``).
+        """
+        instrs = self.instructions
+        # (the clean-up that belongs to this try is the one its first handler's table entry names, not the one of a
+        # try nested in a clause)
+        owned = next((e.target for e in self._exception_entries() or [] if e.start == instrs[start].offset and e.lasti), None)
+        for n in range(start, len(instrs)):
+            ins = instrs[n]
+            if ins.opname == "RERAISE" and ins.arg == 0:
+                return n
+            if self._starts_cleanup_handler(n) and (owned is None or ins.offset == owned) and any(
+                    instrs[start].offset < entry < ins.offset for entry in self.prescan.bare_clause_entries):
+                return n
+        return None
+
+    def _starts_cleanup_handler(self, k: int) -> bool:
+        """True if the instruction at index *k* begins ``COPY 3; POP_EXCEPT; RERAISE 1``, the clean-up the clauses of a try share (3.11+)."""
+        instrs = self.instructions
+        return (instrs[k].opname == "COPY" and instrs[k].arg == 3 and k + 2 < len(instrs)
+                and instrs[k + 1].opname == "POP_EXCEPT" and instrs[k + 2].opname == "RERAISE")
+
     def _handlers_all_leave(self, handler: int, body_end: Optional[int] = None) -> bool:
         """
         True if the except clauses of the try whose first handler is at *handler* never rejoin the
@@ -5847,8 +5874,7 @@ class DecompilerGeneric(DecompilerBase):
         start = next((n for n, ins in enumerate(instrs) if ins.offset == handler), None)
         if start is None:
             return False
-        reraise = next((n for n in range(start, len(instrs))
-                        if instrs[n].opname == "RERAISE" and instrs[n].arg == 0), None)
+        reraise = self._handlers_end_index(start)
         if reraise is None or reraise == start:
             return False
         if any(ins.opname.startswith("JUMP_FORWARD") or ins.opname == "JUMP_ABSOLUTE" for ins in instrs[start:reraise]):
@@ -6616,6 +6642,59 @@ class DecompilerGeneric(DecompilerBase):
         #              <finally body>
         #              RERAISE 0
 
+    def _prescan_bare_clauses(self) -> None:
+        """
+        Find the bare ``except:`` clauses that follow a typed one (#342).
+
+        A clause that tests the exception type jumps to the next clause when the type does not match. A bare
+        clause has no test, so nothing names it: the code at that jump target is three ``POP_TOP`` (3.9) or
+        one (3.11+) that drop the exception, followed by the clause body. The first clause of a ``try`` is
+        recognised from its ``PUSH_EXC_INFO`` or ``DUP_TOP``; this finds the others and records the
+        ``POP_TOP`` that opens each.
+        """
+        self.prescan.bare_clause_entries.clear()
+        instrs = self.instructions
+        by_offset = {ins.offset: k for k, ins in enumerate(instrs)}
+        for k, ins in enumerate(instrs):
+            if ins.opname == "JUMP_IF_NOT_EXC_MATCH":
+                pops = 3          # 3.9: the type, the value and the traceback
+            elif ins.opname.startswith("POP_JUMP") and ins.opname.endswith("_IF_FALSE"):
+                before = k - 1
+                while before >= 0 and instrs[before].opname in _FILLER_OPS:
+                    before -= 1
+                if before < 0 or instrs[before].opname != "CHECK_EXC_MATCH":
+                    continue
+                pops = 1          # 3.11+: the exception
+            else:
+                continue
+            target = by_offset.get(self._get_jump_target(ins))
+            if target is not None and all(
+                    x.opname == "POP_TOP" for x in instrs[target:target + pops]) and len(instrs[target:target + pops]) == pops:
+                self.prescan.bare_clause_entries.add(instrs[target].offset)
+
+    def _reopen_except_header(self, offset: int) -> None:
+        """
+        Put the indent back at the ``except`` headers of the try whose handler code is at *offset*.
+
+        A later clause of the same try (``except A: ... except B:``) shares the first clause's exception
+        clean-up handler. When the previous clause already closed (it ended in ``return``, say), reopen at
+        that try's header indent. A multi-clause chain also needs the reset when the first clause
+        incremented the indent and the next test fires without a new ``PUSH_EXC_INFO``.
+        """
+        header = self.prescan.header_indent_by_cleanup.get(self._handler_cleanup_target(offset))
+        if header is not None and (not self.emit.except_header_indents or self.emit.except_header_indents[-1] != header):
+            self.emit.except_header_indents.append(header)
+        if self.emit.except_header_indents:
+            self.indent_level = self.emit.except_header_indents[-1]
+
+    def _open_bare_clause_311(self, instr: BytecodeInstruction) -> None:
+        """The ``POP_TOP`` that opens a bare ``except:`` clause after a typed one (3.11+)."""
+        if self.stack and str(self.stack[-1]) in ("_exc_info", "_exc_match", "_exc"):
+            self.stack.pop()
+        self._reopen_except_header(instr.offset)
+        self._append_reconstructed("except:")
+        self.indent_level += 1
+
     def _op_push_exc_info(self, instr: BytecodeInstruction):
         opname = instr.opname
         # Silently suppress re-raise wrappers and with-exit handlers
@@ -6660,11 +6739,7 @@ class DecompilerGeneric(DecompilerBase):
         # A later clause of the same try (`except A: ... except B:`) shares the first
         # clause's exception clean-up handler. When the previous clause already closed
         # (it ended in `return`, say), reopen at that try's header indent.
-        header = self.prescan.header_indent_by_cleanup.get(self._handler_cleanup_target(instr.offset))
-        if header is not None and (not self.emit.except_header_indents or self.emit.except_header_indents[-1] != header):
-            self.emit.except_header_indents.append(header)
-        if self.emit.except_header_indents:
-            self.indent_level = self.emit.except_header_indents[-1]
+        self._reopen_except_header(instr.offset)
         # Peek ahead from the current position to find the optional
         # STORE_NAME / STORE_FAST that binds the 'as varname' in except.
         # The bytecode varies by version:
@@ -7492,6 +7567,9 @@ class DecompilerGeneric(DecompilerBase):
 
     def _op_pop_top(self, instr: BytecodeInstruction):
         opname = instr.opname
+        if instr.offset in self.prescan.bare_clause_entries:
+            self._open_bare_clause_311(instr)
+            return
         if self.stack:
             stmt = self.stack.pop()
             # Silently discard: code objects, function/class stubs,

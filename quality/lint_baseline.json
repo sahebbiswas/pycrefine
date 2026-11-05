@@ -38,7 +38,6 @@
     "src/pycrefine/decompiler/generic.py::too-many-branches::DecompilerGeneric._eval_ternary_branch": 1,
     "src/pycrefine/decompiler/generic.py::too-many-branches::DecompilerGeneric._match_inlined_comprehension": 1,
     "src/pycrefine/decompiler/generic.py::too-many-branches::DecompilerGeneric._op_call": 1,
-    "src/pycrefine/decompiler/generic.py::too-many-branches::DecompilerGeneric._op_check_exc_match": 1,
     "src/pycrefine/decompiler/generic.py::too-many-branches::DecompilerGeneric._op_conditional_jump": 1,
     "src/pycrefine/decompiler/generic.py::too-many-branches::DecompilerGeneric._op_jump": 1,
     "src/pycrefine/decompiler/generic.py::too-many-branches::DecompilerGeneric._op_load": 1,

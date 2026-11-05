@@ -1218,9 +1218,13 @@ class Decompiler39(DecompilerGeneric):
             skip += 1
             pops_skipped += 1
         self.pc = skip
-        # Emit bare except header at the correct indent level
+        # Emit bare except header at the correct indent level. A bare clause after typed ones is reached
+        # once the clause before it has closed, so no header is open: it is at the indent the try is at,
+        # as for a typed clause (`_op_dup_top_39`).
         if self.emit.except_header_indents:
             self.indent_level = self.emit.except_header_indents[-1]
+        else:
+            self.emit.except_header_indents.append(self.indent_level)
         self._append_reconstructed("except:")
         self.indent_level += 1
         self.stack.append("_exc_match")
@@ -1398,7 +1402,8 @@ class Decompiler39(DecompilerGeneric):
             self._op_exc_match_39(instr)
         elif opname in ("SETUP_FINALLY", "SETUP_EXCEPT"):
             self._op_setup_finally_39(instr)
-        elif opname == "POP_TOP" and instr.is_jump_target and self.emit.except_header_indents:
+        elif (opname == "POP_TOP" and instr.is_jump_target
+              and (self.emit.except_header_indents or instr.offset in self.prescan.bare_clause_entries)):
             self._op_handler_pop_top_39(instr)
         elif opname == "POP_EXCEPT":
             self._op_pop_except_39(instr)

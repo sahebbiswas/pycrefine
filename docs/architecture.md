@@ -87,13 +87,14 @@ reads what the earlier ones recorded or removed.
 | 1 | `_disassemble`, `_split_superinstructions` | instructions as `BytecodeInstruction`s; fused 3.13/3.14 instructions become their parts |
 | 2 | `_collapse_inlined_comprehensions` | PEP 709 (3.12+): the comprehension that the compiler inlined into the enclosing function is folded back |
 | 3 | `_fold_inlined_builtin_calls` | 3.14: the guard and inlined loop for `any`/`all`/`tuple` over a generator are dropped, leaving the call |
-| 4 | `_drop_unreachable_handlers` | `try: pass` compiles its handlers but nothing reaches them; they leave the stream and are replayed where the `try` was ([#167](https://github.com/sahebbiswas/pycrefine/issues/167)) |
-| 5 | `_prescan_while_loops` | which backward jumps close a `while`, and the duplicated condition the compiler appends |
-| 6 | `_prescan_try_structure` | `try`/`except`/`else`/`finally`: handler ranges, the copies of `finally` bodies, merge points; the largest pass |
+| 4 | `_prescan_bare_clauses` | the bare `except:` clauses that follow typed ones: nothing names them, so they are found from the failed match that jumps to them (#342); this runs first so the handlers of a `try: pass` are covered |
+| 5 | `_drop_unreachable_handlers` | `try: pass` compiles its handlers but nothing reaches them; they leave the stream and are replayed where the `try` was ([#167](https://github.com/sahebbiswas/pycrefine/issues/167)) |
+| 6 | `_prescan_while_loops` | which backward jumps close a `while`, and the duplicated condition the compiler appends |
 | 7 | `_prescan_with_exits` | the inlined `__exit__` calls of `with` |
-| 8 | `_prescan_ternaries` | conditional expressions, so their branches become one expression |
-| 9 | `_prescan_compound_conds` | `a and b` / `a or b` / chained comparisons used as a condition |
-| 10 | `_prescan_value_boolops` | `and` / `or` used as a value |
+| 8 | `_prescan_try_structure` | `try`/`except`/`else`/`finally`: handler ranges, the copies of `finally` bodies, merge points; the largest pass |
+| 9 | `_prescan_ternaries` | conditional expressions, so their branches become one expression |
+| 10 | `_prescan_compound_conds` | `a and b` / `a or b` / chained comparisons used as a condition |
+| 11 | `_prescan_value_boolops` | `and` / `or` used as a value |
 
 ### The expression stack
 
@@ -162,6 +163,7 @@ What the analysis passes found before emission starts.
 | `exc_handler_continue_offsets` | ... and those that are a `continue` | `_emit_empty_try`, `_prescan_try_structure` |
 | `exc_cleanup_offsets` | compiler-generated `e = None; del e` | `_record_exc_cleanup_offsets` |
 | `header_indent_by_cleanup` | exception clean-up handler -> indent of its try's `except` headers, so a later clause of the same try reopens at the right level | `_op_push_exc_info` |
+| `bare_clause_entries` | the `POP_TOP` that opens a bare `except:` clause reached when the clause before it does not match | `_prescan_bare_clauses` |
 | `handler_return_close` | returns that end an except clause | `_decompile_step`, `_defer_close_to_handler_return`, `_render_handler_section` |
 | `explicit_returns` | `return None` that is in the source | `_defer_close_to_handler_return` |
 | `empty_try_handlers` | try NOP -> handler of a `try: pass` | `_drop_unreachable_handlers`, `_emit_empty_try` |
@@ -178,7 +180,7 @@ Bookkeeping that changes while instructions are replayed.
 
 | Field | Meaning | Written by |
 |---|---|---|
-| `except_header_indents` | indent levels of the except headers being emitted | `_close_except_clause`, `_op_before_with`, `_op_check_exc_match`, `_op_dup_top_39`, `_op_pop_block_39`, `_op_pop_except_39`, `_op_push_exc_info` |
+| `except_header_indents` | indent levels of the except headers being emitted | `_close_except_clause`, `_op_before_with`, `_op_dup_top_39`, `_op_handler_pop_top_39`, `_op_pop_block_39`, `_op_pop_except_39`, `_op_push_exc_info`, `_reopen_except_header` |
 | `except_end_offsets` | end offsets of exception regions | `_dispatch_instruction`, `_op_pop_block_39` |
 | `exc_as_store_offset` | the `as e` STORE to skip | `_op_check_exc_match`, `_op_dup_top_39`, `_op_store` |
 | `exc_bound_names` | every name bound by `except ... as` | `_op_check_exc_match`, `_op_dup_top_39` |
