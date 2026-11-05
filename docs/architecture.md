@@ -170,7 +170,7 @@ What the analysis passes found before emission starts.
 | `empty_try_skip` | NOPs of such a statement | `_drop_unreachable_handlers` |
 | `else_starts` | else start offset -> else end offset | `_prescan_try_structure` |
 | `with_exit_suppress_offsets` | with-exit epilogue instructions | `_prescan_try_structure`, `_prescan_with_exits` |
-| `with_exit_suppress` | 3.14: the inlined `__exit__` clean-up instructions of a with statement, up to and including its `POP_TOP` | `_dispatch_instruction` |
+| `with_exit_suppress` | 3.14: the inlined `__exit__` clean-up instructions of a with statement, up to and including its `POP_TOP` | `_suppress_with_exit_314` |
 | `with_body_end` | first protected offset of a with body -> where it ends | `_prescan_with_exits` |
 | `with_exit_owner` | POP_TOP of an inlined __exit__ call -> its with's body start | `_prescan_with_exits` |
 
@@ -189,7 +189,7 @@ Bookkeeping that changes while instructions are replayed.
 | `pending_finally_merge` | merge offset awaiting emission | `_dispatch_instruction`, `_prescan_try_structure` |
 | `boolop_pending` | operators opened but not yet joined | `_prescan_value_boolops` |
 | `else_stack_snapshots` | second arm's offset -> stack to restore | `_decompile_step`, `_op_conditional_jump` |
-| `open_with_sentinels` | 3.14: (body end, body start) of open with bodies | `_close_blocks`, `_dispatch_instruction` |
+| `open_with_sentinels` | 3.14: (body end, body start) of open with bodies | `_close_blocks`, `_with_preamble_314` |
 | `pei_indents` | `PUSH_EXC_INFO` offset -> indent of the `try:` that precedes it, which its `except` headers use | `_op_nop` |
 | `finally_wrapper_indent` | 3.9: wrapper jump target -> indent at which `finally:` is written when its `POP_BLOCK` is reached | `_op_setup_finally_39` |
 | `kw_names` | keyword names of the call being built | `_call_arguments`, `_op_kw_names` |
