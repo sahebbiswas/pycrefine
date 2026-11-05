@@ -76,6 +76,9 @@ def _owned_handlers(handler: int, entries: list) -> set:
     return owned
 
 
+_MAX_MEMBER_TARGET = 40    # the most instructions that load the object and key of an attribute or subscript target
+
+
 def _unpack_shape(ins: Optional[BytecodeInstruction]) -> Optional[Tuple[int, Optional[int]]]:
     """
     ``(number of targets, index of the starred one or None)`` for an unpacking
@@ -2878,7 +2881,7 @@ class DecompilerGeneric(DecompilerBase):
         parsed = self._parse_store_target(body, pos, pending)
         return None if parsed is None or pending else (parsed[0], parsed[2])
 
-    def _parse_store_target(self, body: list, pos: int, pending: Optional[List[str]] = None):
+    def _parse_store_target(self, body: list, pos: int, pending: Optional[List[str]] = None, members: bool = False):
         """
         Parse the assignment target that starts at ``body[pos]``.
 
@@ -2893,9 +2896,13 @@ class DecompilerGeneric(DecompilerBase):
         starred target in between. 3.13+'s ``STORE_FAST_STORE_FAST`` stores two names,
         which may belong to two consecutive targets; *pending* carries the second.
 
+        With *members*, a target may also be an attribute or a subscript (``obj.attr``, ``obj[key]``): the
+        loads of the object (and key) come before its store, and are read as an expression (#337). That is
+        only for the targets of a `for` loop and a `with`, where nothing else can take them.
+
         Returns:
             ``(text, is_tuple, next_pos)``, or None when the code there is not a plain
-            target (an attribute or subscript store, for example).
+            target (an attribute or subscript store, for example, unless *members*).
         """
         if pending is None:
             pending = []
@@ -2910,12 +2917,12 @@ class DecompilerGeneric(DecompilerBase):
             return names[0], False, pos + 1
         shape = _unpack_shape(ins)
         if shape is None:
-            return None
+            return self._parse_member_target(body, pos) if members else None
         count, star = shape
         parts: List[str] = []
         pos += 1
         for i in range(count):
-            sub = self._parse_store_target(body, pos, pending)
+            sub = self._parse_store_target(body, pos, pending, members)
             if sub is None:
                 return None
             text, nested, pos = sub
@@ -2924,6 +2931,36 @@ class DecompilerGeneric(DecompilerBase):
             parts.append("*" + text if i == star else text)
         text = ", ".join(parts) + ("," if count == 1 else "")
         return text, True, pos
+
+    def _parse_member_target(self, body: list, pos: int) -> Optional[Tuple[str, bool, int]]:
+        """
+        The attribute, subscript or slice target whose loads start at ``body[pos]``, as ``(text, False, next_pos)``, or None.
+
+        The loads of the object (and of the key, or of the two ends of a slice) are followed by ``STORE_ATTR``,
+        ``STORE_SUBSCR`` or, from 3.12, ``STORE_SLICE`` that takes the item.
+        """
+        stores = ("STORE_ATTR", "STORE_SUBSCR", "STORE_SLICE")
+        k = pos
+        while k < len(body) and k - pos < _MAX_MEMBER_TARGET and body[k].opname not in stores:
+            op = body[k].opname
+            if op.startswith(("STORE_", "UNPACK_", "DELETE_", "FOR_ITER", "RETURN_", "RAISE")) or "JUMP" in op:
+                return None
+            k += 1
+        if k >= len(body) or k == pos or body[k].opname not in stores:
+            return None
+        store = body[k].opname
+        parts = self._eval_comp_slice(body[pos:k], {"STORE_ATTR": 1, "STORE_SUBSCR": 2, "STORE_SLICE": 3}[store])
+        if parts is None:
+            return None
+        receiver = self._receiver(parts[0])
+        if store == "STORE_ATTR":
+            text = f"{receiver}.{body[k].argval}"
+        elif store == "STORE_SLICE":
+            start, stop = ("" if str(part) == "None" else part for part in parts[1:])
+            text = f"{receiver}[{start}:{stop}]"
+        else:
+            text = f"{receiver}[{parts[1]}]"
+        return text, False, k + 1
 
     def _eval_comp_slice(self, instrs: list, count: int = 1, consumer=None) -> Optional[List[str]]:
         """
@@ -7056,21 +7093,31 @@ class DecompilerGeneric(DecompilerBase):
                 jump_target = min_t
         self.blocks.append((jump_target, "try_body"))
 
+    def _setup_with_target(self) -> Optional[str]:
+        """The `as` target of a `with` (3.9/3.10) read from the stores that follow it, which are then consumed; None if it has none."""
+        look = self.pc
+        while look < len(self.instructions) and self.instructions[look].opname in _GENERIC_SKIP_OPS:
+            look += 1
+        if look >= len(self.instructions) or self.instructions[look].opname == "POP_TOP":
+            return None
+        if self.instructions[look].opname in ("STORE_FAST", "STORE_NAME", "STORE_GLOBAL"):
+            self.pc = look + 1   # consume the STORE so it isn't processed again
+            return str(self.instructions[look].argval)
+        # an unpacking, an attribute or a subscript: `as (x, y)`, `as o.a`, `as d[k]` (#337)
+        pending: List[str] = []
+        parsed = self._parse_store_target(self.instructions, look, pending, members=True)
+        if parsed is None or pending:
+            return None
+        self.pc = parsed[2]
+        return f"({parsed[0]})" if "," in parsed[0] else parsed[0]
+
     def _op_setup_with(self, instr: BytecodeInstruction):
         opname = instr.opname
         ctx = self._pop()
         # Peek ahead for the STORE that binds the 'as' variable (3.9/3.10).
         # In 3.9 the instruction immediately after SETUP_WITH is always
         # STORE_FAST / STORE_NAME binding the __enter__() return value.
-        as_var = None
-        look = self.pc
-        while look < len(self.instructions) and self.instructions[look].opname in _GENERIC_SKIP_OPS:
-            look += 1
-        if look < len(self.instructions) and self.instructions[look].opname in (
-            "STORE_FAST", "STORE_NAME", "STORE_GLOBAL"
-        ):
-            as_var = str(self.instructions[look].argval)
-            self.pc = look + 1   # consume the STORE so it isn't processed again
+        as_var = self._setup_with_target()
         if as_var:
             self._append_reconstructed(f"with {ctx} as {as_var}:")
         else:
@@ -7194,9 +7241,10 @@ class DecompilerGeneric(DecompilerBase):
 
     def _stores_into_attribute_or_subscript(self, index: int) -> bool:
         """
-        True if the instructions from *index* load an object (and a key) and store the value on the stack into it:
-        the target of ``with cm as obj.attr:`` or ``with cm as obj[key]:``. A statement that only starts there
-        loads its value first, so the loads before the store are one (attribute) or two (subscript) in number.
+        True if the instructions from *index* load an object (and a key, or the two ends of a slice) and store the
+        value on the stack into it: the target of ``with cm as obj.attr:`` or ``with cm as obj[key]:``. A statement
+        that only starts there loads its value first, so the loads before the store are one (attribute), two
+        (subscript) or three (slice) in number.
         """
         instrs = self.instructions
         loads = 0
@@ -7208,8 +7256,12 @@ class DecompilerGeneric(DecompilerBase):
                 loads += 1
             elif ins.opname in ("LOAD_FAST_LOAD_FAST", "LOAD_FAST_BORROW_LOAD_FAST_BORROW"):
                 loads += 2
-            elif ins.opname != "LOAD_ATTR" or (ins.arg or 0) & 1:
-                return (ins.opname == "STORE_ATTR" and loads == 1) or (ins.opname == "STORE_SUBSCR" and loads == 2)
+            elif ins.opname == "BUILD_SLICE" and isinstance(ins.arg, int) and loads >= ins.arg:
+                loads -= ins.arg - 1    # the key of a subscript that is a slice: `o[a:b]` before 3.12
+            elif ins.opname != "LOAD_ATTR" or (self.target_version >= (3, 12) and (ins.arg or 0) & 1):
+                # (before 3.12 the argument of LOAD_ATTR is only the name, not a method flag)
+                return ((ins.opname == "STORE_ATTR" and loads == 1) or (ins.opname == "STORE_SUBSCR" and loads == 2)
+                        or (ins.opname == "STORE_SLICE" and loads == 3))
         return False
 
     def _op_before_with(self, instr: BytecodeInstruction):
@@ -7229,23 +7281,18 @@ class DecompilerGeneric(DecompilerBase):
         if look < len(self.instructions) and self.instructions[look].opname in (
             "STORE_FAST", "STORE_NAME", "STORE_GLOBAL", "STORE_DEREF", "UNPACK_SEQUENCE", "UNPACK_EX",
             "STORE_ATTR", "STORE_SUBSCR"
-        ):
-            # (a name, a captured name, or an unpacking: `as x`, `as (x, y)`)
+        ) or self._stores_into_attribute_or_subscript(look):
+            # (a name, a captured name, an unpacking, an attribute or a subscript: `as x`, `as (x, y)`, `as o.a`)
             pending: List[str] = []
-            parsed = (self._parse_store_target(self.instructions, look, pending)
-                      if self.instructions[look].opname not in ("STORE_ATTR", "STORE_SUBSCR") else None)
+            parsed = self._parse_store_target(self.instructions, look, pending, members=True)
             if parsed is not None and not pending:
                 as_var = f"({parsed[0]})" if "," in parsed[0] else parsed[0]
                 # Advance pc past the target so it is not processed again
                 self.pc = parsed[2]
             else:
-                # an attribute or a subscript somewhere in the target: the stores that follow take the item
-                # from a name, as they do for the target of a `for` loop
+                # a target that cannot be read as one: the stores that follow take the item from a name
                 as_var = self._loop_placeholder()
                 self.stack.append(as_var)
-        elif self._stores_into_attribute_or_subscript(look):
-            as_var = self._loop_placeholder()
-            self.stack.append(as_var)
         keyword = "async with" if instr.offset in self._async_with_offsets else "with"
         if as_var:
             self._append_reconstructed(f"{keyword} {ctx} as {as_var}:")
@@ -9535,9 +9582,9 @@ class DecompilerGeneric(DecompilerBase):
                             self.pc = peek_pc + 1
                         else:
                             var_name = str(next_instr.argval)
-                    elif next_instr.opname in ("UNPACK_SEQUENCE", "UNPACK_EX"):
+                    else:
                         pending: List[str] = []
-                        parsed = self._parse_store_target(self.instructions, peek_pc, pending)
+                        parsed = self._parse_store_target(self.instructions, peek_pc, pending, members=True)
                         if parsed is not None and not pending:
                             var_name = parsed[0]
                             self.pc = parsed[2]  # skip the targets we parsed
