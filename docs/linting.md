@@ -70,8 +70,8 @@ Use `-v` to list every current finding, baselined or not.
 mypy is permissive by default (`ignore_errors = true` in `pyproject.toml`) and strict for
 the modules listed in the override at the bottom of that file, currently the small ones:
 `_constants`, `cli`, `codeobj`, `expr`, `instructions` and `versions`. Add a module to the
-list once it passes with the same flags; new modules (such as the `analysis/` package
-planned in #120) should start on the list.
+list once it passes with the same flags; new modules should start on the list (the `analysis/` package
+already is).
 
 mypy 2.x cannot target Python 3.9, so it checks against 3.10 (`python_version`). Syntax
 that is not valid on 3.9 is still caught by the 3.9 test and gate jobs.

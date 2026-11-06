@@ -10,8 +10,7 @@ from pathlib import Path
 GENERIC = Path(__file__).resolve().parent.parent / "src" / "pycrefine" / "decompiler" / "generic.py"
 
 STEPS = (
-    "_classify_exception_entries",
-    "_classify_push_exc_info",
+    "_classify_handlers",
     "_classify_try_nops",
     "_find_finally_merge_labels",
     "_classify_handler_exit_jumps",

@@ -34,6 +34,7 @@ source. For the development workflow, see [CONTRIBUTING.md](../CONTRIBUTING.md).
 | `opcodes/py39.py` | the 3.9 opcode table, used to read 3.9 bytecode on any host |
 | `instructions.py` | `BytecodeInstruction`, constant formatting, finally-copy matching, comprehension rendering |
 | `expr.py` | expression helpers and stack sentinels (`StackNULL`, `_BoolExpr`, `UnknownExpression`) |
+| `analysis/` | pure passes over the instructions that return new lists or frozen dataclasses and touch no decompiler state (superinstruction splitting, exception-handler classification); the pass table is in its `__init__.py` |
 | `postprocess.py` | text clean-ups after decompiling (`elif` flattening, chained comparisons, placeholders) |
 | `_constants.py` | shared opcode sets and limits |
 
@@ -95,7 +96,7 @@ reads what the earlier ones recorded or removed.
 
 | # | Pass | What it does |
 |---|---|---|
-| 1 | `_disassemble`, `_split_superinstructions` | instructions as `BytecodeInstruction`s; fused 3.13/3.14 instructions become their parts |
+| 1 | `_disassemble`, `analysis.split_superinstructions` | instructions as `BytecodeInstruction`s; fused 3.13/3.14 instructions become their parts |
 | 2 | `_collapse_inlined_comprehensions` | PEP 709 (3.12+): the comprehension that the compiler inlined into the enclosing function is folded back |
 | 3 | `_fold_inlined_builtin_calls` | 3.14: the guard and inlined loop for `any`/`all`/`tuple` over a generator are dropped, leaving the call |
 | 4 | `_prescan_bare_clauses` | the bare `except:` clauses that follow typed ones: nothing names them, so they are found from the failed match that jumps to them (#342); this runs first so the handlers of a `try: pass` are covered |
@@ -162,7 +163,7 @@ What the analysis passes found before emission starts.
 | `try_nop_offsets` | NOPs that mark where a try starts | `_prescan_try_structure` |
 | `nop_to_push_exc` | try NOP -> its PUSH_EXC_INFO | `_prescan_try_structure` |
 | `nop_to_finally_merge` | try NOP -> finally start, for try/finally without except | `_map_try_nops` |
-| `suppress_push_exc_offsets` | PUSH_EXC_INFO that opens a handler rendered elsewhere | `_classify_push_exc_info` |
+| `suppress_push_exc_offsets` | PUSH_EXC_INFO that opens a handler rendered elsewhere | `_prescan_try_structure` (from `analysis.classify_handlers`) |
 | `push_exc_to_finally_merge` | merge offset -> the handler entry points (sorted) that rejoin there, for a `try` inside a loop whose handlers merge after the loop | `_map_handlers_to_merge_labels` |
 | `finally_merge_offsets` | merge labels where deferred finally/except text is emitted | `_at_merge_label`, `_close_blocks`, `_find_finally_merge_labels`, `_map_finally_only_try` |
 | `except_only_merge_offsets` | merge offsets that have handlers but no `finally`, so only the handler text is placed there | `_at_merge_label`, `_find_finally_merge_labels`, `_record_handler_merge` |
@@ -244,7 +245,7 @@ Things CPython does that the passes undo, each with the test or issue that taugh
 | 3.11 | a `with` statement's exit handler is laid out inline, between the statement and the code after it; 3.12 and later move every handler to the end of the code | `_with_exit_handler_end`, `_prescan_with_exits` | [#209](https://github.com/sahebbiswas/pycrefine/issues/209), `tests/test_control_flow.py::TestCodeAfterWith` |
 | 3.12 | PEP 709 inlines comprehensions into the enclosing function | `_collapse_inlined_comprehensions` | `tests/test_basic.py::TestComprehensions` |
 | 3.12 | a duplicated `return None` follows some returns | `postprocess`, `prescan.explicit_returns` | `tests/test_except_return.py` |
-| 3.13 | `LOAD_FAST_LOAD_FAST` and `STORE_FAST_STORE_FAST` fuse two instructions | `_split_superinstructions`, `_COMPOUND_EXPR_OPS` | [#6](https://github.com/sahebbiswas/pycrefine/issues/6), `tests/test_control_flow.py::TestChainedExpressions` |
+| 3.13 | `LOAD_FAST_LOAD_FAST` and `STORE_FAST_STORE_FAST` fuse two instructions | `analysis.split_superinstructions`, `_COMPOUND_EXPR_OPS` | [#6](https://github.com/sahebbiswas/pycrefine/issues/6), `tests/test_control_flow.py::TestChainedExpressions` |
 | 3.14 | `with` uses `LOAD_SPECIAL`; `any`/`all`/`tuple` over a generator are inlined behind a guard | `Decompiler314`, `_fold_inlined_builtin_calls` | `tests/test_control_flow.py` |
 | any | `a, *b = x` compiles to `UNPACK_EX`; attribute and subscript targets need a fallback | `_op_unpack_sequence` | [#156](https://github.com/sahebbiswas/pycrefine/issues/156), `tests/test_assignments.py` |
 
