@@ -28,10 +28,8 @@ from .._constants import (
     _TERNARY_SKIP,
     _TERNARY_STORES,
     _TRY_HANDLER_EXIT_OPS,
-    _TRY_LOAD_OPS,
     _TRY_LOOP_HEADS,
     _TRY_SKIP_NOP,
-    _EXC_TYPE_EXPR_OPS,
     _UNARY_SYMBOLS,
     _WHILE_TRIVIAL_OPS,
 )
@@ -44,6 +42,7 @@ from ..diagnostics import (AMBIGUOUS_EXPRESSION, INTERNAL_ERROR, STACK_UNDERFLOW
 from .state import DocState, EmissionState, PrescanState
 from ..instructions import (BytecodeInstruction, _const_repr, _copy_signature, _is_anonymous_func_body,
                             _match_finally_copy, _render_func_tuple, _without_await_parentheses)
+from ..analysis import HandlerClassification, classify_handlers, split_superinstructions
 from ..postprocess import _string_continuation_rows, collapse_chained_comparisons, post_process_source
 
 
@@ -1002,7 +1001,7 @@ class DecompilerGeneric(DecompilerBase):
             The reconstructed Python source as a single string, post-processed and ending with a single trailing newline.
         """
         self._disassemble()
-        self.instructions = self._split_superinstructions(self.instructions)
+        self.instructions = split_superinstructions(self.instructions)
         self._compiled_instructions = list(self.instructions)
         self._report_version_gaps()
         self._check_jump_targets()
@@ -2901,24 +2900,6 @@ class DecompilerGeneric(DecompilerBase):
             return j
         return end
 
-    def _split_superinstructions(self, body: list) -> list:
-        """
-        Split 3.13+'s STORE_FAST_LOAD_FAST into a STORE_FAST and a LOAD_FAST.
-        The LOAD_FAST gets the odd offset+1, which no jump can target, so
-        offset-keyed lookups keep resolving to the STORE_FAST.
-        """
-        out = []
-        for ins in body:
-            if ins.opname == "STORE_FAST_LOAD_FAST" and isinstance(ins.argval, (tuple, list)):
-                store, load = ins.argval
-                out.append(BytecodeInstruction(ins.opcode, "STORE_FAST", None, store,
-                                               ins.offset, ins.starts_line, ins.is_jump_target))
-                out.append(BytecodeInstruction(ins.opcode, "LOAD_FAST", None, load,
-                                               ins.offset + 1, None, False))
-            else:
-                out.append(ins)
-        return out
-
     def _parse_comp_target(self, body: list, pos: int):
         """Parse a for-target (name or tuple unpacking). Returns (text, pos) or None."""
         pending: List[str] = []
@@ -4516,9 +4497,9 @@ class DecompilerGeneric(DecompilerBase):
         self.prescan.for_iter_targets = {
             self._get_jump_target(fi) for fi in self.instructions if fi.opname == "FOR_ITER"
         }
-        try_covered_starts, except_entry_targets, reraise_wrapper_targets = self._classify_exception_entries()
-        self._classify_push_exc_info(except_entry_targets, reraise_wrapper_targets)
-        self._classify_try_nops(try_covered_starts)
+        handlers = self._classify_handlers()
+        self.prescan.suppress_push_exc_offsets = set(handlers.suppressed_push_exc)
+        self._classify_try_nops(set(handlers.try_covered_starts))
         self._find_finally_merge_labels()
         self._classify_handler_exit_jumps()
         real_push_exc, outer_handlers = self._map_handlers_to_merge_labels()
@@ -4531,78 +4512,13 @@ class DecompilerGeneric(DecompilerBase):
         self.prescan.try_nop_offsets.update(outer_handlers)    # (the outer try has no protected range, so only this finds its NOP)
         self._suppress_with_exit_epilogues()
 
-    def _check_exc_match_within(self, start: int, window: int) -> bool:
-        """Whether a CHECK_EXC_MATCH is among the ``window`` instructions from index ``start``, or ends a run of type-expression loads."""
-        instrs = self.instructions
-        if any(ins.opname == "CHECK_EXC_MATCH" for ins in instrs[start:start + window]):
-            return True
-        # a long tuple of exception types puts the match beyond any fixed window
-        end = start
-        while end < len(instrs) and instrs[end].opname in _EXC_TYPE_EXPR_OPS:
-            end += 1
-        return end < len(instrs) and instrs[end].opname == "CHECK_EXC_MATCH"
-
-    def _first_after_handler_nops(self, idx: int) -> int:
-        """Index of the first instruction after ``idx`` that is not one of the NOPs a handler may start with."""
-        instrs = self.instructions
-        look = idx + 1
-        while look < len(instrs) and instrs[look].opname in _TRY_SKIP_NOP:
-            look += 1
-        return look
-
-    def _is_source_except_handler(self, idx: int) -> bool:
-        """Whether the PUSH_EXC_INFO at ``idx`` starts a real `except` (typed, or bare) and not a re-raise wrapper."""
-        instrs = self.instructions
-        look = self._first_after_handler_nops(idx)
-        if look >= len(instrs):
-            return False
-        if instrs[look].opname in _TRY_LOAD_OPS:
-            # a CHECK_EXC_MATCH within a few steps confirms a typed `except`
-            return self._check_exc_match_within(look + 1, 5)
-        # a bare `except:` discards the exception with POP_TOP
-        return instrs[look].opname == "POP_TOP"
-
-    def _classify_exception_entries(self):
-        """Read the exception table: the offsets where a covered range starts, and the handler targets that are real `except` clauses or re-raise wrappers."""
-        instrs = self.instructions
-        # The table is available on Python 3.11+ (the versions that use NOP / PUSH_EXC_INFO).
+    def _classify_handlers(self) -> HandlerClassification:
+        """Read the exception table: the real `except` clauses, the re-raise wrappers and the PUSH_EXC_INFO that are not source clauses."""
         try:
             # The shared, cached read: a table that cannot be read is reported once there.
-            exc_entries = self._exception_entries() or []
-            # ALL depths: depth 0 for a module-level try, 1+ for nested ones.
-            try_covered_starts = {e.start for e in exc_entries}
-            except_entry_targets: set = set()
-            reraise_wrapper_targets: set = set()
-            index_of_push = {ins.offset: i for i, ins in enumerate(instrs) if ins.opname == "PUSH_EXC_INFO"}
-            for e in exc_entries:
-                t_idx = index_of_push.get(e.target)
-                if t_idx is not None:
-                    is_except = self._is_source_except_handler(t_idx)
-                    (except_entry_targets if is_except else reraise_wrapper_targets).add(e.target)
+            return classify_handlers(self.instructions, self._exception_entries() or [])
         except (AttributeError, TypeError):
-            return set(), set(), set()
-        return try_covered_starts, except_entry_targets, reraise_wrapper_targets
-
-    def _is_unlisted_reraise_wrapper(self, idx: int) -> bool:
-        """Heuristic for a PUSH_EXC_INFO the exception table did not list: a with-exit handler or a re-raise wrapper."""
-        instrs = self.instructions
-        look = self._first_after_handler_nops(idx)
-        if look >= len(instrs):
-            return False
-        if instrs[look].opname == "WITH_EXCEPT_START":
-            return True
-        # a load and no CHECK_EXC_MATCH within 3 steps
-        return instrs[look].opname in _TRY_LOAD_OPS and not self._check_exc_match_within(look + 1, 4)
-
-    def _classify_push_exc_info(self, _except_entry_targets: set, _reraise_wrapper_targets: set):
-        """Mark the PUSH_EXC_INFO of re-raise wrappers and with-exit handlers, which are not source `except` clauses."""
-        self.prescan.suppress_push_exc_offsets = set()
-        for idx, ins in enumerate(self.instructions):
-            if ins.opname != "PUSH_EXC_INFO":
-                continue
-            if ins.offset in _reraise_wrapper_targets or (
-                    ins.offset not in _except_entry_targets and self._is_unlisted_reraise_wrapper(idx)):
-                self.prescan.suppress_push_exc_offsets.add(ins.offset)
+            return classify_handlers(self.instructions, [])
 
     def _classify_try_nops(self, _try_covered_starts: set):
         """Tell the NOP that opens a try apart from the other NOPs (a `with` body's `pass`, the epilogue)."""

@@ -92,7 +92,7 @@ Support for a new CPython has these parts, in this order:
 2. **A backend.** Start from the closest one: `Decompiler311Plus` covers 3.10–3.12 and
    `Decompiler314` covers 3.13–3.14. Copy only what differs. Opcodes that were renamed
    or fused (the 3.13 `LOAD_FAST_LOAD_FAST` family, 3.14's `LOAD_SPECIAL`) are handled by
-   `_split_superinstructions`, `_COMPOUND_EXPR_OPS` in `_constants.py`, and the backend.
+   `analysis.split_superinstructions`, `_COMPOUND_EXPR_OPS` in `_constants.py`, and the backend.
 3. **Bytecode that other versions cannot read.** 3.10 and later are decoded by the host's
    `dis`, so the new version can only be decompiled under itself until
    [#94](https://github.com/sahebbiswas/pycrefine/issues/94) lands.
