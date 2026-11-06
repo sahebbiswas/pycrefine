@@ -11,6 +11,8 @@
   status and API call, and what counts as the public interface.
 - [Troubleshooting](troubleshooting.md): installation problems, every error message and
   its fix, signs of output that went wrong, and how to report a problem.
+- [Support matrix](support-matrix.md): for each Python version, its support level, backend,
+  CI workflow and quality baselines.
 - [Limitations](limitations.md): supported Python versions, constructs that are not
   reconstructed yet (with their issues), and what no decompiler can recover.
 
