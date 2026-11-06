@@ -4205,6 +4205,20 @@ class DecompilerGeneric(DecompilerBase):
                 return True
         return False
 
+    @staticmethod
+    def _handler_cleanup_end(handler: int, entries) -> int:
+        """Where the handler at ``handler`` ends, cleanup included.
+
+        A `with` inside the clause puts its own PUSH_EXC_INFO in the way of "the next one", so the
+        extent is taken from the table instead: the handler's cleanup entry, and the entries that
+        start at the cleanup, run to the end.
+        """
+        cleanup = next((e.target for e in entries if e.start == handler and e.lasti), None)
+        if cleanup is None:
+            return handler
+        end = max((e.end for e in entries if e.target == cleanup), default=handler)
+        return max([end] + [e.end for e in entries if e.start == cleanup])
+
     def _has_exceptional_finally_copy(self, merge_off: int) -> bool:
         """
         True if the code at `merge_off` is a real `finally` body.
@@ -4228,6 +4242,7 @@ class DecompilerGeneric(DecompilerBase):
             for h in {e.target for e in body_ends}:
                 nxt = next((o for o in pei_offsets if o > h), instrs[-1].offset + 2)
                 regions.append((h, nxt))
+                regions.append((h, self._handler_cleanup_end(h, entries)))
             owned_by = {
                 e.target for e in entries
                 if any(e.start < r_end and e.end > r_start for r_start, r_end in regions)
@@ -4915,6 +4930,31 @@ class DecompilerGeneric(DecompilerBase):
                 return ins.offset
         return None
 
+    def _finally_wrapper_after(self, after: int) -> Optional[int]:
+        """The re-raise wrapper (`PUSH_EXC_INFO ... RERAISE 0`) that holds the `finally` body of the try whose last handler is ``after``.
+
+        A with-exit handler inside an except clause also sits in the suppressed set and comes first;
+        it ends in `RERAISE 2`, so it is not a finally copy. A `try/finally` inside the clause has a
+        wrapper of its own; the enclosing try's wrapper is the one that also protects this handler's
+        cleanup, which the nested one, covering only its own body, does not.
+        """
+        entries = self._exception_entries() or []
+        cleanup = next((e.target for e in entries if e.start == after and e.lasti), None)
+        wrappers = []
+        for wrapper_off in sorted(w for w in self.prescan.suppress_push_exc_offsets if w > after):
+            entry = next((e for e in entries if e.start == wrapper_off and e.lasti), None)
+            if entry is None:
+                continue
+            body = [ins for ins in self.instructions if wrapper_off < ins.offset < entry.end]
+            if body and body[-1].opname == "RERAISE" and body[-1].arg == 0:
+                wrappers.append(wrapper_off)
+        for wrapper_off in wrappers:
+            if cleanup is not None and any(e.target == wrapper_off and e.start == cleanup for e in entries):
+                return wrapper_off
+        if wrappers:
+            return wrappers[0]
+        return min((w for w in self.prescan.suppress_push_exc_offsets if w > after), default=None)
+
     def _render_finally_bodies(self):
         """Pre-render each inline `finally` body and hide its instructions; it is written at the merge label."""
         instrs = self.instructions
@@ -4926,7 +4966,7 @@ class DecompilerGeneric(DecompilerBase):
                 continue
             # This try's finally handler is the first re-raise wrapper after its except
             # handlers (3.11+ lays them out in that order).
-            owner = min((w for w in self.prescan.suppress_push_exc_offsets if w > max(targets)), default=None)
+            owner = self._finally_wrapper_after(max(targets))
             if merge_off in self.prescan.exit_only_finally:
                 lines = self._render_finally_body(self._handler_copy_instrs(owner)) or ["pass"]
                 self.emit.deferred_finally_lines[merge_off] = lines
@@ -5206,7 +5246,7 @@ class DecompilerGeneric(DecompilerBase):
             return found
         instrs = self.instructions
         for handler in sorted(real_push_exc):
-            owner = min((w for w in self.prescan.suppress_push_exc_offsets if w > handler), default=None)
+            owner = self._finally_wrapper_after(handler)
             template = self._handler_copy_instrs(owner) if owner is not None else []
             if not template:
                 continue
