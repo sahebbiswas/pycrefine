@@ -1023,6 +1023,22 @@ class Decompiler39(DecompilerGeneric):
             super()._dispatch_instruction(instr)
 
 
+    def _enter_clause_header_39(self, instr: BytecodeInstruction) -> None:
+        """Set the indent of an except header: where the clause before it wrote its own, else the innermost open header.
+
+        A try inside an except clause closes its first clause and leaves the outer clause's header on top, so
+        "the innermost open header" would write the next inner clause at the outer clause's level.
+        """
+        recorded = self.emit.next_clause_indent.get(instr.offset)
+        if recorded is not None:
+            if not self.emit.except_header_indents or self.emit.except_header_indents[-1] != recorded:
+                self.emit.except_header_indents.append(recorded)
+            self.indent_level = recorded
+        elif self.emit.except_header_indents:
+            self.indent_level = self.emit.except_header_indents[-1]
+        else:
+            self.emit.except_header_indents.append(self.indent_level)
+
     def _op_dup_top_39(self, instr: BytecodeInstruction) -> None:
         """DUP_TOP: also the start of an except clause's exception match, and of a with statement's exit call."""
         # DUP_TOP — Python 3.9 typed/bare except handler entry.
@@ -1089,6 +1105,7 @@ class Decompiler39(DecompilerGeneric):
                 )
             )
             if is_exc_match:
+                gate_index = look
                 look += 1  # skip the gate
                 # Skip any residual POP_JUMP_IF_FALSE (legacy COMPARE_OP path)
                 while (look < len(self.instructions)
@@ -1128,10 +1145,10 @@ class Decompiler39(DecompilerGeneric):
                     self.indent_level -= 1
 
                 # Reset indent to except-header level
-                if self.emit.except_header_indents:
-                    self.indent_level = self.emit.except_header_indents[-1]
-                else:
-                    self.emit.except_header_indents.append(self.indent_level)
+                self._enter_clause_header_39(instr)
+                gate = self.instructions[gate_index]
+                if gate.opname == "JUMP_IF_NOT_EXC_MATCH" and isinstance(gate.argval, int):
+                    self.emit.next_clause_indent[gate.argval] = self.indent_level
 
                 if as_name:
                     self._append_reconstructed(f"except {exc_type} as {as_name}:")
@@ -1263,10 +1280,7 @@ class Decompiler39(DecompilerGeneric):
         # Emit bare except header at the correct indent level. A bare clause after typed ones is reached
         # once the clause before it has closed, so no header is open: it is at the indent the try is at,
         # as for a typed clause (`_op_dup_top_39`).
-        if self.emit.except_header_indents:
-            self.indent_level = self.emit.except_header_indents[-1]
-        else:
-            self.emit.except_header_indents.append(self.indent_level)
+        self._enter_clause_header_39(_instr)
         self._append_reconstructed("except:")
         self.indent_level += 1
         self.stack.append("_exc_match")

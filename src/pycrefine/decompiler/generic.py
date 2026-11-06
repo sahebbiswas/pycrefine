@@ -7010,6 +7010,8 @@ class DecompilerGeneric(DecompilerBase):
             return  # `COPY 3; POP_EXCEPT; RERAISE 1`: the unwinding path, not the end of a clause
         if opname == "POP_EXCEPT" and self._is_cleanup_under_with():
             return      # (3.12+: the unwinding path of a clause inside a `with` must not close the `with`'s header)
+        if opname == "POP_EXCEPT" and self._is_cleanup_inside_clause():
+            return      # (3.12+: the unwinding path of a try inside a clause must not close the clause around it)
         if opname == "POP_EXCEPT" and self.emit.except_header_indents:
             next_is_handler_jump = False
             ahead = self.pc
@@ -7034,6 +7036,29 @@ class DecompilerGeneric(DecompilerBase):
             if not next_is_handler_jump and not self._defer_close_to_handler_return():
                 self._close_except_clause()
         pass  # cleanup suppression (_exc_cleanup_name) stays active until DELETE_NAME fires
+
+    def _is_cleanup_inside_clause(self) -> bool:
+        """True when the POP_EXCEPT being handled is the unwinding path (`COPY 3; POP_EXCEPT; RERAISE 1`, 3.12+) of a try that
+        lies inside an except clause with a later clause after it: the clause must stay open for the code that follows
+        the inner statement, and the later clause is written after that.
+
+        (In the last clause the code after the outer statement is shared, so closing there is right.)
+        """
+        k = self.pc - 1
+        instrs = self.instructions
+        if not (self._supports("cold_handlers") and 0 < k < len(instrs) - 1
+                and instrs[k - 1].opname == "COPY" and instrs[k + 1].opname == "RERAISE"):
+            return False
+        own = instrs[k - 1].offset
+        entries = self._exception_entries() or []
+        covering = [e for e in entries if e.lasti and e.start <= own < e.end and e.target != own]
+        if not covering:
+            return False
+        outer_cleanup = min(covering, key=lambda e: e.end - e.start).target
+        # (a later clause is a typed one, which tests the exception, or a bare `except:`)
+        later = [ins.offset for ins in instrs if ins.opname == "CHECK_EXC_MATCH" and ins.offset > own]
+        later += [off for off in self.prescan.bare_clause_entries if off > own]
+        return any(self._handler_cleanup_target(off) == outer_cleanup for off in later)
 
     def _is_cleanup_under_with(self) -> bool:
         """
