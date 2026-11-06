@@ -127,6 +127,7 @@ class EmissionState:  # pylint: disable=too-many-instance-attributes
     pei_indents: Dict[int, int] = field(default_factory=dict)
     pending_else: List[Tuple[int, List[str]]] = field(default_factory=list)  # (indent of the try, rendered else clause) waiting for its handlers
     finally_wrapper_indent: Dict[int, int] = field(default_factory=dict)  # 3.9
+    next_clause_indent: Dict[int, int] = field(default_factory=dict)  # 3.9: entry of the next except clause -> indent of its header, as the clause before it wrote it
     kw_names: Any = ()                                              # keyword names of the call being built
     tuple_assign: Optional[Tuple[int, bool, int]] = None            # open tuple assignment: (index in `reconstructed` of its first line, whether the stores run in reverse, index in `instructions` of its last store)
 
