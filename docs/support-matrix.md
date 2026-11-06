@@ -12,17 +12,18 @@ The support levels, each including the one before it:
 - **tested**: a backend exists, CI runs the test suite on that Python, and the correctness and differential baselines are recorded for it.
 
 Whether the bytecode can be *parsed* under a host of another minor version is a separate
-fact (the "Reads on another host" column): only 3.9 bytecode has a decoder of its own so far
-([#94](https://github.com/sahebbiswas/pycrefine/issues/94)).
+fact (the "Reads on another host" column): pycrefine decodes the instructions of every reconstructable
+version itself (3.9 with `opcodes/py39.py`, 3.10 and later with `opcodes/decode.py`,
+[#94](https://github.com/sahebbiswas/pycrefine/issues/94)), so no interpreter of the writing version is needed.
 
 <!-- support-matrix:start -->
 | Python | Support | Backend | Reads on another host | CI workflow | Correctness baseline | Differential baseline |
 | --- | --- | --- | --- | --- | --- | --- |
-| 3.14 | tested | `Decompiler314` | no | yes | yes | yes |
-| 3.13 | tested | `Decompiler314` | no | yes | yes | yes |
-| 3.12 | tested | `Decompiler311Plus` | no | yes | yes | yes |
-| 3.11 | tested | `Decompiler311Plus` | no | yes | yes | yes |
-| 3.10 | tested | `Decompiler311Plus` | no | yes | yes | yes |
+| 3.14 | tested | `Decompiler314` | yes | yes | yes | yes |
+| 3.13 | tested | `Decompiler314` | yes | yes | yes | yes |
+| 3.12 | tested | `Decompiler311Plus` | yes | yes | yes | yes |
+| 3.11 | tested | `Decompiler311Plus` | yes | yes | yes | yes |
+| 3.10 | tested | `Decompiler311Plus` | yes | yes | yes | yes |
 | 3.9 | tested | `Decompiler39` | yes | yes | yes | yes |
 | 3.8 | recognized | - | no | no | no | no |
 | 3.7 | recognized | - | no | no | no | no |

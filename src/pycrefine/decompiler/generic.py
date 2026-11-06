@@ -1,6 +1,5 @@
 """Version-independent decompiler: prescans, opcode handlers and block management."""
 import ast
-import dis
 import keyword
 import re
 import types
@@ -1632,7 +1631,7 @@ class DecompilerGeneric(DecompilerBase):
             if depth == 1 and (ins.opname == "COMPARE_OP" or self._chain_link_at(m) is not None):
                 return m
             try:
-                depth += dis.stack_effect(ins.opcode, ins.arg if ins.opcode >= dis.HAVE_ARGUMENT else None, jump=False)
+                depth += self._stack_effect(ins)
             except (ValueError, TypeError):
                 return None
             if depth < 0:
@@ -3267,8 +3266,7 @@ class DecompilerGeneric(DecompilerBase):
         depth = 0
         for ins in seq:
             try:
-                arg = ins.arg if ins.opcode >= dis.HAVE_ARGUMENT else None
-                depth += dis.stack_effect(ins.opcode, arg, jump=False)
+                depth += self._stack_effect(ins)
             except (ValueError, TypeError):
                 continue
             if depth < 0:
@@ -7753,7 +7751,7 @@ class DecompilerGeneric(DecompilerBase):
         if here >= last.offset or last.opname not in ("RETURN_CONST", "RETURN_VALUE") \
                 or any(btype in ("for", "while") and end > here for end, btype in self.blocks):
             return
-        self._op_jump(BytecodeInstruction(dis.opmap.get("JUMP_FORWARD", 110), "JUMP_FORWARD", 0, last.offset,
+        self._op_jump(BytecodeInstruction(self._opcode_number("JUMP_FORWARD"), "JUMP_FORWARD", 0, last.offset,
                                           here, None, False))
 
     def _op_return_const(self, instr: BytecodeInstruction):

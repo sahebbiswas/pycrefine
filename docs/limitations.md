@@ -9,7 +9,7 @@ Everything here was checked against the current `main`.
 | Bytecode written by | Status |
 |---|---|
 | 3.9 | Supported and tested in CI. Decompiles under any Python 3.9 or later. `async with` is not rebuilt: it reports `unsupported_opcode` ([#85](https://github.com/sahebbiswas/pycrefine/issues/85)). |
-| 3.11, 3.12, 3.13, 3.14 | Supported and tested in CI. Needs the same Python minor version to run pycrefine ([#94](https://github.com/sahebbiswas/pycrefine/issues/94)). |
+| 3.11, 3.12, 3.13, 3.14 | Supported and tested in CI. Decompiles under any Python 3.9 or later. |
 | 3.10 | Partial, and tested in CI: the failures that are known are expected failures in `tests/known_failures.json`. 3.10's block-based handlers (`try`/`except`/`finally`/`with`) are read into the 3.11 form, which has its own gaps: the code after a `try` or a `with` that every path copies can land in the last handler or body ([#301](https://github.com/sahebbiswas/pycrefine/issues/301)). |
 | 3.8 and older | Not supported. |
 

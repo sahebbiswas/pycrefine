@@ -243,11 +243,10 @@ class TestCrossVersionLoading(unittest.TestCase):
         p_inner = next(c for c in p_outer.co_consts if hasattr(c, "co_code"))
         self.assertEqual(p_inner.co_freevars, n_inner.co_freevars)
 
-    def test_foreign_310_plus_bytecode_gives_clear_error(self):
+    def test_foreign_310_plus_bytecode_is_decompiled(self):
         name = ("simple.cpython-313.pyc" if sys.version_info[:2] != (3, 13)
                 else "simple.cpython-314.pyc")
-        with self.assertRaisesRegex(ValueError, "can only be decompiled by the same Python minor version"):
-            get_decompiler(self._fixture(name))
+        self.assertIn("def ", get_decompiler(self._fixture(name)).decompile())
 
 
 class TestMarshalParserCodeType(unittest.TestCase):

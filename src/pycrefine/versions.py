@@ -15,7 +15,8 @@ Support is a ladder; each level includes the one above it:
     A backend exists, CI runs the test suite on it and the correctness and differential
     baselines are recorded for it.
 
-Whether the bytecode can be *parsed* on another host is a separate fact (``cross_host``).
+Whether the bytecode can be read on a host of another minor version is a separate fact (``cross_host``):
+the 3.9 backend decodes it itself, and ``opcodes.decode`` does for 3.10 and later (#94).
 """
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
@@ -55,12 +56,12 @@ VERSIONS: Tuple[PythonVersion, ...] = (
     PythonVersion((3, 7), 3390, 3399),
     PythonVersion((3, 8), 3400, 3419),
     PythonVersion((3, 9), 3420, 3429, TESTED, "Decompiler39", cross_host=True),
-    PythonVersion((3, 10), 3430, 3449, TESTED, "Decompiler311Plus"),
-    PythonVersion((3, 11), 3450, 3499, TESTED, "Decompiler311Plus"),
-    PythonVersion((3, 12), 3500, 3549, TESTED, "Decompiler311Plus"),
+    PythonVersion((3, 10), 3430, 3449, TESTED, "Decompiler311Plus", cross_host=True),
+    PythonVersion((3, 11), 3450, 3499, TESTED, "Decompiler311Plus", cross_host=True),
+    PythonVersion((3, 12), 3500, 3549, TESTED, "Decompiler311Plus", cross_host=True),
     # 3.13 introduced the fused superinstructions that only Decompiler314 understands.
-    PythonVersion((3, 13), 3550, 3599, TESTED, "Decompiler314"),
-    PythonVersion((3, 14), 3600, 3649, TESTED, "Decompiler314"),
+    PythonVersion((3, 13), 3550, 3599, TESTED, "Decompiler314", cross_host=True),
+    PythonVersion((3, 14), 3600, 3649, TESTED, "Decompiler314", cross_host=True),
 )
 
 # Magic numbers above the newest band, up to this limit, belong to a Python newer than this
@@ -104,6 +105,7 @@ CAPABILITIES: Dict[str, Capability] = {
     "loop_condition_copy": Capability(
         "The condition of a `while` is copied to the bottom of the body, with its own exit jumps.",
         (((3, 10), (3, 12)),)),
+    "opcode_tables": _since((3, 10), "The instructions can be decoded from the packaged opcode tables, so a host of another version reads them."),
     # 3.11
     "exception_table": _since((3, 11), "Exception handlers are listed in an exception table (no SETUP_FINALLY)."),
     "null_sentinels": _since((3, 11), "A NULL is pushed under a callee and popped with the call (PUSH_NULL, LOAD_GLOBAL bit 0)."),
