@@ -4205,19 +4205,27 @@ class DecompilerGeneric(DecompilerBase):
                 return True
         return False
 
-    @staticmethod
-    def _handler_cleanup_end(handler: int, entries) -> int:
-        """Where the handler at ``handler`` ends, cleanup included.
+    @classmethod
+    def _handler_cleanup_end(cls, handler: int, entries, seen: Optional[set] = None) -> int:
+        """Where the handler at ``handler`` ends, cleanup and the handlers it leads on to included.
 
         A `with` inside the clause puts its own PUSH_EXC_INFO in the way of "the next one", so the
         extent is taken from the table instead: the handler's cleanup entry, and the entries that
-        start at the cleanup, run to the end.
+        start at the cleanup, run to the end. A handler entered from inside (the except clause of a
+        try around this one) extends it the same way.
         """
+        seen = {handler} if seen is None else seen
         cleanup = next((e.target for e in entries if e.start == handler and e.lasti), None)
         if cleanup is None:
             return handler
         end = max((e.end for e in entries if e.target == cleanup), default=handler)
-        return max([end] + [e.end for e in entries if e.start == cleanup])
+        end = max([end] + [e.end for e in entries if e.start == cleanup])
+        for e in entries:
+            if handler <= e.start < end and e.target not in seen and any(
+                    x.start == e.target and x.lasti for x in entries):
+                seen.add(e.target)
+                end = max(end, cls._handler_cleanup_end(e.target, entries, seen))
+        return end
 
     def _has_exceptional_finally_copy(self, merge_off: int) -> bool:
         """
@@ -6199,7 +6207,9 @@ class DecompilerGeneric(DecompilerBase):
 
         # Emit pre-decompiled except handler lines first
         except_lines = self.emit.deferred_except_lines.get(merge_offset)
-        outer_finally = merge_offset in self.prescan.outer_finally_merges
+        # (the finally of a try around the one that rejoins here follows that try's own handlers)
+        outer_finally = (merge_offset in self.prescan.outer_finally_merges
+                         or bool(self.emit.deferred_outer_except_lines.get(merge_offset)))
         if except_lines:
             save_indent = self.indent_level
             self.indent_level = header_indent
@@ -6224,7 +6234,10 @@ class DecompilerGeneric(DecompilerBase):
             self.indent_level += 1
             for line in finally_lines:
                 self._append_reconstructed(line)
-            self.indent_level = header_indent
+            # (with the outer try's handlers written, the statement is closed: what follows is one level out)
+            # (unless the try body is still open: closing it takes that level off)
+            body_open = any(end == merge_offset and btype in ("try_body", "exc_cleanup") for end, btype in self.blocks)
+            self.indent_level = header_indent - 1 if outer_lines and not body_open else header_indent
 
     def _render_handler_section(self, handler_instrs: list, merge_offset: int) -> list:
         """
