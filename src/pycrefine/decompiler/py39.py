@@ -1286,6 +1286,16 @@ class Decompiler39(DecompilerGeneric):
         self.stack.append("_exc_match")
 
 
+    def _skip_dead_clause_exit(self, jump: BytecodeInstruction) -> None:
+        """Pass over the compiler's unreachable copy of a clause exit: the `POP_EXCEPT; JUMP_ABSOLUTE` that repeats ``jump``.
+
+        A clause that ends in `continue` is followed by the exit every clause has, which nothing reaches.
+        Written out it would be a second `continue` between this clause and the next one.
+        """
+        dead = self.instructions[self.pc:self.pc + 2]
+        if [x.opname for x in dead] == ["POP_EXCEPT", "JUMP_ABSOLUTE"] and dead[1].argval == jump.argval:
+            self.pc += 2
+
     def _op_pop_except_39(self, instr: BytecodeInstruction) -> None:
         """POP_EXCEPT: the end of an except clause."""
         # RERAISE (opcode 48 in 3.9, no-arg): re-raises the current exception.
@@ -1317,6 +1327,7 @@ class Decompiler39(DecompilerGeneric):
                 if isinstance(jt, int) and (jt in _for_iter_offsets or self._is_innermost_while_head(jt, jmp.offset)):
                     self._append_reconstructed("continue")
                     self.pc = look + 1   # consume the JUMP_ABSOLUTE
+                    self._skip_dead_clause_exit(jmp)
                     _emitted_continue = True
                 elif isinstance(jt, int) and self._is_while_head(jt):
                     # back to the head of an enclosing `while` that the inner loop ended: it leaves the inner loop
