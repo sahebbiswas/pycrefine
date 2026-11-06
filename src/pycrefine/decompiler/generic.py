@@ -31,6 +31,7 @@ from .._constants import (
     _TRY_LOAD_OPS,
     _TRY_LOOP_HEADS,
     _TRY_SKIP_NOP,
+    _EXC_TYPE_EXPR_OPS,
     _UNARY_SYMBOLS,
     _WHILE_TRIVIAL_OPS,
 )
@@ -4530,101 +4531,78 @@ class DecompilerGeneric(DecompilerBase):
         self.prescan.try_nop_offsets.update(outer_handlers)    # (the outer try has no protected range, so only this finds its NOP)
         self._suppress_with_exit_epilogues()
 
+    def _check_exc_match_within(self, start: int, window: int) -> bool:
+        """Whether a CHECK_EXC_MATCH is among the ``window`` instructions from index ``start``, or ends a run of type-expression loads."""
+        instrs = self.instructions
+        if any(ins.opname == "CHECK_EXC_MATCH" for ins in instrs[start:start + window]):
+            return True
+        # a long tuple of exception types puts the match beyond any fixed window
+        end = start
+        while end < len(instrs) and instrs[end].opname in _EXC_TYPE_EXPR_OPS:
+            end += 1
+        return end < len(instrs) and instrs[end].opname == "CHECK_EXC_MATCH"
+
+    def _first_after_handler_nops(self, idx: int) -> int:
+        """Index of the first instruction after ``idx`` that is not one of the NOPs a handler may start with."""
+        instrs = self.instructions
+        look = idx + 1
+        while look < len(instrs) and instrs[look].opname in _TRY_SKIP_NOP:
+            look += 1
+        return look
+
+    def _is_source_except_handler(self, idx: int) -> bool:
+        """Whether the PUSH_EXC_INFO at ``idx`` starts a real `except` (typed, or bare) and not a re-raise wrapper."""
+        instrs = self.instructions
+        look = self._first_after_handler_nops(idx)
+        if look >= len(instrs):
+            return False
+        if instrs[look].opname in _TRY_LOAD_OPS:
+            # a CHECK_EXC_MATCH within a few steps confirms a typed `except`
+            return self._check_exc_match_within(look + 1, 5)
+        # a bare `except:` discards the exception with POP_TOP
+        return instrs[look].opname == "POP_TOP"
+
     def _classify_exception_entries(self):
         """Read the exception table: the offsets where a covered range starts, and the handler targets that are real `except` clauses or re-raise wrappers."""
         instrs = self.instructions
-        n = len(instrs)
-        # ── 0. Try to get exception table coverage from dis ─────────────
-        # exception_entries available on Python 3.11+ (same versions that use
-        # NOP / PUSH_EXC_INFO rather than SETUP_FINALLY).
+        # The table is available on Python 3.11+ (the versions that use NOP / PUSH_EXC_INFO).
         try:
             # The shared, cached read: a table that cannot be read is reported once there.
-            _exc_entries = self._exception_entries() or []
-            # Build a set of offsets that start a try-covered range.
-            # Include ALL depths (depth=0 for module-level try, depth=1+ for nested).
-            _try_covered_starts = {e.start for e in _exc_entries}
-            # Build a set of ALL targets that are real except-entries (depth 1)
-            # and whose handler starts with CHECK_EXC_MATCH → real except Exception:
-            _except_entry_targets = set()
-            _reraise_wrapper_targets = set()
-            push_exc_offs = {ins.offset for ins in instrs if ins.opname == "PUSH_EXC_INFO"}
-            for e in _exc_entries:
-                if e.target in push_exc_offs:
-                    # Peek at what follows the PUSH_EXC_INFO target
-                    t_idx = next(
-                        (i for i, ins in enumerate(instrs) if ins.offset == e.target),
-                        None,
-                    )
-                    if t_idx is not None:
-                        look = t_idx + 1
-                        while look < n and instrs[look].opname in _TRY_SKIP_NOP:
-                            look += 1
-                        if look < n and instrs[look].opname in _TRY_LOAD_OPS:
-                            # Check for CHECK_EXC_MATCH within a few steps to
-                            # confirm this is a real typed except: handler.
-                            look2 = look + 1
-                            found_cem = False
-                            for _ in range(5):
-                                if look2 >= n:
-                                    break
-                                if instrs[look2].opname == "CHECK_EXC_MATCH":
-                                    found_cem = True
-                                    break
-                                look2 += 1
-                            if found_cem:
-                                _except_entry_targets.add(e.target)
-                            else:
-                                _reraise_wrapper_targets.add(e.target)
-                        elif look < n and instrs[look].opname == "POP_TOP":
-                            # Bare except: POP_TOP discards the exception.
-                            # This is a real except: handler, NOT a re-raise wrapper.
-                            _except_entry_targets.add(e.target)
-                        else:
-                            _reraise_wrapper_targets.add(e.target)
+            exc_entries = self._exception_entries() or []
+            # ALL depths: depth 0 for a module-level try, 1+ for nested ones.
+            try_covered_starts = {e.start for e in exc_entries}
+            except_entry_targets: set = set()
+            reraise_wrapper_targets: set = set()
+            index_of_push = {ins.offset: i for i, ins in enumerate(instrs) if ins.opname == "PUSH_EXC_INFO"}
+            for e in exc_entries:
+                t_idx = index_of_push.get(e.target)
+                if t_idx is not None:
+                    is_except = self._is_source_except_handler(t_idx)
+                    (except_entry_targets if is_except else reraise_wrapper_targets).add(e.target)
         except (AttributeError, TypeError):
-            _exc_entries = []
-            _try_covered_starts = set()
-            _except_entry_targets = set()
-            _reraise_wrapper_targets = set()
-        return _try_covered_starts, _except_entry_targets, _reraise_wrapper_targets
+            return set(), set(), set()
+        return try_covered_starts, except_entry_targets, reraise_wrapper_targets
+
+    def _is_unlisted_reraise_wrapper(self, idx: int) -> bool:
+        """Heuristic for a PUSH_EXC_INFO the exception table did not list: a with-exit handler or a re-raise wrapper."""
+        instrs = self.instructions
+        look = self._first_after_handler_nops(idx)
+        if look >= len(instrs):
+            return False
+        if instrs[look].opname == "WITH_EXCEPT_START":
+            return True
+        # a load and no CHECK_EXC_MATCH within 3 steps
+        return instrs[look].opname in _TRY_LOAD_OPS and not self._check_exc_match_within(look + 1, 4)
 
     def _classify_push_exc_info(self, _except_entry_targets: set, _reraise_wrapper_targets: set):
         """Mark the PUSH_EXC_INFO of re-raise wrappers and with-exit handlers, which are not source `except` clauses."""
-        instrs = self.instructions
-        n = len(instrs)
-        # ── 1. Classify PUSH_EXC_INFO offsets ───────────────────────────
         self.prescan.suppress_push_exc_offsets = set()
-        for ins in instrs:
+        for idx, ins in enumerate(self.instructions):
             if ins.opname != "PUSH_EXC_INFO":
                 continue
-            if ins.offset in _reraise_wrapper_targets:
-                # Re-raise wrapper or with-exit handler — suppress silently
+            if ins.offset in _reraise_wrapper_targets or (
+                    ins.offset not in _except_entry_targets and self._is_unlisted_reraise_wrapper(idx)):
                 self.prescan.suppress_push_exc_offsets.add(ins.offset)
-            elif ins.offset not in _except_entry_targets:
-                # Not in either set (no exception_entries available) — use heuristic:
-                # peek at what follows; if it's a LOAD + no CHECK_EXC_MATCH, suppress.
-                t_idx = next((i for i, ins2 in enumerate(instrs) if ins2.offset == ins.offset), None)
-                if t_idx is not None:
-                    look = t_idx + 1
-                    while look < n and instrs[look].opname in _TRY_SKIP_NOP:
-                        look += 1
-                    if look < n:
-                        # WITH_EXCEPT_START → with-exit handler
-                        if instrs[look].opname == "WITH_EXCEPT_START":
-                            self.prescan.suppress_push_exc_offsets.add(ins.offset)
-                        # LOAD_GLOBAL + no CHECK_EXC_MATCH within 3 steps → re-raise wrapper
-                        elif instrs[look].opname in _TRY_LOAD_OPS:
-                            look2 = look + 1
-                            found_cem = False
-                            for _ in range(4):
-                                if look2 >= n:
-                                    break
-                                if instrs[look2].opname == "CHECK_EXC_MATCH":
-                                    found_cem = True
-                                    break
-                                look2 += 1
-                            if not found_cem:
-                                self.prescan.suppress_push_exc_offsets.add(ins.offset)
 
     def _classify_try_nops(self, _try_covered_starts: set):
         """Tell the NOP that opens a try apart from the other NOPs (a `with` body's `pass`, the epilogue)."""
@@ -4777,6 +4755,90 @@ class DecompilerGeneric(DecompilerBase):
                 self.prescan.exc_handler_jump_offsets.add(jf.offset)
                 self.prescan.exc_handler_break_offsets.add(jf.offset)
 
+    def _set_aside_try_else(self, exc_entries, real_push_exc: set, body_end_by_target: dict, not_here: set) -> None:
+        """Find the `else` clause of each try (3.11+), and move the end of its body back to where the clause starts."""
+        body_start_by_target: Dict[int, int] = {}
+        for e in exc_entries:
+            if e.target in real_push_exc:
+                body_start_by_target[e.target] = min(body_start_by_target.get(e.target, e.start), e.start)
+        for handler, end in list(body_end_by_target.items()):
+            if handler in not_here:
+                continue
+            region = self._try_else_region(end, handler, body_start_by_target.get(handler, 0))
+            if region is not None and self._else_is_loop_tail(region, end, handler):
+                region = None
+            if region is not None:
+                self.prescan.try_else[region[0]] = region[1]
+                self.prescan.try_else_handlers[region[0]] = handler
+                body_end_by_target[handler] = region[1]
+
+    def _loop_bound_merge(self, entry, body_end: int, exc_entries) -> Optional[int]:
+        """The label where a try inside a loop rejoins: the loop's exit, or the code after the try in the loop body."""
+        # FOR_ITER only: not the conditional jumps inside outer except handlers, which would be false positives.
+        # (a loop inside the body is not one around it: a range of the body that is left out of the first one,
+        # such as the end of a nested loop, starts inside the loops it ends)
+        body_first = min(x.start for x in exc_entries if x.target == entry.target)
+        merge = None
+        for ins in self.instructions:
+            if ins.offset >= body_first:
+                break
+            if ins.opname != "FOR_ITER":
+                continue
+            t = self._get_jump_target(ins)
+            if isinstance(t, int) and t > body_first and (merge is None or t < merge):
+                merge = t
+        # Code after the try inside the loop body: the body's normal path jumps over the handler to it,
+        # before the loop's end.
+        rejoin = self._try_rejoin_offset(body_end, entry.target)
+        if merge is not None and rejoin is not None and rejoin < merge:
+            return rejoin
+        if merge is None and rejoin is not None and any(
+                bs < body_first < self._loop_end_after(bs) and rejoin < self._loop_end_after(bs)
+                for bs in self.prescan.while_header_targets):
+            return rejoin   # (a `while` body: there is no FOR_ITER to bound it)
+        return merge
+
+    def _merge_label_for_entry(self, entry, body_end: int, exc_entries) -> Optional[int]:
+        """The label where the paths of the try that ``entry`` covers rejoin, or None."""
+        merges = self.prescan.finally_merge_offsets
+        if body_end in merges:
+            return body_end   # already a known finally-merge label
+        if entry.end in merges:
+            return entry.end
+        rejoin = self._try_rejoin_offset(body_end, entry.target)
+        if rejoin in merges:
+            return rejoin   # the body's normal path jumps over the handlers to the inline `finally`
+        after_body = self._merge_after_nops(body_end)
+        if after_body is not None:
+            # Only the no-op that marks the end of the try body lies in between
+            # (a body ending in a loop leaves one before the inline finally).
+            return after_body
+        if (self._supports("cold_handlers") and self._handlers_all_leave(entry.target, body_end)
+                and self._body_falls_into(body_end, entry.start)):
+            # (3.12+ lays the handlers out after all ordinary code.) Every way out of them is a
+            # `continue` or a `return`, so nothing rejoins: they go right after the body.
+            return body_end
+        return self._loop_bound_merge(entry, body_end, exc_entries)
+
+    def _record_handler_merge(self, merge: int, target: int) -> None:
+        """Note that the handler at ``target`` is written at the label ``merge``."""
+        handlers = self.prescan.push_exc_to_finally_merge.setdefault(merge, [])
+        if target not in handlers:
+            handlers.append(target)
+            handlers.sort()
+        if merge not in self.prescan.finally_merge_offsets:
+            self.prescan.except_only_merge_offsets.add(merge)
+
+    def _join_outer_handlers(self, outer_inner: dict) -> None:
+        """The handlers of a try whose body is only another try rejoin where the inner try's do."""
+        self.prescan.outer_handlers = set(outer_inner)
+        for outer_handler, inner_handler in outer_inner.items():
+            for handlers in self.prescan.push_exc_to_finally_merge.values():
+                if inner_handler in handlers and outer_handler not in handlers:
+                    handlers.append(outer_handler)
+                    handlers.sort()
+                    break
+
     def _map_handlers_to_merge_labels(self):
         """Map each real handler to the label where its try's paths rejoin; returns the real handlers and the outer-try handler map."""
         instrs = self.instructions
@@ -4827,88 +4889,18 @@ class DecompilerGeneric(DecompilerBase):
         exit_only = self._prescan_exit_only_finally(_exc_entries, real_push_exc, _body_end_by_target)
         outer_handlers, outer_inner = self._outer_handler_map(real_push_exc)  # (outer NOP -> handler, handler -> inner handler)
         if self._has_exception_table():
-            _body_start_by_target: Dict[int, int] = {}
-            for e in _exc_entries:
-                if e.target in real_push_exc:
-                    _body_start_by_target[e.target] = min(_body_start_by_target.get(e.target, e.start), e.start)
-            for handler, end in list(_body_end_by_target.items()):
-                if handler in exit_only or handler in outer_handlers.values() or handler in outer_inner.values():
-                    continue
-                region = self._try_else_region(end, handler, _body_start_by_target.get(handler, 0))
-                if region is not None and self._else_is_loop_tail(region, end, handler):
-                    region = None
-                if region is not None:
-                    self.prescan.try_else[region[0]] = region[1]
-                    self.prescan.try_else_handlers[region[0]] = handler
-                    _body_end_by_target[handler] = region[1]
+            # (a try that is exit-only or the outer of two has no `else` of its own)
+            not_here = set(exit_only) | set(outer_handlers.values()) | set(outer_inner.values())
+            self._set_aside_try_else(_exc_entries, real_push_exc, _body_end_by_target, not_here)
 
         # Map: first real PUSH_EXC_INFO → finally-merge offset
         for e in _exc_entries:
             if e.target in real_push_exc:
-                merge = None
-                body_end = _body_end_by_target[e.target]
-                after_body = self._merge_after_nops(body_end)
-                if body_end in self.prescan.finally_merge_offsets:
-                    # Already a known finally-merge label.
-                    merge = body_end
-                elif e.end in self.prescan.finally_merge_offsets:
-                    merge = e.end
-                elif self._try_rejoin_offset(body_end, e.target) in self.prescan.finally_merge_offsets:
-                    # The body's normal path jumps over the handlers to the inline `finally`.
-                    merge = self._try_rejoin_offset(body_end, e.target)
-                elif after_body is not None:
-                    # Only the no-op that marks the end of the try body lies in between
-                    # (a body ending in a loop leaves one before the inline finally).
-                    merge = after_body
-                elif self._supports("cold_handlers") and self._handlers_all_leave(e.target, body_end) \
-                        and self._body_falls_into(body_end, e.start):
-                    # (3.12+ lays the handlers out after all ordinary code.) Every way out of them is a
-                    # `continue` or a `return`, so nothing rejoins: they go right after the body.
-                    merge = body_end
-                else:
-                    # Case 1: FOR_ITER loop wraps the try body.
-                    # Use the FOR_ITER's jump target (loop-exit) as the merge.
-                    # Only accept FOR_ITER — not conditional jumps inside outer
-                    # except handlers, which would give false positives.
-                    # (a loop inside the body is not one around it: a range of the body that is left out
-                    # of the first one, such as the end of a nested loop, starts inside the loops it ends)
-                    body_first = min(x.start for x in _exc_entries if x.target == e.target)
-                    for ins in instrs:
-                        if ins.offset >= body_first:
-                            break
-                        if ins.opname != "FOR_ITER":
-                            continue
-                        t = self._get_jump_target(ins)
-                        if isinstance(t, int) and t > body_first:
-                            if merge is None or t < merge:
-                                merge = t
-                    # Code after the try inside the loop body: the body's normal path
-                    # jumps over the handler to it, before the loop's end.
-                    rejoin = self._try_rejoin_offset(body_end, e.target)
-                    if merge is not None and rejoin is not None and rejoin < merge:
-                        merge = rejoin
-                    elif (merge is None and rejoin is not None
-                          and any(bs < body_first < self._loop_end_after(bs) and rejoin < self._loop_end_after(bs)
-                              for bs in self.prescan.while_header_targets)):
-                        merge = rejoin   # (a `while` body: there is no FOR_ITER to bound it)
+                merge = self._merge_label_for_entry(e, _body_end_by_target[e.target], _exc_entries)
                 if merge is not None:
-                    target = e.target
-                    if merge not in self.prescan.push_exc_to_finally_merge:
-                        self.prescan.push_exc_to_finally_merge[merge] = []
-                    if target not in self.prescan.push_exc_to_finally_merge[merge]:
-                        self.prescan.push_exc_to_finally_merge[merge].append(target)
-                        self.prescan.push_exc_to_finally_merge[merge].sort()
-                    if merge not in self.prescan.finally_merge_offsets:
-                        self.prescan.except_only_merge_offsets.add(merge)
+                    self._record_handler_merge(merge, e.target)
 
-        # The handlers of a try whose body is only another try rejoin where the inner try's do.
-        self.prescan.outer_handlers = set(outer_inner)
-        for outer_handler, inner_handler in outer_inner.items():
-            for merge, handlers in self.prescan.push_exc_to_finally_merge.items():
-                if inner_handler in handlers and outer_handler not in handlers:
-                    handlers.append(outer_handler)
-                    handlers.sort()
-                    break
+        self._join_outer_handlers(outer_inner)
         return real_push_exc, outer_handlers
 
     def _suppress_reraise_wrappers(self):
@@ -4993,6 +4985,20 @@ class DecompilerGeneric(DecompilerBase):
                 else:
                     self.emit.deferred_except_lines[merge_off].extend(handler_lines)
 
+    def _finally_body_end_after(self, merge_off: int) -> Optional[int]:
+        """Where an inline `finally` body at ``merge_off`` ends when no wrapper told: the next try-entry NOP, else the implicit return."""
+        instrs = self.instructions
+        for ins in instrs:
+            if ins.offset > merge_off and ins.opname == "NOP" and (
+                    ins.offset in self.prescan.try_nop_offsets or ins.offset == 2):
+                return ins.offset
+        for ins in instrs:
+            if ins.offset > merge_off and (
+                    (ins.opname == "LOAD_CONST" and ins.argval is None)
+                    or ins.opname in ("RETURN_CONST", "RETURN_VALUE")):
+                return ins.offset
+        return None
+
     def _render_finally_bodies(self):
         """Pre-render each inline `finally` body and hide its instructions; it is written at the merge label."""
         instrs = self.instructions
@@ -5017,19 +5023,7 @@ class DecompilerGeneric(DecompilerBase):
                 try_start = min((e.start for e in _exc_entries if e.target in targets), default=merge_off)
                 self._suppress_copies(self._find_finally_copies(matched[1], try_start, merge_off))
             if body_end is None:
-                for ins in instrs:
-                    if ins.offset > merge_off and ins.opname == "NOP":
-                        if ins.offset in self.prescan.try_nop_offsets or ins.offset == 2:
-                            body_end = ins.offset
-                            break
-            if body_end is None:
-                for ins in instrs:
-                    if ins.offset > merge_off and (
-                        (ins.opname == "LOAD_CONST" and ins.argval is None)
-                        or ins.opname in ("RETURN_CONST", "RETURN_VALUE")
-                    ):
-                        body_end = ins.offset
-                        break
+                body_end = self._finally_body_end_after(merge_off)
             if body_end is None:
                 continue
             for ins in instrs:
@@ -5039,135 +5033,144 @@ class DecompilerGeneric(DecompilerBase):
             lines = self._render_finally_body(sub_instrs) or ["pass"]
             self.emit.deferred_finally_lines[merge_off] = lines
 
+    def _try_entry_nops(self) -> List[int]:
+        """The offsets of the NOPs that open a try, the one at offset 2 included."""
+        nops = list(self.prescan.try_nop_offsets)
+        if any(ins.offset == 2 and ins.opname == "NOP" for ins in self.instructions):
+            nops.append(2)
+        return nops
+
+    def _scan_to_return_or_handler(self, start: int) -> Optional[int]:
+        """The offset of the first return or PUSH_EXC_INFO at or after ``start``."""
+        for ins in self.instructions:
+            if ins.offset >= start and ins.opname in ("RETURN_CONST", "RETURN_VALUE", "PUSH_EXC_INFO"):
+                return ins.offset
+        return None
+
+    def _finally_only_extent(self, e, body_start: int, exc_entries) -> Tuple[int, Optional[int], bool]:
+        """Where the inline `finally` body of a try with no `except` starts and ends, and whether it has a normal-path copy."""
+        instrs = self.instructions
+        # A continue/break/return in the body splits the protected range, so the body ends where
+        # the last range aimed at this handler ends.
+        try_body_end = max(x.end for x in exc_entries if x.target == e.target and x.start >= body_start)
+        finally_start = try_body_end
+        # The copy where the protected body ends is the normal-path one; any earlier copy belongs to a
+        # continue/break/return and is not source. A body that always raises or returns has no
+        # normal-path copy, and try-body statements that merely look like the finally body stay.
+        copies = self._find_finally_copies(self._handler_copy_instrs(e.target), body_start,
+                                           self._try_body_limit(e.target, exc_entries))
+        normal = [c for c in copies if c[2] and instrs[c[0]].offset >= try_body_end]
+        after_return = self._copy_precedes_final_return(normal[-1][1]) if normal else None
+        if after_return is not None:
+            # The try body ends in `return value`: every copy, the last one included, runs on the way
+            # out of a return. The return stays in the try body, which ends right after it (before the
+            # end of an enclosing loop), and the finally body is the handler's copy.
+            self._suppress_copies(copies)
+            finally_start = after_return
+            normal = []
+        else:
+            if normal:
+                finally_start = instrs[normal[-1][0]].offset
+            self._suppress_copies([c for c in copies if not normal or c is not normal[-1]])
+        finally_end = self._finally_copy_end(finally_start, owner=e.target) if normal else None
+        if finally_end is None and not normal:
+            finally_end = finally_start   # no inline copy: the code at the body's end is not the finally body
+        if finally_end is None:
+            finally_end = self._scan_to_return_or_handler(finally_start)
+        return finally_start, finally_end, bool(normal)
+
+    def _map_finally_only_try(self, nop_off: int, e, exc_entries) -> None:
+        """A try/finally with no `except`: the finally body follows the try body inline (NOP, body, finally, return, suppressed handler)."""
+        instrs = self.instructions
+        finally_start, finally_end, _ = self._finally_only_extent(e, nop_off + 2, exc_entries)
+        if finally_end is None or finally_end < finally_start:
+            return
+        for ins in instrs:
+            if finally_start <= ins.offset < finally_end:
+                self.prescan.finally_body_suppress.add(ins.offset)
+        sub_instrs = [ins for ins in instrs if finally_start <= ins.offset < finally_end]
+        if not sub_instrs:
+            # A try body that always raises or returns has no inline copy of the finally body;
+            # the copy in the exception handler is the only one.
+            sub_instrs = self._handler_copy_instrs(e.target)
+        self.emit.deferred_finally_lines[finally_start] = self._render_finally_body(sub_instrs) or ["pass"]
+        # The try body ends where the finally body starts; _op_nop needs it to open and close the
+        # `try:` block (there is no handler to ask).
+        self.prescan.nop_to_finally_merge[nop_off] = finally_start
+        # The inline finally body entry is the merge label, though no JUMP_BACKWARD leads to it; there
+        # is no real PUSH_EXC_INFO, so no handler lines to pre-render.
+        self.prescan.finally_merge_offsets.add(finally_start)
+        self.emit.deferred_except_lines[finally_start] = []
+
     def _map_try_nops(self, real_push_exc: set):
         """Tie each try-entry NOP to the handler of its body, and handle a try/finally with no except clause."""
-        instrs = self.instructions
-        n = len(instrs)
-        # ── 7. Build nop_to_push_exc: maps each try-entry NOP to the correct
-        #       PUSH_EXC_INFO that handles its try body, using the exception table.
-        self.prescan.nop_to_push_exc = {}  # nop_offset → push_exc_info_offset
-        self.prescan.nop_to_finally_merge = {}  # nop_offset → finally start, for try/finally without except
-        _exc_entries_for_nop = self._exception_entries() or []
-        for nop_off in list(self.prescan.try_nop_offsets) + ([2] if any(ins.offset == 2 and ins.opname == "NOP" for ins in instrs) else []):
+        # nop_to_push_exc maps each try-entry NOP to the PUSH_EXC_INFO that handles its body.
+        self.prescan.nop_to_push_exc = {}
+        self.prescan.nop_to_finally_merge = {}  # nop_offset -> finally start, for try/finally without except
+        exc_entries = self._exception_entries() or []
+        nops = self._try_entry_nops()
+        for nop_off in nops:
             body_start = nop_off + 2  # first instruction of the try body
-            for e in _exc_entries_for_nop:
+            for e in exc_entries:
                 if e.start <= body_start < e.end and e.target in real_push_exc:
                     self.prescan.nop_to_push_exc[nop_off] = e.target
                     break
-
-        # ── 7b. Handle try/finally without except ───────────────────────
-        # When a try-entry NOP has no corresponding real PUSH_EXC_INFO in
-        # _nop_to_push_exc (because the only handler is a suppressed re-raise
-        # wrapper), the structure is try/finally without any except clause.
-        # The finally body is inlined immediately after the try body.
-        # Pattern: NOP → try body → finally body → RETURN_CONST → suppressed PEI
-        # Detect by: NOP is not in _nop_to_push_exc, but there IS a suppressed
-        # PUSH_EXC_INFO whose exception-table entry covers [nop+2, try_body_end).
-        for nop_off in list(self.prescan.try_nop_offsets) + ([2] if any(ins.offset == 2 and ins.opname == "NOP" for ins in instrs) else []):
+        # A NOP with no real handler whose only handler is a suppressed re-raise wrapper opens a
+        # try/finally without `except`.
+        for nop_off in nops:
             if nop_off in self.prescan.nop_to_push_exc:
-                continue  # already handled
+                continue
             body_start = nop_off + 2
-            # Find the suppressed PEI that handles this try body
-            for e in _exc_entries_for_nop:
-                if e.start <= body_start < e.end and e.target in self.prescan.suppress_push_exc_offsets:
-                    # This NOP has only a finally (no except).
-                    # Find the try body end = start of finally body = e.end
-                    # A continue/break/return in the body splits the protected range, so
-                    # the body ends where the last range aimed at this handler ends.
-                    try_body_end = max(x.end for x in _exc_entries_for_nop
-                                       if x.target == e.target and x.start >= body_start)
-                    # Finally body: from try_body_end to first RETURN_CONST or
-                    # next suppressed PUSH_EXC_INFO
-                    finally_start = try_body_end
-                    # The copy where the protected body ends is the normal-path one; any
-                    # earlier copy belongs to a continue/break/return and is not source. A
-                    # body that always raises or returns has no normal-path copy, and
-                    # try-body statements that merely look like the finally body stay.
-                    copies = self._find_finally_copies(self._handler_copy_instrs(e.target), body_start,
-                                                       self._try_body_limit(e.target, _exc_entries_for_nop))
-                    normal = [c for c in copies if c[2] and instrs[c[0]].offset >= try_body_end]
-                    after_return = self._copy_precedes_final_return(normal[-1][1]) if normal else None
-                    if after_return is not None:
-                        # The try body ends in `return value`: every copy, the last one
-                        # included, runs on the way out of a return. The return stays in
-                        # the try body, which ends right after it (before the end of an
-                        # enclosing loop), and the finally body is the handler's copy.
-                        self._suppress_copies(copies)
-                        finally_start = after_return
-                        normal = []
-                    else:
-                        if normal:
-                            finally_start = instrs[normal[-1][0]].offset
-                        self._suppress_copies([c for c in copies if not normal or c is not normal[-1]])
-                    finally_end = self._finally_copy_end(finally_start, owner=e.target) if normal else None
-                    if finally_end is None and not normal:
-                        # No inline copy: the code at the body's end is not the finally body.
-                        finally_end = finally_start
-                    if finally_end is None:
-                        for ins in instrs:
-                            if ins.offset >= finally_start:
-                                if ins.opname in ("RETURN_CONST", "RETURN_VALUE"):
-                                    finally_end = ins.offset
-                                    break
-                                if ins.opname == "PUSH_EXC_INFO":
-                                    finally_end = ins.offset
-                                    break
-                    if finally_end is None or finally_end < finally_start:
-                        break
-                    # Suppress the finally body instructions
-                    for ins in instrs:
-                        if finally_start <= ins.offset < finally_end:
-                            self.prescan.finally_body_suppress.add(ins.offset)
-                    # Pre-render the finally body
-                    sub_instrs = [ins for ins in instrs if finally_start <= ins.offset < finally_end]
-                    if not sub_instrs:
-                        # A try body that always raises or returns has no inline copy of the
-                        # finally body; the copy in the exception handler is the only one.
-                        sub_instrs = self._handler_copy_instrs(e.target)
-                    lines = self._render_finally_body(sub_instrs) or ["pass"]
-                    self.emit.deferred_finally_lines[finally_start] = lines
-                    # The try body ends where the finally body starts; _op_nop needs it
-                    # to open and close the `try:` block (there is no handler to ask).
-                    self.prescan.nop_to_finally_merge[nop_off] = finally_start
-                    # Record this as a finally-merge point (even though there's no
-                    # JUMP_BACKWARD — the inline finally body entry IS the merge label)
-                    self.prescan.finally_merge_offsets.add(finally_start)
-                    # The "push_exc_to_finally_merge" dict maps None here
-                    # (no real PUSH_EXC_INFO), so no handler lines to pre-decompile.
-                    self.emit.deferred_except_lines[finally_start] = []
-                    break
+            handler = next((e for e in exc_entries
+                            if e.start <= body_start < e.end and e.target in self.prescan.suppress_push_exc_offsets),
+                           None)
+            if handler is not None:
+                self._map_finally_only_try(nop_off, handler, exc_entries)
+
+    def _next_non_nop(self, idx: int) -> int:
+        """Index of the first instruction at or after ``idx`` that is not one of the NOPs the compiler leaves between steps."""
+        instrs = self.instructions
+        while idx < len(instrs) and instrs[idx].opname in _TRY_SKIP_NOP:
+            idx += 1
+        return idx
+
+    def _is_none_constant(self, idx: int) -> bool:
+        return idx < len(self.instructions) and self.instructions[idx].opname == "LOAD_CONST" \
+            and self.instructions[idx].argval is None
+
+    def _with_exit_call_offsets(self, first: int) -> Optional[List[int]]:
+        """Offsets of `LOAD_CONST None` x3 and the CALL that follow, NOPs aside, from the first constant at ``first``."""
+        instrs = self.instructions
+        picked = [first]
+        idx = first
+        for _ in range(2):
+            idx = self._next_non_nop(idx + 1)
+            if not self._is_none_constant(idx):
+                return None
+            picked.append(idx)
+        call = self._next_non_nop(idx + 1)
+        if call < len(instrs) and instrs[call].opname == "CALL":
+            picked.append(call)
+            return [instrs[i].offset for i in picked]
+        return None
 
     def _suppress_with_exit_epilogues(self):
         """Hide the `None, None, None` call that exits a `with` block on its normal path."""
-        instrs = self.instructions
-        n = len(instrs)
         # The normal-exit epilogue for a `with` block is:
         #   LOAD_CONST None; LOAD_CONST None; LOAD_CONST None; CALL 2; POP_TOP
-        # Suppress the LOAD_CONSTs and the CALL to prevent ``None(None, None)``.
+        # The LOAD_CONSTs and the CALL are hidden to prevent ``None(None, None)``.
+        instrs = self.instructions
+        n = len(instrs)
         for i, ins in enumerate(instrs):
             if ins.opname != "BEFORE_WITH":
                 continue
             for j in range(i + 1, min(i + _MAX_WITH_EXIT_SEARCH_WINDOW, n)):
-                if instrs[j].opname == "LOAD_CONST" and instrs[j].argval is None and not (
-                        instrs[j - 1].opname.startswith(_VALUE_OPS)):
-                    # (after a value: the arguments of a user call such as f(None, None, None))
-                    k = j + 1
-                    while k < n and instrs[k].opname in _TRY_SKIP_NOP:
-                        k += 1
-                    if k < n and instrs[k].opname == "LOAD_CONST" and instrs[k].argval is None:
-                        m = k + 1
-                        while m < n and instrs[m].opname in _TRY_SKIP_NOP:
-                            m += 1
-                        if m < n and instrs[m].opname == "LOAD_CONST" and instrs[m].argval is None:
-                            c = m + 1
-                            while c < n and instrs[c].opname in _TRY_SKIP_NOP:
-                                c += 1
-                            if c < n and instrs[c].opname == "CALL":
-                                for off in (instrs[j].offset, instrs[k].offset,
-                                            instrs[m].offset, instrs[c].offset):
-                                    self.prescan.with_exit_suppress_offsets.add(off)
-                                break
-                    break
+                # (after a value: the arguments of a user call such as f(None, None, None))
+                if self._is_none_constant(j) and not instrs[j - 1].opname.startswith(_VALUE_OPS):
+                    offsets = self._with_exit_call_offsets(j)
+                    if offsets:
+                        self.prescan.with_exit_suppress_offsets.update(offsets)
+                        break   # (a `None` that is not the start of the exit call, such as `x = None`, is passed over)
 
     def _prescan_outer_finally(self) -> None:
         """
