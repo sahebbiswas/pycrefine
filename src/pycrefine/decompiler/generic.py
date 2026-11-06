@@ -25,6 +25,7 @@ from .._constants import (
     _STATEMENT_BOUNDARY_OPS,
     _TERNARY_PURE,
     _TERNARY_SUB_OPS,
+    _TERNARY_ARM_ENDS,
     _TERNARY_SKIP,
     _TERNARY_STORES,
     _TRY_HANDLER_EXIT_OPS,
@@ -258,6 +259,25 @@ _BASE_DISPATCH: Dict[str, str] = {
     "INLINED_COMPREHENSION": "_op_inlined_comprehension",
 }
 
+
+# Set of opcode name fragments that are "stacksink" join-point operations:
+# when a JUMP_FORWARD from the then-branch targets one of these, the ternary
+# result is consumed by that op (not stored). We still recognise the ternary.
+_STACKSINK_OPS = frozenset((
+    "BINARY_OP", "BINARY_MODULO", "BINARY_ADD", "BINARY_SUBTRACT",
+    "BINARY_MULTIPLY", "BINARY_TRUE_DIVIDE", "BINARY_FLOOR_DIVIDE",
+    "BINARY_AND", "BINARY_OR", "BINARY_XOR", "BINARY_LSHIFT",
+    "BINARY_RSHIFT", "BINARY_POWER", "BINARY_MATRIX_MULTIPLY",
+    "CALL_FUNCTION", "CALL", "PRECALL", "CALL_METHOD", "CALL_FUNCTION_KW",
+    "RETURN_VALUE", "RETURN_CONST", "YIELD_VALUE", "AWAIT_EXPR", "YIELD_FROM_EXPR",
+    "BUILD_TUPLE", "BUILD_LIST", "BUILD_SET", "BUILD_MAP", "BUILD_CONST_KEY_MAP", "BUILD_STRING",
+    "BUILD_SLICE",
+    "LIST_APPEND", "SET_ADD", "MAP_ADD",
+    "UNARY_NEGATIVE", "UNARY_POSITIVE", "UNARY_INVERT", "UNARY_NOT",
+    "CALL_INTRINSIC_1", "TO_BOOL",
+    "FORMAT_VALUE", "FORMAT_SIMPLE", "FORMAT_WITH_SPEC", "CONVERT_VALUE", "CALL_FUNCTION_EX", "CALL_KW",
+    "COMPARE_OP", "IS_OP", "CONTAINS_OP", "BINARY_SUBSCR",
+))
 
 class DecompilerGeneric(DecompilerBase):
     _DISPATCH: Dict[str, str] = _BASE_DISPATCH
@@ -1804,24 +1824,6 @@ class DecompilerGeneric(DecompilerBase):
             "POP_JUMP_IF_FALSE", "POP_JUMP_IF_TRUE",
             "POP_JUMP_IF_NONE", "POP_JUMP_IF_NOT_NONE",
         )
-        # Set of opcode name fragments that are "stacksink" join-point operations:
-        # when a JUMP_FORWARD from the then-branch targets one of these, the ternary
-        # result is consumed by that op (not stored). We still recognise the ternary.
-        _STACKSINK_OPS = frozenset((
-            "BINARY_OP", "BINARY_MODULO", "BINARY_ADD", "BINARY_SUBTRACT",
-            "BINARY_MULTIPLY", "BINARY_TRUE_DIVIDE", "BINARY_FLOOR_DIVIDE",
-            "BINARY_AND", "BINARY_OR", "BINARY_XOR", "BINARY_LSHIFT",
-            "BINARY_RSHIFT", "BINARY_POWER", "BINARY_MATRIX_MULTIPLY",
-            "CALL_FUNCTION", "CALL", "PRECALL", "CALL_METHOD", "CALL_FUNCTION_KW",
-            "RETURN_VALUE", "RETURN_CONST", "YIELD_VALUE", "AWAIT_EXPR", "YIELD_FROM_EXPR",
-            "BUILD_TUPLE", "BUILD_LIST", "BUILD_SET", "BUILD_MAP", "BUILD_CONST_KEY_MAP", "BUILD_STRING",
-            "BUILD_SLICE",
-            "LIST_APPEND", "SET_ADD", "MAP_ADD",
-            "UNARY_NEGATIVE", "UNARY_POSITIVE", "UNARY_INVERT", "UNARY_NOT",
-            "CALL_INTRINSIC_1", "TO_BOOL",
-            "FORMAT_VALUE", "FORMAT_SIMPLE", "FORMAT_WITH_SPEC", "CONVERT_VALUE", "CALL_FUNCTION_EX", "CALL_KW",
-            "COMPARE_OP", "IS_OP", "CONTAINS_OP", "BINARY_SUBSCR",
-        ))
         for idx, ins in enumerate(self.instructions):
             if not self._is_compound_cjump(ins.opname):
                 continue
@@ -1853,266 +1855,285 @@ class DecompilerGeneric(DecompilerBase):
                 if _FWD_JUMP(x.opname) and "IF" not in x.opname
             ]
             if jf_in_then:
-                # Pattern B: then-branch contains a forward jump.
-                # Two sub-variants:
-                # B1 (3.12 standard):  then-EXPR  JUMP_FORWARD(store)  >> else-EXPR  >> STORE
-                # B2 (3.14 possible):  then-EXPR  STORE  JUMP_FORWARD(after)  >> else-EXPR  >> STORE
-                # Detect B2 first (then-STORE exists before the jump).
-                jf = jf_in_then[-1]
-                jf_pos = next(
-                    (i for i, x in enumerate(then_sig) if x.offset == jf.offset),
-                    None,
-                )
-                if jf_pos is None:
-                    continue
-                before_jf = then_sig[:jf_pos]
-
-                then_stores_before_jf = [x for x in before_jf if x.opname in _TERNARY_STORES]
-
-                if then_stores_before_jf:
-                    # ── B2: then-STORE is before the jump ────────────────
-                    then_s = then_stores_before_jf[-1]
-                    store_target = self._get_jump_target(jf)
-                    st_idx = offset_to_idx.get(store_target)
-                    # The JUMP_FORWARD may target the post-merge point AFTER the
-                    # shared else-STORE rather than the STORE itself (e.g. the
-                    # simple if/else assignment pattern: then-EXPR then-STORE
-                    # JUMP_FORWARD(merge)  >> else-EXPR  STORE  >> merge).
-                    # When the resolved offset is not a STORE, fall back to
-                    # scanning forward from t_idx to find the real STORE.
-                    if st_idx is not None and self.instructions[st_idx].opname not in _TERNARY_STORES:
-                        st_idx = None
-                    if st_idx is None:
-                        for fi in range(t_idx, min(t_idx + _MAX_TERNARY_SEARCH_WINDOW, len(self.instructions))):
-                            if self.instructions[fi].opname in _TERNARY_STORES:
-                                st_idx = fi
-                                break
-                    if st_idx is None:
-                        continue
-                    store_instr = self.instructions[st_idx]
-                    if store_instr.opname not in _TERNARY_STORES:
-                        continue
-                    if then_s.argval != store_instr.argval:
-                        continue
-                    ts_pos = next(
-                        i for i, x in enumerate(before_jf)
-                        if x.offset == then_s.offset
-                    )
-                    actual_then_expr = [
-                        x for x in before_jf[:ts_pos] if x.opname not in _TERNARY_SKIP
-                    ]
-                    if not self._branch_is_expression(actual_then_expr, then_s.offset):
-                        continue
-                    else_raw = self.instructions[t_idx: st_idx]
-                    else_instrs = [x for x in else_raw if x.opname not in _TERNARY_SKIP]
-                    if not self._branch_is_expression(else_instrs, store_instr.offset):
-                        continue
-                    store_name = str(store_instr.argval)
-                    is_true = "IF_TRUE" in ins.opname
-
-                    # ── Augmented assignment detection (B2) ───────────────
-                    aug_op = None
-                    if actual_then_expr and else_instrs:
-                        lt = actual_then_expr[-1]
-                        le = else_instrs[-1]
-                        if lt.opname == "BINARY_OP" and le.opname == "BINARY_OP" and lt.arg == le.arg:
-                            aug_op = _AUG_ASSIGN_MAP.get(int(lt.arg) if lt.arg is not None else -1)
-                        if not aug_op and "INPLACE_" in lt.opname and lt.opname == le.opname:
-                            aug_op = _INPLACE_ASSIGN_MAP.get(lt.opname)
-                        if aug_op:
-                            # Heuristic: Avoid merging string concatenations containing newlines
-                            if self._has_newline_const(actual_then_expr + else_instrs):
-                                continue
-                            actual_then_expr.pop()
-                            else_instrs.pop()
-
-                    if not aug_op and self._has_inplace(actual_then_expr + else_instrs):
-                        continue    # `x //= 2` calls __ifloordiv__ and may mutate: not the same as `x = x // 2`
-                    self.prescan.ternary_jumps[ins.offset] = store_name, actual_then_expr, else_instrs, is_true, aug_op
-                    for x in then_raw:
-                        self.prescan.ternary_suppress.add(x.offset)
-                    for x in else_instrs:
-                        self.prescan.ternary_suppress.add(x.offset)
-                    continue
-
-                # ── B1: no then-STORE before the jump ────────────────────
-                store_target = self._get_jump_target(jf)
-                if not self._branch_is_expression(before_jf, store_target):
-                    continue
-
-                st_idx = offset_to_idx.get(store_target)
-                is_inplace = False
-
-                if st_idx is not None:
-                    # Check the instruction AT st_idx or immediately BEFORE it.
-                    # Some bytecode patterns land on the INPLACE op, others land
-                    # directly on the STORE (meaning the INPLACE op is the last
-                    # instruction of the else branch).
-                    check_idxs = [st_idx]
-                    if st_idx > 0:
-                        check_idxs.insert(0, st_idx - 1)
-
-                    for c_idx in check_idxs:
-                        op = self.instructions[c_idx]
-                        if "INPLACE_" in op.opname:
-                            is_inplace = True
-                            if c_idx == st_idx:
-                                st_idx += 1
-                            break
-                        if op.opname == "BINARY_OP":
-                            arg_val = op.arg
-                            if arg_val is not None and 13 <= int(arg_val) <= 25:
-                                is_inplace = True
-                                if c_idx == st_idx:
-                                    st_idx += 1
-                                break
-
-                # ── B1 sub-case: join-point is a STORE (regular ternary) ──
-                is_stacksink = False
-                if st_idx is None or self.instructions[st_idx].opname not in _TERNARY_STORES:
-                    # Before giving up: check if the JUMP_FORWARD target is a
-                    # 'stacksink' joinpoint (CALL / BINARY_OP).  In that case
-                    # the ternary result is consumed by that op, not stored to
-                    # a variable.  We still push the ternary onto the stack.
-                    if (st_idx is not None
-                            and (self.instructions[st_idx].opname in _STACKSINK_OPS
-                                 or self._loads_then_call(st_idx))):
-                        is_stacksink = True
-                        # else_raw = from t_idx up to (but NOT including) the join op
-                        else_end_ss = st_idx
-                        else_raw_ss = self.instructions[t_idx: else_end_ss]
-                        else_instrs_ss = [x for x in else_raw_ss
-                                          if x.opname not in _TERNARY_SKIP]
-                        # Validate: the else branch is an expression (and/or allowed)
-                        if not self._branch_is_expression(else_instrs_ss, self.instructions[st_idx].offset):
-                            is_stacksink = False
-                        if is_stacksink:
-                            is_true_ss = "IF_TRUE" in ins.opname
-                            # store_name="" signals a stacksink (push to stack, no explicit store)
-                            self.prescan.ternary_jumps[ins.offset] = "", before_jf, else_instrs_ss, is_true_ss, None
-                            for x in then_raw:
-                                self.prescan.ternary_suppress.add(x.offset)
-                            for x in else_instrs_ss:
-                                self.prescan.ternary_suppress.add(x.offset)
-                            # Do NOT suppress the join-point op itself
-                            continue
-
-                    if not is_stacksink:
-                        # Fall back: look for a downstream STORE
-                        st_idx = None
-                        for fi in range(t_idx, min(t_idx + _MAX_TERNARY_SEARCH_WINDOW,
-                                                   len(self.instructions))):
-                            if self.instructions[fi].opname in _TERNARY_STORES:
-                                st_idx = fi
-                                break
-                if st_idx is None:
-                    continue
-
-                else_end = st_idx - 1 if is_inplace else st_idx
-                else_raw = self.instructions[t_idx: else_end]
-                else_instrs = [x for x in else_raw if x.opname not in _TERNARY_SKIP]
-                if st_idx >= len(self.instructions):
-                    continue
-                if not self._branch_is_expression(else_instrs, self.instructions[else_end].offset):
-                    continue
-
-                store_instr = self.instructions[st_idx]
-                if store_instr.opname not in _TERNARY_STORES:
-                    continue
-
-                store_name = str(store_instr.argval)
-                is_true = "IF_TRUE" in ins.opname
-
-                # ── Augmented assignment detection (B1) ───────────────
-                aug_op = None
-                if before_jf and else_instrs:
-                    lt = before_jf[-1]
-                    le = else_instrs[-1]
-                    if lt.opname == "BINARY_OP" and le.opname == "BINARY_OP" and lt.arg == le.arg:
-                        aug_op = _AUG_ASSIGN_MAP.get(int(lt.arg) if lt.arg is not None else -1)
-                    if not aug_op and "INPLACE_" in lt.opname and lt.opname == le.opname:
-                        aug_op = _INPLACE_ASSIGN_MAP.get(lt.opname)
-                    if aug_op:
-                        if self._has_newline_const(before_jf + else_instrs):
-                            continue
-                        before_jf.pop()
-                        else_instrs.pop()
-
-                if not aug_op and self._has_inplace(before_jf + else_instrs):
-                    continue
-                self.prescan.ternary_jumps[ins.offset] = store_name, before_jf, else_instrs, is_true, aug_op
-                for x in then_raw:
-                    self.prescan.ternary_suppress.add(x.offset)
-                for x in else_instrs:
-                    self.prescan.ternary_suppress.add(x.offset)
+                self._ternary_with_jump(ins, t_idx, then_raw, then_sig, jf_in_then, offset_to_idx)
                 continue  # done with this POP_JUMP_IF
 
-            # ── Pattern A: no JUMP_FORWARD ────────────────────────────────
-            store_idxs = [i for i, x in enumerate(then_sig) if x.opname in _TERNARY_STORES]
-            if len(store_idxs) != 1:
-                continue
-            store_pos = store_idxs[0]
-            then_store = then_sig[store_pos]
-            before_store = then_sig[:store_pos]
+            self._ternary_without_jump(ins, t_idx, then_raw, then_sig, offset_to_idx)
 
-            if not self._branch_is_expression(before_store, then_store.offset):
-                continue
 
-            # Find the first STORE in the else-branch
-            else_store = None
-            for i in range(t_idx, min(t_idx + _MAX_TERNARY_SHORT_SEARCH_WINDOW, len(self.instructions))):
-                xi = self.instructions[i]
-                if xi.opname in _TERNARY_STORES:
-                    else_store = xi
+    def _ternary_with_jump(self, ins: BytecodeInstruction, t_idx: int, then_raw: list, then_sig: list,
+                           jf_in_then: list, offset_to_idx: Dict[int, int]) -> None:
+        """A ternary whose then-branch holds the forward jump over the else-branch: record it when it is an expression."""
+        # Pattern B: then-branch contains a forward jump.
+        # Two sub-variants:
+        # B1 (3.12 standard):  then-EXPR  JUMP_FORWARD(store)  >> else-EXPR  >> STORE
+        # B2 (3.14 possible):  then-EXPR  STORE  JUMP_FORWARD(after)  >> else-EXPR  >> STORE
+        # Detect B2 first (then-STORE exists before the jump).
+        jf = jf_in_then[-1]
+        jf_pos = next(
+            (i for i, x in enumerate(then_sig) if x.offset == jf.offset),
+            None,
+        )
+        if jf_pos is None:
+            return
+        before_jf = then_sig[:jf_pos]
+
+        then_stores_before_jf = [x for x in before_jf if x.opname in _TERNARY_STORES]
+
+        if then_stores_before_jf:
+            self._ternary_store_before_jump(ins, t_idx, then_raw, jf, before_jf, then_stores_before_jf, offset_to_idx)
+            return
+
+        # ── B1: no then-STORE before the jump ────────────────────
+        store_target = self._get_jump_target(jf)
+        if not self._branch_is_expression(before_jf, store_target):
+            return
+
+        st_idx = offset_to_idx.get(store_target)
+        is_inplace = False
+
+        if st_idx is not None:
+            # Check the instruction AT st_idx or immediately BEFORE it.
+            # Some bytecode patterns land on the INPLACE op, others land
+            # directly on the STORE (meaning the INPLACE op is the last
+            # instruction of the else branch).
+            check_idxs = [st_idx]
+            if st_idx > 0:
+                check_idxs.insert(0, st_idx - 1)
+
+            for c_idx in check_idxs:
+                op = self.instructions[c_idx]
+                if "INPLACE_" in op.opname:
+                    is_inplace = True
+                    if c_idx == st_idx:
+                        st_idx += 1
                     break
-                if xi.opname not in _TERNARY_PURE and xi.opname not in _TERNARY_SUB_OPS \
-                        and xi.opname not in _BOOLOP_PARTS:
+                if op.opname == "BINARY_OP":
+                    arg_val = op.arg
+                    if arg_val is not None and 13 <= int(arg_val) <= 25:
+                        is_inplace = True
+                        if c_idx == st_idx:
+                            st_idx += 1
+                        break
+
+        # ── B1 sub-case: join-point is a STORE (regular ternary) ──
+        is_stacksink = False
+        if st_idx is None or self.instructions[st_idx].opname not in _TERNARY_STORES:
+            # Before giving up: check if the JUMP_FORWARD target is a
+            # 'stacksink' joinpoint (CALL / BINARY_OP).  In that case
+            # the ternary result is consumed by that op, not stored to
+            # a variable.  We still push the ternary onto the stack.
+            if (st_idx is not None
+                    and (self.instructions[st_idx].opname in _STACKSINK_OPS
+                         or self._loads_then_call(st_idx))):
+                is_stacksink = True
+                # else_raw = from t_idx up to (but NOT including) the join op
+                else_end_ss = st_idx
+                else_raw_ss = self.instructions[t_idx: else_end_ss]
+                else_instrs_ss = [x for x in else_raw_ss
+                                  if x.opname not in _TERNARY_SKIP]
+                # Validate: the else branch is an expression (and/or allowed)
+                if not self._branch_is_expression(else_instrs_ss, self.instructions[st_idx].offset):
+                    is_stacksink = False
+                if is_stacksink:
+                    is_true_ss = "IF_TRUE" in ins.opname
+                    # store_name="" signals a stacksink (push to stack, no explicit store)
+                    self.prescan.ternary_jumps[ins.offset] = "", before_jf, else_instrs_ss, is_true_ss, None
+                    for x in then_raw:
+                        self.prescan.ternary_suppress.add(x.offset)
+                    for x in else_instrs_ss:
+                        self.prescan.ternary_suppress.add(x.offset)
+                    # Do NOT suppress the join-point op itself
+                    return
+
+            if not is_stacksink:
+                # Fall back: look for a downstream STORE
+                st_idx = None
+                for fi in range(t_idx, min(t_idx + _MAX_TERNARY_SEARCH_WINDOW,
+                                           len(self.instructions))):
+                    if self.instructions[fi].opname in _TERNARY_STORES:
+                        st_idx = fi
+                        break
+        if st_idx is None:
+            return
+
+        else_end = st_idx - 1 if is_inplace else st_idx
+        else_raw = self.instructions[t_idx: else_end]
+        else_instrs = [x for x in else_raw if x.opname not in _TERNARY_SKIP]
+        if st_idx >= len(self.instructions):
+            return
+        if not self._branch_is_expression(else_instrs, self.instructions[else_end].offset):
+            return
+
+        store_instr = self.instructions[st_idx]
+        if store_instr.opname not in _TERNARY_STORES:
+            return
+
+        store_name = str(store_instr.argval)
+        is_true = "IF_TRUE" in ins.opname
+
+        # ── Augmented assignment detection (B1) ───────────────
+        aug_op = None
+        if before_jf and else_instrs:
+            lt = before_jf[-1]
+            le = else_instrs[-1]
+            if lt.opname == "BINARY_OP" and le.opname == "BINARY_OP" and lt.arg == le.arg:
+                aug_op = _AUG_ASSIGN_MAP.get(int(lt.arg) if lt.arg is not None else -1)
+            if not aug_op and "INPLACE_" in lt.opname and lt.opname == le.opname:
+                aug_op = _INPLACE_ASSIGN_MAP.get(lt.opname)
+            if aug_op:
+                if self._has_newline_const(before_jf + else_instrs):
+                    return
+                before_jf.pop()
+                else_instrs.pop()
+
+        if not aug_op and self._has_inplace(before_jf + else_instrs):
+            return
+        self.prescan.ternary_jumps[ins.offset] = store_name, before_jf, else_instrs, is_true, aug_op
+        for x in then_raw:
+            self.prescan.ternary_suppress.add(x.offset)
+        for x in else_instrs:
+            self.prescan.ternary_suppress.add(x.offset)
+
+    def _ternary_store_before_jump(self, ins: BytecodeInstruction, t_idx: int, then_raw: list, jf,
+                                   before_jf: list, then_stores_before_jf: list, offset_to_idx: Dict[int, int]) -> None:
+        """The 3.14 shape: the then-branch stores its value, then jumps over the else-branch."""
+        # ── B2: then-STORE is before the jump ────────────────
+        then_s = then_stores_before_jf[-1]
+        store_target = self._get_jump_target(jf)
+        st_idx = offset_to_idx.get(store_target)
+        # The JUMP_FORWARD may target the post-merge point AFTER the
+        # shared else-STORE rather than the STORE itself (e.g. the
+        # simple if/else assignment pattern: then-EXPR then-STORE
+        # JUMP_FORWARD(merge)  >> else-EXPR  STORE  >> merge).
+        # When the resolved offset is not a STORE, fall back to
+        # scanning forward from t_idx to find the real STORE.
+        if st_idx is not None and self.instructions[st_idx].opname not in _TERNARY_STORES:
+            st_idx = None
+        if st_idx is None:
+            for fi in range(t_idx, min(t_idx + _MAX_TERNARY_SEARCH_WINDOW, len(self.instructions))):
+                if self.instructions[fi].opname in _TERNARY_STORES:
+                    st_idx = fi
                     break
+        if st_idx is None:
+            return
+        store_instr = self.instructions[st_idx]
+        if store_instr.opname not in _TERNARY_STORES:
+            return
+        if then_s.argval != store_instr.argval:
+            return
+        ts_pos = next(
+            i for i, x in enumerate(before_jf)
+            if x.offset == then_s.offset
+        )
+        actual_then_expr = [
+            x for x in before_jf[:ts_pos] if x.opname not in _TERNARY_SKIP
+        ]
+        if not self._branch_is_expression(actual_then_expr, then_s.offset):
+            return
+        else_raw = self.instructions[t_idx: st_idx]
+        else_instrs = [x for x in else_raw if x.opname not in _TERNARY_SKIP]
+        if not self._branch_is_expression(else_instrs, store_instr.offset):
+            return
+        store_name = str(store_instr.argval)
+        is_true = "IF_TRUE" in ins.opname
 
-            if else_store is None or else_store.argval != then_store.argval:
-                continue
+        # ── Augmented assignment detection (B2) ───────────────
+        aug_op = None
+        if actual_then_expr and else_instrs:
+            lt = actual_then_expr[-1]
+            le = else_instrs[-1]
+            if lt.opname == "BINARY_OP" and le.opname == "BINARY_OP" and lt.arg == le.arg:
+                aug_op = _AUG_ASSIGN_MAP.get(int(lt.arg) if lt.arg is not None else -1)
+            if not aug_op and "INPLACE_" in lt.opname and lt.opname == le.opname:
+                aug_op = _INPLACE_ASSIGN_MAP.get(lt.opname)
+            if aug_op:
+                # Heuristic: Avoid merging string concatenations containing newlines
+                if self._has_newline_const(actual_then_expr + else_instrs):
+                    return
+                actual_then_expr.pop()
+                else_instrs.pop()
 
-            es_idx = offset_to_idx[else_store.offset]
-            # 3.12+ duplicates a short tail (`return y`) into both arms. Whatever follows
-            # the then-store must be that same tail after the else-store; anything else
-            # means the arms are separate statements, not one conditional expression.
-            then_tail = [x for x in then_sig[store_pos + 1:] if x.opname not in ("NOP",)]
-            else_tail = [x for x in self.instructions[es_idx + 1: es_idx + 1 + len(then_tail) * 2]
-                         if x.opname not in _TERNARY_SKIP and x.opname != "NOP"][:len(then_tail)]
-            if then_tail and _copy_signature(then_tail) != _copy_signature(else_tail):
-                continue
-            if self._uses_outer_stack(before_store):
-                continue  # the arm finishes an expression begun before the test
-            else_raw = self.instructions[t_idx: es_idx]
-            else_instrs = [x for x in else_raw if x.opname not in _TERNARY_SKIP]
-            if not self._branch_is_expression(else_instrs, else_store.offset):
-                continue
+        if not aug_op and self._has_inplace(actual_then_expr + else_instrs):
+            return    # `x //= 2` calls __ifloordiv__ and may mutate: not the same as `x = x // 2`
+        self.prescan.ternary_jumps[ins.offset] = store_name, actual_then_expr, else_instrs, is_true, aug_op
+        for x in then_raw:
+            self.prescan.ternary_suppress.add(x.offset)
+        for x in else_instrs:
+            self.prescan.ternary_suppress.add(x.offset)
+        return
 
-            store_name = str(then_store.argval)
-            is_true = "IF_TRUE" in ins.opname
+    def _ternary_without_jump(self, ins: BytecodeInstruction, t_idx: int, then_raw: list, then_sig: list,
+                              offset_to_idx: Dict[int, int]) -> None:
+        """A ternary with no jump in the then-branch: both arms store to the same name; record it when they are expressions."""
+        # ── Pattern A: no JUMP_FORWARD ────────────────────────────────
+        store_idxs = [i for i, x in enumerate(then_sig) if x.opname in _TERNARY_STORES]
+        if len(store_idxs) != 1:
+            return
+        store_pos = store_idxs[0]
+        then_store = then_sig[store_pos]
+        before_store = then_sig[:store_pos]
 
-            # ── Augmented assignment detection (Pattern A) ───────────────
-            aug_op = None
-            if before_store and else_instrs:
-                lt = before_store[-1]
-                le = else_instrs[-1]
-                if lt.opname == "BINARY_OP" and le.opname == "BINARY_OP" and lt.arg == le.arg:
-                    aug_op = _AUG_ASSIGN_MAP.get(int(lt.arg) if lt.arg is not None else -1)
-                if not aug_op and "INPLACE_" in lt.opname and lt.opname == le.opname:
-                    aug_op = _INPLACE_ASSIGN_MAP.get(lt.opname)
-                if aug_op:
-                    if self._has_newline_const(before_store + else_instrs):
-                        continue
-                    before_store.pop()
-                    else_instrs.pop()
+        if not self._branch_is_expression(before_store, then_store.offset):
+            return
 
-            if not aug_op and self._has_inplace(before_store + else_instrs):
-                continue
-            self.prescan.ternary_jumps[ins.offset] = store_name, before_store, else_instrs, is_true, aug_op
-            for x in then_raw:
-                self.prescan.ternary_suppress.add(x.offset)
-            for x in else_instrs:
-                self.prescan.ternary_suppress.add(x.offset)
+        # Find the first STORE in the else-branch
+        else_store = None
+        for i in range(t_idx, min(t_idx + _MAX_TERNARY_SHORT_SEARCH_WINDOW, len(self.instructions))):
+            xi = self.instructions[i]
+            if xi.opname in _TERNARY_STORES:
+                else_store = xi
+                break
+            if xi.opname not in _TERNARY_PURE and xi.opname not in _TERNARY_SUB_OPS \
+                    and xi.opname not in _BOOLOP_PARTS:
+                break
+
+        if else_store is None or else_store.argval != then_store.argval:
+            return
+
+        es_idx = offset_to_idx[else_store.offset]
+        # 3.12+ duplicates a short tail (`return y`) into both arms. Whatever follows
+        # the then-store must be that same tail after the else-store; anything else
+        # means the arms are separate statements, not one conditional expression.
+        then_tail = [x for x in then_sig[store_pos + 1:] if x.opname not in ("NOP",)]
+        else_tail = [x for x in self.instructions[es_idx + 1: es_idx + 1 + len(then_tail) * 2]
+                     if x.opname not in _TERNARY_SKIP and x.opname != "NOP"][:len(then_tail)]
+        if then_tail and _copy_signature(then_tail) != _copy_signature(else_tail):
+            return
+        if not then_tail or then_tail[-1].opname not in _TERNARY_ARM_ENDS:
+            return  # the then-arm runs on into the else-store (`if c: y = 1` then `y = 2`): two statements
+        if self._uses_outer_stack(before_store):
+            return  # the arm finishes an expression begun before the test
+        else_raw = self.instructions[t_idx: es_idx]
+        else_instrs = [x for x in else_raw if x.opname not in _TERNARY_SKIP]
+        if not self._branch_is_expression(else_instrs, else_store.offset):
+            return
+
+        store_name = str(then_store.argval)
+        is_true = "IF_TRUE" in ins.opname
+
+        # ── Augmented assignment detection (Pattern A) ───────────────
+        aug_op = None
+        if before_store and else_instrs:
+            lt = before_store[-1]
+            le = else_instrs[-1]
+            if lt.opname == "BINARY_OP" and le.opname == "BINARY_OP" and lt.arg == le.arg:
+                aug_op = _AUG_ASSIGN_MAP.get(int(lt.arg) if lt.arg is not None else -1)
+            if not aug_op and "INPLACE_" in lt.opname and lt.opname == le.opname:
+                aug_op = _INPLACE_ASSIGN_MAP.get(lt.opname)
+            if aug_op:
+                if self._has_newline_const(before_store + else_instrs):
+                    return
+                before_store.pop()
+                else_instrs.pop()
+
+        if not aug_op and self._has_inplace(before_store + else_instrs):
+            return
+        self.prescan.ternary_jumps[ins.offset] = store_name, before_store, else_instrs, is_true, aug_op
+        for x in then_raw:
+            self.prescan.ternary_suppress.add(x.offset)
+        for x in else_instrs:
+            self.prescan.ternary_suppress.add(x.offset)
 
     @staticmethod
     def _has_inplace(instrs: List[BytecodeInstruction]) -> bool:
@@ -2204,17 +2225,7 @@ class DecompilerGeneric(DecompilerBase):
         # The compiler copies a small exit block to every jump that reaches it, so the
         # exits of one condition can sit at different offsets (`while a and b:` ends in
         # a `return None` per jump). Blocks that are the same return are one target.
-        first_return_block: dict = {}
-        canonical_return: dict = {}
-        for k, ins_k in enumerate(instrs):
-            if ins_k.opname == "RETURN_CONST":
-                key = ("RETURN_CONST", type(ins_k.argval), repr(ins_k.argval))
-            elif (ins_k.opname == "LOAD_CONST" and k + 1 < n
-                    and instrs[k + 1].opname == "RETURN_VALUE"):
-                key = ("LOAD_CONST+RETURN_VALUE", type(ins_k.argval), repr(ins_k.argval))
-            else:
-                continue
-            canonical_return[ins_k.offset] = first_return_block.setdefault(key, ins_k.offset)
+        canonical_return = self._canonical_return_blocks()
 
         i = 0
         while i < n:
@@ -2232,102 +2243,12 @@ class DecompilerGeneric(DecompilerBase):
             # conditional-jump instructions.  Between each pair of jumps the
             # only instructions allowed are pure expression builders.
             # -----------------------------------------------------------
-            group: list = []   # list of (jump_instr_idx, jump_instr, expr_instrs_before_it)
-            start_i = i
-            # Scan backwards from the first jump to find the start of the
-            # first clause's expression (stop at any non-_COMPOUND_EXPR_OPS instruction,
-            # including a previous jump, RESUME, STORE, etc.).
-            first_expr_start = i
-            scan_back = i - 1
-            while scan_back >= 0:
-                bop = instrs[scan_back].opname
-                if bop in _COMPOUND_SKIP:
-                    scan_back -= 1
-                    continue
-                if bop in _COMPOUND_EXPR_OPS:
-                    first_expr_start = scan_back
-                    scan_back -= 1
-                else:
-                    break  # hit a non-expression instruction
-
-            prev_jump_end_idx = first_expr_start
-
-            j = i
-            while j < n:
-                jinstr = instrs[j]
-                is_cjump = self._is_compound_cjump(jinstr.opname)
-                if jinstr.opname in _COMPOUND_SKIP:
-                    j += 1
-                    continue
-                if is_cjump and jinstr.offset not in ternary_offsets:
-                    # Collect expression instructions since the previous jump
-                    expr_instrs = [
-                        instrs[k] for k in range(prev_jump_end_idx, j)
-                        if instrs[k].opname not in _COMPOUND_SKIP
-                    ]
-                    # All of them must be pure expression builders
-                    if not all(op.opname in _COMPOUND_EXPR_OPS for op in expr_instrs):
-                        break  # not a clean chain
-                    # Start offset of this clause's expression
-                    expr_start_off = expr_instrs[0].offset if expr_instrs else jinstr.offset
-                    group.append((j, jinstr, expr_instrs, expr_start_off))
-                    prev_jump_end_idx = j + 1
-                    j += 1
-                    continue
-                if jinstr.opname in _COMPOUND_EXPR_OPS:
-                    j += 1
-                    continue
-                break  # something else → end of group
+            group = self._gather_compound_group(i, ternary_offsets)
 
             def get_logical_t(t_val):
-                curr = t_val
-                visited = set()
-                while curr not in visited:
-                    visited.add(curr)
-                    idx = offset_to_idx.get(curr)
-                    if idx is None:
-                        break
-                    ins = instrs[idx]
-                    if ins.opname in getattr(self, "_GENERIC_SKIP_OPS", ("NOP", "RESUME", "CACHE")):
-                        curr = instrs[idx+1].offset
-                        continue
-                    if curr in canonical_return:
-                        return canonical_return[curr]
-                    if ins.opname == "POP_TOP":
-                        look = idx + 1
-                        while look < len(instrs) and instrs[look].opname in getattr(self, "_GENERIC_SKIP_OPS", ("NOP", "RESUME", "CACHE")):
-                            look += 1
-                        if look < len(instrs) and instrs[look].opname in ("JUMP_FORWARD", "JUMP_ABSOLUTE"):
-                            curr = self._get_jump_target(instrs[look])
-                            continue
-                    break
-                return curr
+                return self._logical_target(t_val, offset_to_idx, canonical_return)
 
-            valid = False
-            while len(group) >= 2:
-                last_jump_idx = group[-1][0]
-                body_target = -1
-                for k in range(last_jump_idx + 1, n):
-                    if instrs[k].opname not in _COMPOUND_SKIP:
-                        body_target = get_logical_t(instrs[k].offset)
-                        break
-                end_target = get_logical_t(self._get_jump_target(group[-1][1]))
-                jump_starts = {get_logical_t(g[3]) for g in group}
-
-                valid = True
-                for (_, jinstr, _, _) in group:
-                    t = get_logical_t(self._get_jump_target(jinstr))
-                    if t == body_target:
-                        pass
-                    elif t == end_target or t in jump_starts:
-                        pass
-                    else:
-                        valid = False
-                        break
-                if valid:
-                    break
-                else:
-                    group.pop()
+            valid, body_target, end_target = self._trim_compound_group(group, get_logical_t)
 
             if not valid or len(group) < 2:
                 i += 1
@@ -2336,123 +2257,8 @@ class DecompilerGeneric(DecompilerBase):
             # -----------------------------------------------------------
             # Build the combined condition string.
             # -----------------------------------------------------------
-            parts: list = []  # list of (cond_str, is_or_connector, next_t)
-
-            sub = _pick_decompiler_class(self)(self.code_obj, self.indent_level, self.beautification_level, target_version=self.target_version)
-            self._share_diagnostics_with(sub)
-
-            for _, jinstr, expr_instrs, _ in group:
-                for xi in expr_instrs:
-                    sub._handle_instruction(xi)
-                raw_expr = str(sub.stack.pop()) if sub.stack else str(sub._unknown("condition left no value on the stack"))
-
-                t = get_logical_t(self._get_jump_target(jinstr))
-                op = jinstr.opname
-                is_success_type = "IF_TRUE" in op
-
-                if t == body_target:
-                    is_or_jump = True
-                elif t == end_target:
-                    is_or_jump = False
-                else:
-                    is_or_jump = is_success_type
-
-                if "IF_NONE" in op and "NOT" not in op:
-                    cond_str = f"{raw_expr} is None" if is_or_jump else f"{raw_expr} is not None"
-                elif "IF_NOT_NONE" in op:
-                    cond_str = f"{raw_expr} is not None" if is_or_jump else f"{raw_expr} is None"
-                elif "IF_TRUE" in op:
-                    cond_str = raw_expr if is_or_jump else f"not {raw_expr}"
-                else:
-                    cond_str = f"not {raw_expr}" if is_or_jump else raw_expr
-
-                parts.append((cond_str, is_or_jump, t))
-
-            # Assemble with precedence and parentheses.
-            # -------------------------------------------
-            # Precedence: and > or.
-            # We use a recursive builder that identifies subgroups based
-            # on jump targets. A jump that targets a point before the current
-            # "final exit" defines the boundary of a local subgroup.
-
-            def join_flat(s_idx, e_idx):
-                """Linearly joins parts[s_idx:e_idx] without recursion."""
-                comb = parts[s_idx][0]
-                h_or = False
-                for k in range(s_idx + 1, e_idx):
-                    c = "or" if parts[k-1][1] else "and"
-                    if c == "and" and h_or:
-                        comb = f"({comb})"
-                        h_or = False
-
-                    next_term = parts[k][0]
-                    chained = None
-                    if c == "and":
-                        chained = collapse_chained_comparisons(comb, next_term, self.beautification_level)
-                    if chained:
-                        comb = chained
-                    else:
-                        comb = f"{comb} {c} {next_term}"
-
-                    h_or = h_or or (c == "or")
-                return comb, parts[e_idx-1][1], h_or
-
-            def assemble(start_idx, end_idx, context_exit):
-                """Assemble parts[start_idx:end_idx]. Returns (expr, next_conn_is_or, has_top_level_or)."""
-                if start_idx + 1 == end_idx:
-                    return parts[start_idx][0], parts[start_idx][1], False
-
-                subs: list = []  # list of (expr, unit_is_or, has_or)
-                i = start_idx
-                while i < end_idx:
-                    curr_expr, curr_is_or, curr_target = parts[i]
-                    j = i + 1
-
-                    if curr_target < context_exit:
-                        # Deeper nesting detected.
-                        while j < end_idx and group[j][3] < curr_target:
-                            j += 1
-                        sub_expr, sub_is_or, sub_has_or = assemble(i, j, curr_target)
-                        if sub_has_or:
-                            sub_expr = f"({sub_expr})"
-                            sub_has_or = False
-                        subs.append((sub_expr, sub_is_or, sub_has_or))
-                    else:
-                        # Shared-target grouping (non-recursive).
-                        while j < end_idx and parts[j][2] == curr_target:
-                            j += 1
-                        if j > i + 1:
-                            subs.append(join_flat(i, j))
-                        else:
-                            subs.append((curr_expr, curr_is_or, False))
-                    i = j
-
-                combined = subs[0][0]
-                has_or = subs[0][2]
-
-                for k in range(1, len(subs)):
-                    next_expr, next_is_or, next_has_or = subs[k]
-                    conn = "or" if subs[k-1][1] else "and"
-
-                    if conn == "and" and has_or:
-                        combined = f"({combined})"
-                        has_or = False
-
-                    if conn == "and" and next_has_or:
-                        next_expr = f"({next_expr})"
-
-                    chained = None
-                    if conn == "and" and not has_or and not next_has_or:
-                        chained = collapse_chained_comparisons(combined, next_expr, self.beautification_level)
-                    if chained:
-                        combined = chained
-                    else:
-                        combined = f"{combined} {conn} {next_expr}"
-                    has_or = has_or or (conn == "or") or next_has_or
-
-                return combined, subs[-1][1], has_or
-
-            combined, _, _ = assemble(0, len(parts), end_target)
+            parts = self._compound_parts(group, get_logical_t, body_target, end_target)
+            combined, _, _ = self._assemble_compound(parts, group, 0, len(parts), end_target)
 
             # Register: controlling jump gets combined cond; all others are suppressed.
             # -----------------------------------------------------------
@@ -2463,6 +2269,244 @@ class DecompilerGeneric(DecompilerBase):
                 self.prescan.compound_suppress.add(ginstr.offset)
 
             i = controlling_idx + 1
+
+    def _canonical_return_blocks(self) -> dict:
+        """Offset of each small exit block (`return <const>`) -> the first block that is the same return."""
+        instrs = self.instructions
+        n = len(instrs)
+        first_return_block: dict = {}
+        canonical_return: dict = {}
+        for k, ins_k in enumerate(instrs):
+            if ins_k.opname == "RETURN_CONST":
+                key = ("RETURN_CONST", type(ins_k.argval), repr(ins_k.argval))
+            elif (ins_k.opname == "LOAD_CONST" and k + 1 < n
+                    and instrs[k + 1].opname == "RETURN_VALUE"):
+                key = ("LOAD_CONST+RETURN_VALUE", type(ins_k.argval), repr(ins_k.argval))
+            else:
+                continue
+            canonical_return[ins_k.offset] = first_return_block.setdefault(key, ins_k.offset)
+        return canonical_return
+
+    def _gather_compound_group(self, i: int, ternary_offsets: set) -> list:
+        """The run of conditional jumps that starts at index *i*: ``(jump index, jump, clause instructions, clause start)``."""
+        instrs = self.instructions
+        n = len(instrs)
+        group: list = []   # list of (jump_instr_idx, jump_instr, expr_instrs_before_it)
+        start_i = i
+        # Scan backwards from the first jump to find the start of the
+        # first clause's expression (stop at any non-_COMPOUND_EXPR_OPS instruction,
+        # including a previous jump, RESUME, STORE, etc.).
+        first_expr_start = i
+        scan_back = i - 1
+        while scan_back >= 0:
+            bop = instrs[scan_back].opname
+            if bop in _COMPOUND_SKIP:
+                scan_back -= 1
+                continue
+            if bop in _COMPOUND_EXPR_OPS:
+                first_expr_start = scan_back
+                scan_back -= 1
+            else:
+                break  # hit a non-expression instruction
+
+        prev_jump_end_idx = first_expr_start
+
+        j = i
+        while j < n:
+            jinstr = instrs[j]
+            is_cjump = self._is_compound_cjump(jinstr.opname)
+            if jinstr.opname in _COMPOUND_SKIP:
+                j += 1
+                continue
+            if is_cjump and jinstr.offset not in ternary_offsets:
+                # Collect expression instructions since the previous jump
+                expr_instrs = [
+                    instrs[k] for k in range(prev_jump_end_idx, j)
+                    if instrs[k].opname not in _COMPOUND_SKIP
+                ]
+                # All of them must be pure expression builders
+                if not all(op.opname in _COMPOUND_EXPR_OPS for op in expr_instrs):
+                    break  # not a clean chain
+                # Start offset of this clause's expression
+                expr_start_off = expr_instrs[0].offset if expr_instrs else jinstr.offset
+                group.append((j, jinstr, expr_instrs, expr_start_off))
+                prev_jump_end_idx = j + 1
+                j += 1
+                continue
+            if jinstr.opname in _COMPOUND_EXPR_OPS:
+                j += 1
+                continue
+            break  # something else → end of group
+        return group
+
+    def _logical_target(self, t_val: int, offset_to_idx: Dict[int, int], canonical_return: dict) -> int:
+        """Where control really goes from *t_val*: past no-ops and through jumps, with copies of one exit as one."""
+        instrs = self.instructions
+        curr = t_val
+        visited = set()
+        while curr not in visited:
+            visited.add(curr)
+            idx = offset_to_idx.get(curr)
+            if idx is None:
+                break
+            ins = instrs[idx]
+            if ins.opname in getattr(self, "_GENERIC_SKIP_OPS", ("NOP", "RESUME", "CACHE")):
+                curr = instrs[idx+1].offset
+                continue
+            if curr in canonical_return:
+                return canonical_return[curr]
+            if ins.opname == "POP_TOP":
+                look = idx + 1
+                while look < len(instrs) and instrs[look].opname in getattr(self, "_GENERIC_SKIP_OPS", ("NOP", "RESUME", "CACHE")):
+                    look += 1
+                if look < len(instrs) and instrs[look].opname in ("JUMP_FORWARD", "JUMP_ABSOLUTE"):
+                    curr = self._get_jump_target(instrs[look])
+                    continue
+            break
+        return curr
+
+    def _trim_compound_group(self, group: list, get_logical_t) -> Tuple[bool, int, int]:
+        """Drop jumps from the end of *group* until its targets form one condition: ``(valid, body_target, end_target)``."""
+        instrs = self.instructions
+        n = len(instrs)
+        valid = False
+        body_target = end_target = -1
+        while len(group) >= 2:
+            last_jump_idx = group[-1][0]
+            body_target = -1
+            for k in range(last_jump_idx + 1, n):
+                if instrs[k].opname not in _COMPOUND_SKIP:
+                    body_target = get_logical_t(instrs[k].offset)
+                    break
+            end_target = get_logical_t(self._get_jump_target(group[-1][1]))
+            jump_starts = {get_logical_t(g[3]) for g in group}
+
+            valid = True
+            for (_, jinstr, _, _) in group:
+                t = get_logical_t(self._get_jump_target(jinstr))
+                if t == body_target:
+                    pass
+                elif t == end_target or t in jump_starts:
+                    pass
+                else:
+                    valid = False
+                    break
+            if valid:
+                break
+            group.pop()
+        return valid, body_target, end_target
+
+    def _compound_parts(self, group: list, get_logical_t, body_target: int, end_target: int) -> list:
+        """The text of each clause of a compound condition: ``(text, the jump after it is an or, its target)``."""
+        parts: list = []  # list of (cond_str, is_or_connector, next_t)
+
+        sub = _pick_decompiler_class(self)(self.code_obj, self.indent_level, self.beautification_level, target_version=self.target_version)
+        self._share_diagnostics_with(sub)
+
+        for _, jinstr, expr_instrs, _ in group:
+            for xi in expr_instrs:
+                sub._handle_instruction(xi)
+            raw_expr = str(sub.stack.pop()) if sub.stack else str(sub._unknown("condition left no value on the stack"))
+
+            t = get_logical_t(self._get_jump_target(jinstr))
+            op = jinstr.opname
+            is_success_type = "IF_TRUE" in op
+
+            if t == body_target:
+                is_or_jump = True
+            elif t == end_target:
+                is_or_jump = False
+            else:
+                is_or_jump = is_success_type
+
+            if "IF_NONE" in op and "NOT" not in op:
+                cond_str = f"{raw_expr} is None" if is_or_jump else f"{raw_expr} is not None"
+            elif "IF_NOT_NONE" in op:
+                cond_str = f"{raw_expr} is not None" if is_or_jump else f"{raw_expr} is None"
+            elif "IF_TRUE" in op:
+                cond_str = raw_expr if is_or_jump else f"not {raw_expr}"
+            else:
+                cond_str = f"not {raw_expr}" if is_or_jump else raw_expr
+
+            parts.append((cond_str, is_or_jump, t))
+        return parts
+
+    def _join_flat(self, parts: list, s_idx: int, e_idx: int) -> tuple:
+        """Linearly joins parts[s_idx:e_idx] without recursion."""
+        comb = parts[s_idx][0]
+        h_or = False
+        for k in range(s_idx + 1, e_idx):
+            c = "or" if parts[k-1][1] else "and"
+            if c == "and" and h_or:
+                comb = f"({comb})"
+                h_or = False
+
+            next_term = parts[k][0]
+            chained = None
+            if c == "and":
+                chained = collapse_chained_comparisons(comb, next_term, self.beautification_level)
+            if chained:
+                comb = chained
+            else:
+                comb = f"{comb} {c} {next_term}"
+
+            h_or = h_or or (c == "or")
+        return comb, parts[e_idx-1][1], h_or
+
+    def _assemble_compound(self, parts: list, group: list, start_idx: int, end_idx: int, context_exit: int) -> tuple:
+        """Assemble parts[start_idx:end_idx]. Returns (expr, next_conn_is_or, has_top_level_or)."""
+        if start_idx + 1 == end_idx:
+            return parts[start_idx][0], parts[start_idx][1], False
+
+        subs: list = []  # list of (expr, unit_is_or, has_or)
+        i = start_idx
+        while i < end_idx:
+            curr_expr, curr_is_or, curr_target = parts[i]
+            j = i + 1
+
+            if curr_target < context_exit:
+                # Deeper nesting detected.
+                while j < end_idx and group[j][3] < curr_target:
+                    j += 1
+                sub_expr, sub_is_or, sub_has_or = self._assemble_compound(parts, group, i, j, curr_target)
+                if sub_has_or:
+                    sub_expr = f"({sub_expr})"
+                    sub_has_or = False
+                subs.append((sub_expr, sub_is_or, sub_has_or))
+            else:
+                # Shared-target grouping (non-recursive).
+                while j < end_idx and parts[j][2] == curr_target:
+                    j += 1
+                if j > i + 1:
+                    subs.append(self._join_flat(parts, i, j))
+                else:
+                    subs.append((curr_expr, curr_is_or, False))
+            i = j
+
+        combined = subs[0][0]
+        has_or = subs[0][2]
+
+        for k in range(1, len(subs)):
+            next_expr, next_is_or, next_has_or = subs[k]
+            conn = "or" if subs[k-1][1] else "and"
+
+            if conn == "and" and has_or:
+                combined = f"({combined})"
+                has_or = False
+
+            if conn == "and" and next_has_or:
+                next_expr = f"({next_expr})"
+
+            chained = None
+            if conn == "and" and not has_or and not next_has_or:
+                chained = collapse_chained_comparisons(combined, next_expr, self.beautification_level)
+            if chained:
+                combined = chained
+            else:
+                combined = f"{combined} {conn} {next_expr}"
+            has_or = has_or or (conn == "or") or next_has_or
+
+        return combined, subs[-1][1], has_or
 
     def _last_inverted_clause(self, jump_offset: int, loop_end: int) -> int:
         """
@@ -3369,163 +3413,174 @@ class DecompilerGeneric(DecompilerBase):
                       "PRECALL", "PUSH_NULL", "TO_BOOL",
                       "RETURN_CONST", "RETURN_VALUE"):
                 continue
-            if op == "LOAD_FAST_BORROW_LOAD_FAST_BORROW":
-                if isinstance(ins.argval, (tuple, list)) and len(ins.argval) >= 2:
-                    mini_stack.append(str(ins.argval[0]))
-                    mini_stack.append(str(ins.argval[1]))
-                continue
-            if op in ("LOAD_FAST", "LOAD_NAME", "LOAD_GLOBAL",
-                      "LOAD_SMALL_INT", "LOAD_FAST_BORROW",
-                      "LOAD_CONST_BORROW", "LOAD_DEREF",
-                      "LOAD_GLOBAL_MODULE", "LOAD_CONST"):
-                val = ins.argval
-                if val is None and op == "LOAD_SMALL_INT":
-                    val = ins.arg
-                if op == "LOAD_GLOBAL_MODULE" and isinstance(val, (list, tuple)) and val:
-                    val = val[0]
-                if "CONST" in op or "SMALL_INT" in op:
-                    mini_stack.append(self._format_val(val))
-                else:
-                    mini_stack.append(str(val))
-            elif op == "CONVERT_VALUE":
-                val = mini_stack.pop() if mini_stack else "{expr}"
-                mini_stack.append(_ConvertedValue(str(val), self._FSTRING_CONVERSIONS.get(int(ins.arg or 0), "")))
-            elif op in ("FORMAT_VALUE", "FORMAT_SIMPLE", "FORMAT_WITH_SPEC", "BUILD_STRING", "BUILD_CONST_KEY_MAP", "BUILD_MAP"):
-                if op in ("FORMAT_VALUE", "FORMAT_SIMPLE", "FORMAT_WITH_SPEC"):
-                    flags = int(ins.arg) if ins.arg is not None else 0
-                    conversion = self._FSTRING_CONVERSIONS.get(flags & 0x03, "") if op == "FORMAT_VALUE" else ""
-                    spec = mini_stack.pop() if mini_stack and (op == "FORMAT_WITH_SPEC" or (op == "FORMAT_VALUE" and flags & 0x04)) else None
-                    val = mini_stack.pop() if mini_stack else "{expr}"
-                    if isinstance(val, _ConvertedValue):
-                        conversion = val.conversion
-                    mini_stack.append(self._make_fstring_field(val, conversion, spec))
-                elif op == "BUILD_STRING":
-                    count = int(ins.arg) if ins.arg is not None else 0
-                    parts = []
-                    for _ in range(count):
-                        if mini_stack:
-                            p_val = mini_stack.pop()
-                            p = p_val.piece if isinstance(p_val, _FStringField) else self._format_fstring_part(str(p_val))
-                            parts.insert(0, p)
-                    res = "".join(parts)
-                    mini_stack.append(_FString(f'f"{res}"', res))
-                elif op in ("BUILD_MAP", "BUILD_CONST_KEY_MAP"):
-                    count = int(ins.arg) if ins.arg is not None else 0
-                    pop_cnt = (count * 2) if op == "BUILD_MAP" else (count + 1)
-                    for _ in range(pop_cnt):
-                        if mini_stack: mini_stack.pop()
-                    mini_stack.append("{}") # Placeholder for dict
-            elif op in ("GET_ATTR", "LOAD_ATTR", "LOAD_METHOD"):
-                if self._has_operands(mini_stack, 1, ins):
-                    obj = mini_stack.pop()
-                    obj_str = self._wrap_negative_literal(obj)
-                    mini_stack.append(f"{obj_str}.{ins.argval}")
-            elif op in ("CALL", "CALL_FUNCTION", "CALL_METHOD"):
-                num = int(ins.arg) if ins.arg is not None else 0
-                args = []
-                for _ in range(num):
-                    args.insert(0, mini_stack.pop() if mini_stack else self._missing_operand("call argument missing", ins))
-                func = mini_stack.pop() if mini_stack else self._missing_operand("callee missing", ins)
-                if " + NULL" in str(func) or "|NULL" in str(func):
-                    func = str(func).split(" + ")[0].split("|")[0]
-                mini_stack.append(f"{func}({', '.join(args)})")
-            elif op == "COMPARE_OP":
-                if self._has_operands(mini_stack, 2, ins):
-                    right, left = mini_stack.pop(), mini_stack.pop()
-                    op_sym = str(ins.argval)
-                    m = re.search(r"\(([^)]+)\)", op_sym)
-                    if m:
-                        op_sym = m.group(1)
-                    mini_stack.append(f"{left} {op_sym} {right}")
-            elif op == "BINARY_OP":
-                if self._has_operands(mini_stack, 2, ins):
-                    right, left = mini_stack.pop(), mini_stack.pop()
-                    op_map = {0: "+", 1: "&", 2: "//", 3: "<<", 4: "@", 5: "*",
-                              6: "%", 7: "|", 8: "**", 9: ">>", 10: "-", 11: "/", 12: "^",
-                              26: "[]"}
-                    sym = op_map.get(int(ins.arg) if ins.arg is not None else -1)
-                    if sym is None:
-                        sym = self._unmapped_operator(f"unknown binary operator ({ins.arg})", ins)
-                    if sym == "[]":
-                        mini_stack.append(f"{left}[{right}]")
-                    else:
-                        mini_stack.append(f"({left} {sym} {right})")
-            elif op in ("IS_OP",):
-                if self._has_operands(mini_stack, 2, ins):
-                    right, left = mini_stack.pop(), mini_stack.pop()
-                    sym = "is not" if bool(ins.arg) else "is"
-                    mini_stack.append(f"{left} {sym} {right}")
-            elif op in ("CONTAINS_OP",):
-                if self._has_operands(mini_stack, 2, ins):
-                    container, item = mini_stack.pop(), mini_stack.pop()
-                    sym = "not in" if bool(ins.arg) else "in"
-                    mini_stack.append(f"{item} {sym} {container}")
-            elif op in _UNARY_SYMBOLS or (
-                    op == "CALL_INTRINSIC_1" and "UNARY_POSITIVE" in str(ins.argrepr)):
-                if self._has_operands(mini_stack, 1, ins):
-                    symbol = _UNARY_SYMBOLS.get(op, "+")
-                    mini_stack.append(f"({symbol}{_unary_operand(mini_stack.pop())})")
-            elif op == "BUILD_SLICE":
-                # Python 3.9: BUILD_SLICE N pops stop,start (and optionally step)
-                argc = ins.arg if ins.arg is not None else 2
-                step = str(mini_stack.pop()) if (argc == 3 and mini_stack) else None
-                stop = str(mini_stack.pop()) if mini_stack else 'None'
-                start = str(mini_stack.pop()) if mini_stack else 'None'
-                s = '' if start == 'None' else start
-                e = '' if stop == 'None' else stop
-                if step is None or step == 'None':
-                    mini_stack.append(f'{s}:{e}')
-                else:
-                    mini_stack.append(f'{s}:{e}:{step}')
-            elif op == "BINARY_SLICE":
-                # Python 3.11+: pops stop, start, container
-                if self._has_operands(mini_stack, 3, ins):
-                    stop, start, container = mini_stack.pop(), mini_stack.pop(), mini_stack.pop()
-                    s = "" if str(start) == "None" else str(start)
-                    e = "" if str(stop) == "None" else str(stop)
-                    mini_stack.append(f"{container}[{s}:{e}]")
-            elif op == "BINARY_SUBSCR":
-                if self._has_operands(mini_stack, 2, ins):
-                    key, obj = mini_stack.pop(), mini_stack.pop()
-                    # If key is a slice-notation string (from BUILD_SLICE), keep it as-is
-                    if isinstance(key, str) and ':' in key and not key.startswith("'"):
-                        mini_stack.append(f"{obj}[{key}]")
-                    else:
-                        mini_stack.append(f"{obj}[{key}]")
-            elif op in (
-                "BINARY_ADD", "BINARY_SUBTRACT", "BINARY_MULTIPLY",
-                "BINARY_TRUE_DIVIDE", "BINARY_FLOOR_DIVIDE", "BINARY_MODULO",
-                "BINARY_POWER", "BINARY_LSHIFT", "BINARY_RSHIFT",
-                "BINARY_AND", "BINARY_OR", "BINARY_XOR", "BINARY_MATRIX_MULTIPLY",
-            ):
-                # Python 3.9 named binary opcodes
-                _bin_map = {
-                    "BINARY_ADD": "+", "BINARY_SUBTRACT": "-",
-                    "BINARY_MULTIPLY": "*", "BINARY_TRUE_DIVIDE": "/",
-                    "BINARY_FLOOR_DIVIDE": "//", "BINARY_MODULO": "%",
-                    "BINARY_POWER": "**", "BINARY_LSHIFT": "<<",
-                    "BINARY_RSHIFT": ">>", "BINARY_AND": "&",
-                    "BINARY_OR": "|", "BINARY_XOR": "^",
-                    "BINARY_MATRIX_MULTIPLY": "@",
-                }
-                if self._has_operands(mini_stack, 2, ins):
-                    right, left = mini_stack.pop(), mini_stack.pop()
-                    sym = _bin_map.get(op)
-                    if sym is None:
-                        sym = self._unmapped_operator(f"unknown binary operator ({op})", ins)
-                    l_s = str(left)
-                    r_s = str(right)
-                    # Add parens only when the left operand is a compound expression
-                    # (has spaces and is not already a parenthesised atom or string literal)
-
-                    def _needs_parens(s: str) -> bool:
-                        if not s or s[0] in ("'", '"', "(", "[", "{"):
-                            return False  # string literal or already wrapped
-                        return " " in s and not s.startswith("(") and s.endswith(")")
-                    if _needs_parens(l_s):
-                        l_s = f"({l_s})"
-                    mini_stack.append(f"{l_s} {sym} {r_s}")
+            self._eval_branch_op(ins, mini_stack)
         return str(mini_stack[-1]) if mini_stack else self._unknown("expression left no value on the stack")
+
+    def _eval_branch_op(self, ins, mini_stack: list) -> None:
+        """Apply one instruction of a ternary branch to the mini stack of rendered operands."""
+        op = ins.opname
+        if op == "LOAD_FAST_BORROW_LOAD_FAST_BORROW":
+            if isinstance(ins.argval, (tuple, list)) and len(ins.argval) >= 2:
+                mini_stack.append(str(ins.argval[0]))
+                mini_stack.append(str(ins.argval[1]))
+            return
+        if op in ("LOAD_FAST", "LOAD_NAME", "LOAD_GLOBAL",
+                  "LOAD_SMALL_INT", "LOAD_FAST_BORROW",
+                  "LOAD_CONST_BORROW", "LOAD_DEREF",
+                  "LOAD_GLOBAL_MODULE", "LOAD_CONST"):
+            val = ins.argval
+            if val is None and op == "LOAD_SMALL_INT":
+                val = ins.arg
+            if op == "LOAD_GLOBAL_MODULE" and isinstance(val, (list, tuple)) and val:
+                val = val[0]
+            if "CONST" in op or "SMALL_INT" in op:
+                mini_stack.append(self._format_val(val))
+            else:
+                mini_stack.append(str(val))
+        elif op in ("CONVERT_VALUE", "FORMAT_VALUE", "FORMAT_SIMPLE", "FORMAT_WITH_SPEC", "BUILD_STRING", "BUILD_CONST_KEY_MAP", "BUILD_MAP"):
+            self._eval_branch_format_op(ins, mini_stack)
+        elif op in ("GET_ATTR", "LOAD_ATTR", "LOAD_METHOD"):
+            if self._has_operands(mini_stack, 1, ins):
+                obj = mini_stack.pop()
+                obj_str = self._wrap_negative_literal(obj)
+                mini_stack.append(f"{obj_str}.{ins.argval}")
+        elif op in ("CALL", "CALL_FUNCTION", "CALL_METHOD"):
+            num = int(ins.arg) if ins.arg is not None else 0
+            args = []
+            for _ in range(num):
+                args.insert(0, mini_stack.pop() if mini_stack else self._missing_operand("call argument missing", ins))
+            func = mini_stack.pop() if mini_stack else self._missing_operand("callee missing", ins)
+            if " + NULL" in str(func) or "|NULL" in str(func):
+                func = str(func).split(" + ", maxsplit=1)[0].split("|")[0]
+            mini_stack.append(f"{func}({', '.join(args)})")
+        elif op == "COMPARE_OP":
+            if self._has_operands(mini_stack, 2, ins):
+                right, left = mini_stack.pop(), mini_stack.pop()
+                op_sym = str(ins.argval)
+                m = re.search(r"\(([^)]+)\)", op_sym)
+                if m:
+                    op_sym = m.group(1)
+                mini_stack.append(f"{left} {op_sym} {right}")
+        elif op == "BINARY_OP":
+            if self._has_operands(mini_stack, 2, ins):
+                right, left = mini_stack.pop(), mini_stack.pop()
+                op_map = {0: "+", 1: "&", 2: "//", 3: "<<", 4: "@", 5: "*",
+                          6: "%", 7: "|", 8: "**", 9: ">>", 10: "-", 11: "/", 12: "^",
+                          26: "[]"}
+                sym = op_map.get(int(ins.arg) if ins.arg is not None else -1)
+                if sym is None:
+                    sym = self._unmapped_operator(f"unknown binary operator ({ins.arg})", ins)
+                if sym == "[]":
+                    mini_stack.append(f"{left}[{right}]")
+                else:
+                    mini_stack.append(f"({left} {sym} {right})")
+        elif op in ("IS_OP",):
+            if self._has_operands(mini_stack, 2, ins):
+                right, left = mini_stack.pop(), mini_stack.pop()
+                sym = "is not" if bool(ins.arg) else "is"
+                mini_stack.append(f"{left} {sym} {right}")
+        elif op in ("CONTAINS_OP",):
+            if self._has_operands(mini_stack, 2, ins):
+                container, item = mini_stack.pop(), mini_stack.pop()
+                sym = "not in" if bool(ins.arg) else "in"
+                mini_stack.append(f"{item} {sym} {container}")
+        elif op in _UNARY_SYMBOLS or (
+                op == "CALL_INTRINSIC_1" and "UNARY_POSITIVE" in str(ins.argrepr)):
+            if self._has_operands(mini_stack, 1, ins):
+                symbol = _UNARY_SYMBOLS.get(op, "+")
+                mini_stack.append(f"({symbol}{_unary_operand(mini_stack.pop())})")
+        elif op == "BUILD_SLICE":
+            # Python 3.9: BUILD_SLICE N pops stop,start (and optionally step)
+            argc = ins.arg if ins.arg is not None else 2
+            step = str(mini_stack.pop()) if (argc == 3 and mini_stack) else None
+            stop = str(mini_stack.pop()) if mini_stack else 'None'
+            start = str(mini_stack.pop()) if mini_stack else 'None'
+            s = '' if start == 'None' else start
+            e = '' if stop == 'None' else stop
+            if step is None or step == 'None':
+                mini_stack.append(f'{s}:{e}')
+            else:
+                mini_stack.append(f'{s}:{e}:{step}')
+        elif op == "BINARY_SLICE":
+            # Python 3.11+: pops stop, start, container
+            if self._has_operands(mini_stack, 3, ins):
+                stop, start, container = mini_stack.pop(), mini_stack.pop(), mini_stack.pop()
+                s = "" if str(start) == "None" else str(start)
+                e = "" if str(stop) == "None" else str(stop)
+                mini_stack.append(f"{container}[{s}:{e}]")
+        elif op == "BINARY_SUBSCR":
+            if self._has_operands(mini_stack, 2, ins):
+                key, obj = mini_stack.pop(), mini_stack.pop()
+                # If key is a slice-notation string (from BUILD_SLICE), keep it as-is
+                if isinstance(key, str) and ':' in key and not key.startswith("'"):
+                    mini_stack.append(f"{obj}[{key}]")
+                else:
+                    mini_stack.append(f"{obj}[{key}]")
+        elif op in (
+            "BINARY_ADD", "BINARY_SUBTRACT", "BINARY_MULTIPLY",
+            "BINARY_TRUE_DIVIDE", "BINARY_FLOOR_DIVIDE", "BINARY_MODULO",
+            "BINARY_POWER", "BINARY_LSHIFT", "BINARY_RSHIFT",
+            "BINARY_AND", "BINARY_OR", "BINARY_XOR", "BINARY_MATRIX_MULTIPLY",
+        ):
+            # Python 3.9 named binary opcodes
+            _bin_map = {
+                "BINARY_ADD": "+", "BINARY_SUBTRACT": "-",
+                "BINARY_MULTIPLY": "*", "BINARY_TRUE_DIVIDE": "/",
+                "BINARY_FLOOR_DIVIDE": "//", "BINARY_MODULO": "%",
+                "BINARY_POWER": "**", "BINARY_LSHIFT": "<<",
+                "BINARY_RSHIFT": ">>", "BINARY_AND": "&",
+                "BINARY_OR": "|", "BINARY_XOR": "^",
+                "BINARY_MATRIX_MULTIPLY": "@",
+            }
+            if self._has_operands(mini_stack, 2, ins):
+                right, left = mini_stack.pop(), mini_stack.pop()
+                sym = _bin_map.get(op)
+                if sym is None:
+                    sym = self._unmapped_operator(f"unknown binary operator ({op})", ins)
+                l_s = str(left)
+                r_s = str(right)
+                # Add parens only when the left operand is a compound expression
+                # (has spaces and is not already a parenthesised atom or string literal)
+
+                def _needs_parens(s: str) -> bool:
+                    if not s or s[0] in ("'", '"', "(", "[", "{"):
+                        return False  # string literal or already wrapped
+                    return " " in s and not s.startswith("(") and s.endswith(")")
+                if _needs_parens(l_s):
+                    l_s = f"({l_s})"
+                mini_stack.append(f"{l_s} {sym} {r_s}")
+
+    def _eval_branch_format_op(self, ins, mini_stack: list) -> None:
+        """The f-string and container-building instructions of a ternary branch."""
+        op = ins.opname
+        if op == "CONVERT_VALUE":
+            val = mini_stack.pop() if mini_stack else "{expr}"
+            mini_stack.append(_ConvertedValue(str(val), self._FSTRING_CONVERSIONS.get(int(ins.arg or 0), "")))
+        elif op in ("FORMAT_VALUE", "FORMAT_SIMPLE", "FORMAT_WITH_SPEC", "BUILD_STRING", "BUILD_CONST_KEY_MAP", "BUILD_MAP"):
+            if op in ("FORMAT_VALUE", "FORMAT_SIMPLE", "FORMAT_WITH_SPEC"):
+                flags = int(ins.arg) if ins.arg is not None else 0
+                conversion = self._FSTRING_CONVERSIONS.get(flags & 0x03, "") if op == "FORMAT_VALUE" else ""
+                spec = mini_stack.pop() if mini_stack and (op == "FORMAT_WITH_SPEC" or (op == "FORMAT_VALUE" and flags & 0x04)) else None
+                val = mini_stack.pop() if mini_stack else "{expr}"
+                if isinstance(val, _ConvertedValue):
+                    conversion = val.conversion
+                mini_stack.append(self._make_fstring_field(val, conversion, spec))
+            elif op == "BUILD_STRING":
+                count = int(ins.arg) if ins.arg is not None else 0
+                parts = []
+                for _ in range(count):
+                    if mini_stack:
+                        p_val = mini_stack.pop()
+                        p = p_val.piece if isinstance(p_val, _FStringField) else self._format_fstring_part(str(p_val))
+                        parts.insert(0, p)
+                res = "".join(parts)
+                mini_stack.append(_FString(f'f"{res}"', res))
+            elif op in ("BUILD_MAP", "BUILD_CONST_KEY_MAP"):
+                count = int(ins.arg) if ins.arg is not None else 0
+                pop_cnt = (count * 2) if op == "BUILD_MAP" else (count + 1)
+                for _ in range(pop_cnt):
+                    if mini_stack: mini_stack.pop()
+                mini_stack.append("{}") # Placeholder for dict
 
     def _has_conditional_jump(self) -> bool:
         """Return True if any POP_JUMP_IF_FALSE/TRUE exists anywhere."""
@@ -3613,74 +3668,7 @@ class DecompilerGeneric(DecompilerBase):
                 # conditional jump in its body is an `if`, even one that lands right after
                 # the back-edge (`if c: return x` as the last statement).
                 continue
-            guard_offset = -1
-            guard_dist = float('inf')   # distance from body_start
-            for ins in self.instructions:
-                if ins is jb:
-                    continue
-                if head_is_nop and ins.offset > body_start:
-                    continue
-                # A guard after the loop head is the head's own condition only
-                # if nothing but condition-evaluating code precedes it. A plain
-                # store in between (not a walrus) is a body statement, which
-                # makes this conditional an `if` inside the body.
-                if (not head_is_for and ins.offset > body_start
-                        and self._has_body_store_between(body_start, ins.offset)):
-                    continue
-                # (3.11 spells the conditional jumps POP_JUMP_FORWARD_IF_* / POP_JUMP_BACKWARD_IF_*)
-                if not ("JUMP_IF_FALSE" in ins.opname
-                        or "JUMP_IF_TRUE" in ins.opname
-                        or ins.opname.startswith("POP_JUMP") and "_IF_" in ins.opname):
-                    continue
-                # Must be within the loop (not after jb)
-                if ins.offset > jb.offset:
-                    continue
-                # Compute absolute target robustly
-                t_argval = self._get_jump_target(ins)
-                if t_argval >= 0:
-                    t = t_argval
-                else:
-                    arg = ins.arg if ins.arg is not None else 0
-                    # Fallback for unresolved target (e.g. 3.14+ relative jumps)
-                    t = ins.offset + 2 + (arg * 2)
-
-                # Target must exit the loop: land strictly beyond the
-                # back-edge. A jump that lands ON the back-edge itself is an
-                # `if` whose false branch skips to the loop head (e.g.
-                # `while True: ...; if x: break`), not the loop's guard.
-                inverted = self._is_inverted_guard(ins, t, body_start)
-                # 3.9 and 3.14 test the condition at the head of the loop, so its guard
-                # never lies above `body_start`: a conditional jump there belongs to an
-                # enclosing `if`, as in `if a: while b: ...` (the `if` jump is the closest).
-                if (ins.offset < body_start and not inverted
-                        and (self.target_version < (3, 10) or self.target_version >= (3, 14))):
-                    continue
-                if t <= jb.offset and not inverted and not (
-                        exit_block is not None and t == exit_block[0]) and not (
-                        ins.offset > body_start and (
-                            self._falls_to_outer_back_jump(ins, body_start)
-                            or t < body_start)):  # 3.9/3.10: exit jumps straight to an outer head
-                    continue
-                # For guards positioned BEFORE body_start: the fall-through
-                # (ins.offset+2) must reach body_start via only trivial
-                # instructions (NOP, NOT_TAKEN, RESUME, CACHE).  If there are
-                # real (store/load/call) instructions between the fall-through
-                # and body_start, this is an outer 'if' guard, not a while-guard.
-                if ins.offset < body_start and not inverted:
-                    fall_through = ins.offset + 2
-                    only_trivial = True
-                    for scan in self.instructions:
-                        if fall_through <= scan.offset < body_start:
-                            if scan.opname not in _WHILE_TRIVIAL_OPS:
-                                only_trivial = False
-                                break
-                    if not only_trivial:
-                        continue  # outer if-guard, skip it
-                # Pick the guard closest to body_start (from either direction)
-                dist = abs(ins.offset - body_start)
-                if dist < guard_dist:
-                    guard_dist = dist
-                    guard_offset = ins.offset
+            guard_offset = self._find_while_guard(jb, body_start, head_is_nop, head_is_for, exit_block)
             if guard_offset > body_start and (self.target_version < (3, 10) or self.target_version >= (3, 14)):
                 # 3.9 and 3.14 test the condition at the loop head: for `while a and b:`
                 # every clause jumps out, and the last one is the guard that opens the body.
@@ -3688,38 +3676,7 @@ class DecompilerGeneric(DecompilerBase):
                 if self.target_version >= (3, 14):
                     guard_offset = self._last_inverted_clause(guard_offset, jb.offset)
             if guard_offset >= 0:
-                self.prescan.while_header_targets[body_start] = guard_offset
-                guard = next(i for i in self.instructions if i.offset == guard_offset)
-                late_guard = (self.target_version >= (3, 14) and guard_offset > body_start
-                              and self._exit_pair_jump(self.instructions.index(guard)) is not None)
-                if late_guard:
-                    self.prescan.inverted_guards[guard_offset] = body_start
-                if self._is_inverted_guard(guard, self._get_jump_target(guard), body_start):
-                    # (the jump that follows it only leaves the loop: the enclosing loop goes on)
-                    self.prescan.loop_exit_jumps.add(self.instructions[self.instructions.index(guard) + 1].offset)
-                    self.prescan.inverted_guards[guard_offset] = body_start
-                # 3.12/3.13 copy the loop condition to the bottom of the body.
-                # Suppress exactly that copy's exit jumps, never body-level ifs.
-                after_loop = self.instructions[jb_idx + 1].offset
-                if exit_block is None and self.target_version >= (3, 14):
-                    before_handlers = self._exit_block_before_handlers(guard_offset)
-                    if before_handlers is not None:
-                        exit_block, after_loop = before_handlers[:2], before_handlers[2]
-                if exit_block is not None:
-                    # The `return` the guard jumps to sits inside the loop's range; it is the
-                    # code after the loop, so emit it there rather than in the try body.
-                    self.prescan.relocated_suppress.update(exit_block[1])
-                    self.prescan.relocated_exits[after_loop] = exit_block[1]
-                    if next(i for i in self.instructions if i.offset == after_loop).opname.startswith("JUMP_BACKWARD"):
-                        self.prescan.loop_exit_jumps.add(after_loop)
-                dup_jumps = self._dup_guard_jump_offsets(jb)
-                dup_jumps.discard(guard_offset)
-                self.prescan.while_body_offsets.update(dup_jumps)
-                for ins in self.instructions:
-                    if ins.offset in dup_jumps and self._get_jump_target(ins) > jb.offset:
-                        self.prescan.dup_guard_exits.add(self._get_jump_target(ins))
-                if self._is_conditional_back_jump(jb):
-                    self._mark_implicit_returns_after_loop(jb, guard_offset, dup_jumps)
+                self._register_while_guard(jb_idx, jb, body_start, guard_offset, exit_block)
             else:
                 # while-True pattern: no conventional guard found, but the
                 # back-edge target is a known jump target (loop start).
@@ -3733,6 +3690,116 @@ class DecompilerGeneric(DecompilerBase):
                 if (body_instr and body_instr.is_jump_target
                         and body_instr.opname not in _TRY_LOOP_HEADS):
                     self.prescan.while_header_targets[body_start] = -1
+
+    def _find_while_guard(self, jb, body_start: int, head_is_nop: bool, head_is_for: bool, exit_block) -> int:
+        """The offset of the conditional jump that guards the loop whose back-edge is *jb*, or -1 when it has none."""
+        guard_offset = -1
+        guard_dist = float('inf')   # distance from body_start
+        for ins in self.instructions:
+            if ins is jb:
+                continue
+            if head_is_nop and ins.offset > body_start:
+                continue
+            # A guard after the loop head is the head's own condition only
+            # if nothing but condition-evaluating code precedes it. A plain
+            # store in between (not a walrus) is a body statement, which
+            # makes this conditional an `if` inside the body.
+            if (not head_is_for and ins.offset > body_start
+                    and self._has_body_store_between(body_start, ins.offset)):
+                continue
+            # (3.11 spells the conditional jumps POP_JUMP_FORWARD_IF_* / POP_JUMP_BACKWARD_IF_*)
+            if not ("JUMP_IF_FALSE" in ins.opname
+                    or "JUMP_IF_TRUE" in ins.opname
+                    or ins.opname.startswith("POP_JUMP") and "_IF_" in ins.opname):
+                continue
+            # Must be within the loop (not after jb)
+            if ins.offset > jb.offset:
+                continue
+            # Compute absolute target robustly
+            t_argval = self._get_jump_target(ins)
+            if t_argval >= 0:
+                t = t_argval
+            else:
+                arg = ins.arg if ins.arg is not None else 0
+                # Fallback for unresolved target (e.g. 3.14+ relative jumps)
+                t = ins.offset + 2 + (arg * 2)
+
+            # Target must exit the loop: land strictly beyond the
+            # back-edge. A jump that lands ON the back-edge itself is an
+            # `if` whose false branch skips to the loop head (e.g.
+            # `while True: ...; if x: break`), not the loop's guard.
+            inverted = self._is_inverted_guard(ins, t, body_start)
+            # 3.9 and 3.14 test the condition at the head of the loop, so its guard
+            # never lies above `body_start`: a conditional jump there belongs to an
+            # enclosing `if`, as in `if a: while b: ...` (the `if` jump is the closest).
+            if (ins.offset < body_start and not inverted
+                    and (self.target_version < (3, 10) or self.target_version >= (3, 14))):
+                continue
+            if t <= jb.offset and not inverted and not (
+                    exit_block is not None and t == exit_block[0]) and not (
+                    ins.offset > body_start and (
+                        self._falls_to_outer_back_jump(ins, body_start)
+                        or t < body_start)):  # 3.9/3.10: exit jumps straight to an outer head
+                continue
+            # For guards positioned BEFORE body_start: the fall-through
+            # (ins.offset+2) must reach body_start via only trivial
+            # instructions (NOP, NOT_TAKEN, RESUME, CACHE).  If there are
+            # real (store/load/call) instructions between the fall-through
+            # and body_start, this is an outer 'if' guard, not a while-guard.
+            if ins.offset < body_start and not inverted:
+                fall_through = ins.offset + 2
+                only_trivial = True
+                for scan in self.instructions:
+                    if fall_through <= scan.offset < body_start:
+                        if scan.opname not in _WHILE_TRIVIAL_OPS:
+                            only_trivial = False
+                            break
+                        if scan.opname == "NOP" and (3, 10) <= self.target_version < (3, 14):
+                            only_trivial = False    # the marker of a `while True:` that follows the `if`
+                            break
+                if not only_trivial:
+                    continue  # outer if-guard, skip it
+            # Pick the guard closest to body_start (from either direction)
+            dist = abs(ins.offset - body_start)
+            if dist < guard_dist:
+                guard_dist = dist
+                guard_offset = ins.offset
+        return guard_offset
+
+    def _register_while_guard(self, jb_idx: int, jb, body_start: int, guard_offset: int, exit_block) -> None:
+        """Record the loop headed at *body_start* as a `while` with the guard at *guard_offset*, and what its copies and exits suppress."""
+        self.prescan.while_header_targets[body_start] = guard_offset
+        guard = next(i for i in self.instructions if i.offset == guard_offset)
+        late_guard = (self.target_version >= (3, 14) and guard_offset > body_start
+                      and self._exit_pair_jump(self.instructions.index(guard)) is not None)
+        if late_guard:
+            self.prescan.inverted_guards[guard_offset] = body_start
+        if self._is_inverted_guard(guard, self._get_jump_target(guard), body_start):
+            # (the jump that follows it only leaves the loop: the enclosing loop goes on)
+            self.prescan.loop_exit_jumps.add(self.instructions[self.instructions.index(guard) + 1].offset)
+            self.prescan.inverted_guards[guard_offset] = body_start
+        # 3.12/3.13 copy the loop condition to the bottom of the body.
+        # Suppress exactly that copy's exit jumps, never body-level ifs.
+        after_loop = self.instructions[jb_idx + 1].offset
+        if exit_block is None and self.target_version >= (3, 14):
+            before_handlers = self._exit_block_before_handlers(guard_offset)
+            if before_handlers is not None:
+                exit_block, after_loop = before_handlers[:2], before_handlers[2]
+        if exit_block is not None:
+            # The `return` the guard jumps to sits inside the loop's range; it is the
+            # code after the loop, so emit it there rather than in the try body.
+            self.prescan.relocated_suppress.update(exit_block[1])
+            self.prescan.relocated_exits[after_loop] = exit_block[1]
+            if next(i for i in self.instructions if i.offset == after_loop).opname.startswith("JUMP_BACKWARD"):
+                self.prescan.loop_exit_jumps.add(after_loop)
+        dup_jumps = self._dup_guard_jump_offsets(jb)
+        dup_jumps.discard(guard_offset)
+        self.prescan.while_body_offsets.update(dup_jumps)
+        for ins in self.instructions:
+            if ins.offset in dup_jumps and self._get_jump_target(ins) > jb.offset:
+                self.prescan.dup_guard_exits.add(self._get_jump_target(ins))
+        if self._is_conditional_back_jump(jb):
+            self._mark_implicit_returns_after_loop(jb, guard_offset, dup_jumps)
 
     def _return_block_at(self, offset: int) -> Optional[List[int]]:
         """Offsets of the straight-line run of instructions from *offset* through its first `return`, or None."""

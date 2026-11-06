@@ -201,139 +201,152 @@ class Decompiler39(DecompilerGeneric):
                 continue
             target_ins = self.instructions[t_idx]
 
-            # Classify what the SETUP_FINALLY target is:
-            is_except = False
-            # Target is an except-handler entry (typed or bare):
-            if target_ins.opname == "DUP_TOP":
-                is_except = True
-            elif target_ins.opname == "POP_TOP":
-                # Bare-except: three consecutive POP_TOPs
-                if (t_idx + 2 < len(self.instructions)
-                        and self.instructions[t_idx + 1].opname == "POP_TOP"
-                        and self.instructions[t_idx + 2].opname == "POP_TOP"):
-                    is_except = True
-            # Target is the with-block exit handler:
-            elif target_ins.opname == "WITH_EXCEPT_START":
-                is_except = True
-            # Target is an exception-handler cleanup entry (3.9 'as e' cleanup):
-            elif target_ins.opname == "POP_EXCEPT":
-                is_except = True
-            # Target is a tiny 'as e' cleanup block (LOAD_CONST None; STORE; DELETE; RERAISE):
-            # These are nested SETUP_FINALLY blocks for the 'except X as e:' binding.
-            # Recognise them by: the target is a LOAD_CONST None followed within 3 steps
-            # by a DELETE_* or RERAISE (with no user body in between).
-            elif target_ins.opname == "LOAD_CONST" and target_ins.argval is None:
-                # Scan forward: if we hit DELETE_FAST/DELETE_NAME or RERAISE without
-                # any non-trivial instruction in between, treat as cleanup-only.
-                is_cleanup = False
-                for k in range(t_idx, min(t_idx + _MAX_TERNARY_MINI_SEARCH_WINDOW, len(self.instructions))):
-                    op = self.instructions[k].opname
-                    if op in ("DELETE_FAST", "DELETE_NAME", "DELETE_GLOBAL", "DELETE_DEREF", "RERAISE"):
-                        is_cleanup = True
-                        break
-                    elif op not in ("LOAD_CONST", "STORE_FAST", "STORE_NAME",
-                                    "STORE_GLOBAL", "STORE_DEREF", "POP_BLOCK", "NOP"):
-                        break
-                if is_cleanup:
-                    is_except = True   # treat as cleanup, not a user finally
+            is_except = self._setup_target_is_except(t_idx)
 
             if not is_except:
-                # Potential finally block. In 3.9, a SETUP_FINALLY for a user finally
-                # typically covers the try body, and the target is the exception-path
-                # copy of the finally body WHICH ENDS IN RERAISE.
-                # If we find a RERAISE reachable from here without an intervening SETUP,
-                # then this is definitely a finally block.
-                is_finally = False
-                end_reraise = None
-                level = 0
-                for j in range(t_idx, len(self.instructions)):
-                    jx = self.instructions[j]
-                    if jx.opname in ("SETUP_FINALLY", "SETUP_WITH", "SETUP_EXCEPT"):
-                        level += 1
-                    elif jx.opname == "POP_BLOCK":
-                        level -= 1
-                    elif jx.opname == "RERAISE" and level <= 0:
-                        is_finally = True
-                        end_reraise = jx.offset
-                        break
-
-                if is_finally:
-                    self.prescan.finally_targets.add(target)
-                    # Mark the exception-path copy for suppression
-                    for j in range(t_idx, len(self.instructions)):
-                        self.prescan.finally_body_suppress.add(self.instructions[j].offset)
-                        if self.instructions[j].offset == end_reraise:
-                            break
-                    self._elide_early_finally_copies(i, t_idx, end_reraise)
+                self._mark_user_finally(i, t_idx, target)
 
             if is_except:
-                try_end_idx = next((k for k, x in enumerate(self.instructions) if x.offset == target), -1) - 1
-                if try_end_idx >= 0:
-                    try_jump = self.instructions[try_end_idx]
-                    if try_jump.opname in ("JUMP_FORWARD", "JUMP_ABSOLUTE"):
-                        else_start = getattr(self, "_get_jump_target")(try_jump)
-                        
-                        # Guard: If else_start is the end of a FOR_ITER loop (indicating a `break` out of a loop),
-                        # then it is NOT an else clause.
-                        is_break = else_start in self.prescan.for_iter_targets
-                        
-                        if else_start > target and not is_break:
-                            post_except_targets = []
-                            for k in range(try_end_idx + 1, len(self.instructions)):
-                                if self.instructions[k].offset >= else_start:
-                                    break
+                self._scan_except_clause(target)
 
-                                inner_ins = self.instructions[k]
-                                if inner_ins.opname in ("JUMP_FORWARD", "JUMP_ABSOLUTE"):
-                                    jt = getattr(self, "_get_jump_target")(inner_ins)
-                                    loop_end = self._innermost_while_end(inner_ins.offset)
-                                    if jt > else_start and not (loop_end is not None and jt >= loop_end):
-                                        post_except_targets.append(jt)   # (a `break` out of a `while` skips no else)
-                            if post_except_targets:
-                                else_end = min(post_except_targets)
-                                self.prescan.else_starts[else_start] = else_end
+    def _setup_target_is_except(self, t_idx: int) -> bool:
+        """Whether the SETUP_FINALLY target at *t_idx* is an except clause, a with-exit handler or an `as` clean-up, not a user `finally`."""
+        target_ins = self.instructions[t_idx]
+        is_except = False
+        # Target is an except-handler entry (typed or bare):
+        if target_ins.opname == "DUP_TOP":
+            is_except = True
+        elif target_ins.opname == "POP_TOP":
+            # Bare-except: three consecutive POP_TOPs
+            if (t_idx + 2 < len(self.instructions)
+                    and self.instructions[t_idx + 1].opname == "POP_TOP"
+                    and self.instructions[t_idx + 2].opname == "POP_TOP"):
+                is_except = True
+        # Target is the with-block exit handler:
+        elif target_ins.opname == "WITH_EXCEPT_START":
+            is_except = True
+        # Target is an exception-handler cleanup entry (3.9 'as e' cleanup):
+        elif target_ins.opname == "POP_EXCEPT":
+            is_except = True
+        # Target is a tiny 'as e' cleanup block (LOAD_CONST None; STORE; DELETE; RERAISE):
+        # These are nested SETUP_FINALLY blocks for the 'except X as e:' binding.
+        # Recognise them by: the target is a LOAD_CONST None followed within 3 steps
+        # by a DELETE_* or RERAISE (with no user body in between).
+        elif target_ins.opname == "LOAD_CONST" and target_ins.argval is None:
+            # Scan forward: if we hit DELETE_FAST/DELETE_NAME or RERAISE without
+            # any non-trivial instruction in between, treat as cleanup-only.
+            is_cleanup = False
+            for k in range(t_idx, min(t_idx + _MAX_TERNARY_MINI_SEARCH_WINDOW, len(self.instructions))):
+                op = self.instructions[k].opname
+                if op in ("DELETE_FAST", "DELETE_NAME", "DELETE_GLOBAL", "DELETE_DEREF", "RERAISE"):
+                    is_cleanup = True
+                    break
+                if op not in ("LOAD_CONST", "STORE_FAST", "STORE_NAME",
+                                "STORE_GLOBAL", "STORE_DEREF", "POP_BLOCK", "NOP"):
+                    break
+            if is_cleanup:
+                is_except = True   # treat as cleanup, not a user finally
+        return is_except
 
-                # ── Populate _exc_handler_jump_offsets for 3.9 ─────────────────
-                # In Python 3.9, a JUMP_ABSOLUTE inside a SETUP_FINALLY handler
-                # body that jumps backward to a FOR_ITER loop head (is_jump_target)
-                # represents an explicit 'continue' statement.  Mark those offsets
-                # so _op_jump treats them as handler exits (not while-loop back-edges)
-                # and _op_cleanup can emit 'continue' instead of 'pass'.
-                # The handler body starts at `target` (DUP_TOP or POP_TOP*3).
-                # Collect jump-target offsets of FOR_ITER instructions so we know
-                # which backward destinations are loop heads.
-                # In Python 3.9, JUMP_ABSOLUTE for a loop 'continue' jumps back
-                # to the FOR_ITER instruction's own offset (not to its target).
-                # So we collect FOR_ITER *offsets* as the set of valid loop heads.
-                for_iter_targets = {
-                    fi.offset
-                    for fi in self.instructions
-                    if fi.opname == "FOR_ITER" and fi.offset < target
-                }
-                # The handler section runs from `target` until the first
-                # POP_EXCEPT or RERAISE at this nesting level (level=0).
-                t_idx2 = next(
-                    (k for k, x in enumerate(self.instructions) if x.offset == target), None
-                )
-                if t_idx2 is not None:
-                    level2 = 0
-                    for k in range(t_idx2, len(self.instructions)):
-                        kx = self.instructions[k]
-                        if kx.opname in ("SETUP_FINALLY", "SETUP_WITH", "SETUP_EXCEPT"):
-                            level2 += 1
-                        elif kx.opname == "POP_BLOCK":
-                            level2 -= 1
-                        elif kx.opname in ("POP_EXCEPT", "RERAISE") and level2 <= 0:
-                            break  # handler section ends
-                        # A backward JUMP_ABSOLUTE/JUMP_FORWARD to a loop head
-                        # inside this handler is an explicit 'continue'.
-                        if kx.opname in ("JUMP_ABSOLUTE", "JUMP_FORWARD"):
-                            jt = self._get_jump_target(kx)
-                            if (isinstance(jt, int)
-                                    and jt < kx.offset
-                                    and (jt in for_iter_targets or jt in self.prescan.while_header_targets.values())):
-                                self.prescan.exc_handler_jump_offsets.add(kx.offset)
-                                self.prescan.exc_handler_continue_offsets.add(kx.offset)
+    def _mark_user_finally(self, i: int, t_idx: int, target: int) -> None:
+        """A SETUP_FINALLY whose target is a user `finally`: record it and hide the handler's copy of its body."""
+        # Potential finally block. In 3.9, a SETUP_FINALLY for a user finally
+        # typically covers the try body, and the target is the exception-path
+        # copy of the finally body WHICH ENDS IN RERAISE.
+        # If we find a RERAISE reachable from here without an intervening SETUP,
+        # then this is definitely a finally block.
+        is_finally = False
+        end_reraise = None
+        level = 0
+        for j in range(t_idx, len(self.instructions)):
+            jx = self.instructions[j]
+            if jx.opname in ("SETUP_FINALLY", "SETUP_WITH", "SETUP_EXCEPT"):
+                level += 1
+            elif jx.opname == "POP_BLOCK":
+                level -= 1
+            elif jx.opname == "RERAISE" and level <= 0:
+                is_finally = True
+                end_reraise = jx.offset
+                break
+
+        if is_finally:
+            self.prescan.finally_targets.add(target)
+            # Mark the exception-path copy for suppression
+            for j in range(t_idx, len(self.instructions)):
+                self.prescan.finally_body_suppress.add(self.instructions[j].offset)
+                if self.instructions[j].offset == end_reraise:
+                    break
+            self._elide_early_finally_copies(i, t_idx, end_reraise)
+
+    def _scan_except_clause(self, target: int) -> None:
+        """The except clause at *target*: the `else` after it, and the jumps in it that are a `continue`."""
+        try_end_idx = next((k for k, x in enumerate(self.instructions) if x.offset == target), -1) - 1
+        if try_end_idx >= 0:
+            try_jump = self.instructions[try_end_idx]
+            if try_jump.opname in ("JUMP_FORWARD", "JUMP_ABSOLUTE"):
+                else_start = getattr(self, "_get_jump_target")(try_jump)
+                        
+                # Guard: If else_start is the end of a FOR_ITER loop (indicating a `break` out of a loop),
+                # then it is NOT an else clause.
+                is_break = else_start in self.prescan.for_iter_targets
+                        
+                if else_start > target and not is_break:
+                    post_except_targets = []
+                    for k in range(try_end_idx + 1, len(self.instructions)):
+                        if self.instructions[k].offset >= else_start:
+                            break
+
+                        inner_ins = self.instructions[k]
+                        if inner_ins.opname in ("JUMP_FORWARD", "JUMP_ABSOLUTE"):
+                            jt = getattr(self, "_get_jump_target")(inner_ins)
+                            loop_end = self._innermost_while_end(inner_ins.offset)
+                            if jt > else_start and not (loop_end is not None and jt >= loop_end):
+                                post_except_targets.append(jt)   # (a `break` out of a `while` skips no else)
+                    if post_except_targets:
+                        else_end = min(post_except_targets)
+                        self.prescan.else_starts[else_start] = else_end
+
+        # ── Populate _exc_handler_jump_offsets for 3.9 ─────────────────
+        # In Python 3.9, a JUMP_ABSOLUTE inside a SETUP_FINALLY handler
+        # body that jumps backward to a FOR_ITER loop head (is_jump_target)
+        # represents an explicit 'continue' statement.  Mark those offsets
+        # so _op_jump treats them as handler exits (not while-loop back-edges)
+        # and _op_cleanup can emit 'continue' instead of 'pass'.
+        # The handler body starts at `target` (DUP_TOP or POP_TOP*3).
+        # Collect jump-target offsets of FOR_ITER instructions so we know
+        # which backward destinations are loop heads.
+        # In Python 3.9, JUMP_ABSOLUTE for a loop 'continue' jumps back
+        # to the FOR_ITER instruction's own offset (not to its target).
+        # So we collect FOR_ITER *offsets* as the set of valid loop heads.
+        for_iter_targets = {
+            fi.offset
+            for fi in self.instructions
+            if fi.opname == "FOR_ITER" and fi.offset < target
+        }
+        # The handler section runs from `target` until the first
+        # POP_EXCEPT or RERAISE at this nesting level (level=0).
+        t_idx2 = next(
+            (k for k, x in enumerate(self.instructions) if x.offset == target), None
+        )
+        if t_idx2 is not None:
+            level2 = 0
+            for k in range(t_idx2, len(self.instructions)):
+                kx = self.instructions[k]
+                if kx.opname in ("SETUP_FINALLY", "SETUP_WITH", "SETUP_EXCEPT"):
+                    level2 += 1
+                elif kx.opname == "POP_BLOCK":
+                    level2 -= 1
+                elif kx.opname in ("POP_EXCEPT", "RERAISE") and level2 <= 0:
+                    break  # handler section ends
+                # A backward JUMP_ABSOLUTE/JUMP_FORWARD to a loop head
+                # inside this handler is an explicit 'continue'.
+                if kx.opname in ("JUMP_ABSOLUTE", "JUMP_FORWARD"):
+                    jt = self._get_jump_target(kx)
+                    if (isinstance(jt, int)
+                            and jt < kx.offset
+                            and (jt in for_iter_targets or jt in self.prescan.while_header_targets.values())):
+                        self.prescan.exc_handler_jump_offsets.add(kx.offset)
+                        self.prescan.exc_handler_continue_offsets.add(kx.offset)
 
     def _skip_finally_copy(self, index: int) -> int:
         """
