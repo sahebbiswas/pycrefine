@@ -270,7 +270,7 @@ def flatten_elif(source: str) -> str:
     return res
 
 
-_MULTILINE_STRING_MARK = "__pycrefine_multiline_string_{}__"
+_MULTILINE_STRING_MARK = "__pycrefine_multiline_string_"
 
 
 def _string_continuation_rows(text: str) -> Set[int]:
@@ -298,18 +298,61 @@ def _string_continuation_rows(text: str) -> Set[int]:
     return rows
 
 
-def _mask_multiline_strings(source: str, statements_only: bool = True, literals: Optional[List[str]] = None):
-    """
-    Replace each multi-line string with a one-line placeholder: those that are a statement of
-    their own (a docstring) or, with ``statements_only=False``, every one.
+class _Literals(List[str]):
+    """The literals taken out of a source, and the placeholder prefix that cannot occur in it."""
 
-    The clean-ups are line- and regex-based; inside such a string they would change its value
-    (spacing after commas, collapsed blank lines, merged imports). Returns the masked source and
+    def __init__(self, source: str = "") -> None:
+        super().__init__()
+        self.prefix = _MULTILINE_STRING_MARK
+        while self.prefix in source:
+            self.prefix += "x"
+
+    def mark(self, index: int) -> str:
+        return f'"{self.prefix}{index}__"'
+
+
+def _string_spans(tokens: list) -> list:
+    """(first token index, last token index) of each multi-line string literal, f-strings (3.12+ tokenizes them in pieces) included."""
+    spans, fstarts = [], []
+    for n, tok in enumerate(tokens):
+        name = tokenize.tok_name.get(tok.type, "")
+        if name == "FSTRING_START":
+            fstarts.append(n)
+        elif name == "FSTRING_END" and fstarts:
+            first = fstarts.pop()
+            if tokens[first].start[0] != tok.end[0] and not fstarts:
+                spans.append((first, n))
+        elif tok.type == tokenize.STRING and tok.start[0] != tok.end[0] and not fstarts:
+            spans.append((n, n))
+    return spans
+
+
+def _in_print_call(tokens: list, index: int) -> bool:
+    """Whether the token at ``index`` lies inside the parentheses of a ``print(`` call."""
+    stack: List[bool] = []
+    for n in range(index):
+        tok = tokens[n]
+        if tok.type == tokenize.OP and tok.string in "([{":
+            stack.append(tok.string == "(" and n > 0 and tokens[n - 1].type == tokenize.NAME
+                         and tokens[n - 1].string == "print")
+        elif tok.type == tokenize.OP and tok.string in ")]}" and stack:
+            stack.pop()
+    return any(stack)
+
+
+def _mask_multiline_strings(source: str, keep_print_arguments: bool = False, literals: Optional[_Literals] = None):
+    """
+    Replace each multi-line string with a one-line placeholder.
+
+    The clean-ups are line- and regex-based; inside such a string they would change its value (spacing
+    after commas, collapsed blank lines, merged imports). The strings inside a ``print(...)`` call are
+    kept with ``keep_print_arguments``: the `print` tidying reads them. Returns the masked source and
     the literals in order (``literals``, if given, is extended and returned).
     """
-    literals = [] if literals is None else literals
+    literals = _Literals(source) if literals is None else literals
     try:
-        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+        tokens = [t for t in tokenize.generate_tokens(io.StringIO(source).readline)
+                  if t.type != tokenize.COMMENT]
     except (tokenize.TokenError, IndentationError, SyntaxError):
         return source, literals
     lines = source.split("\n")
@@ -317,31 +360,25 @@ def _mask_multiline_strings(source: str, statements_only: bool = True, literals:
     for line in lines:
         offsets.append(offsets[-1] + len(line) + 1)
     pieces, pos = [], 0
-    boundary = (tokenize.NEWLINE, tokenize.NL, tokenize.INDENT, tokenize.DEDENT, tokenize.ENCODING)
-    significant = [t for t in tokens if t.type not in (tokenize.COMMENT,)]
-    for n, tok in enumerate(significant):
-        if tok.type != tokenize.STRING or tok.start[0] == tok.end[0]:
+    for first, last in _string_spans(tokens):
+        if keep_print_arguments and _in_print_call(tokens, first):
             continue
-        before = significant[n - 1].type if n else tokenize.NEWLINE
-        after = significant[n + 1].type if n + 1 < len(significant) else tokenize.NEWLINE
-        is_statement = before in boundary and after in (tokenize.NEWLINE, tokenize.ENDMARKER)
-        if statements_only and not is_statement:
-            continue  # part of an expression: the `print` tidying reads these
-        start = offsets[tok.start[0] - 1] + tok.start[1]
-        end = offsets[tok.end[0] - 1] + tok.end[1]
+        start = offsets[tokens[first].start[0] - 1] + tokens[first].start[1]
+        end = offsets[tokens[last].end[0] - 1] + tokens[last].end[1]
         pieces.append(source[pos:start])
-        pieces.append(f'"{_MULTILINE_STRING_MARK.format(len(literals))}"')
+        pieces.append(literals.mark(len(literals)))
         literals.append(source[start:end])
         pos = end
     pieces.append(source[pos:])
     return "".join(pieces), literals
 
 
-def _unmask_multiline_strings(source: str, literals: List[str]) -> str:
-    """Put back the literals that :func:`_mask_multiline_strings` replaced."""
-    for n, literal in enumerate(literals):
-        source = source.replace(f'"{_MULTILINE_STRING_MARK.format(n)}"', literal, 1)
-    return source
+def _unmask_multiline_strings(source: str, literals: "_Literals") -> str:
+    """Put back the literals that :func:`_mask_multiline_strings` replaced, in one pass so restored text is never rescanned."""
+    if not literals:
+        return source
+    pattern = re.compile('"' + re.escape(literals.prefix) + r'(\d+)__"')
+    return pattern.sub(lambda m: literals[int(m.group(1))], source)
 
 
 def _dict_lines(source: str, node: ast.Dict, indent: str) -> str:
@@ -433,14 +470,13 @@ _NO_KW = r'(?![^()]*(?:\b(?:for|lambda)\b|:=))'
 _ASSIGNMENT_PARENS_RE = re.compile(
     r'^(\s*[A-Za-z_][A-Za-z0-9_.]*\s*' + _AUGMENTED_OPS + r'?=\s*)\(' + _NO_KW + r'([^,()]+)\)$')
 # (a `yield` needs its parentheses after `return`, `if`, `elif` and `while`; after `=` it does not)
-_RETURN_PARENS_RE = re.compile(r'^(\s*return\s+)\((?!yield\b)' + _NO_KW + r'([^,()]+)\)$')
-_IF_PARENS_RE = re.compile(r'^(\s*(?:if|elif)\s+)\((?!yield\b)' + _NO_KW + r'([^,()]+)\):$')
-_WHILE_PARENS_RE = re.compile(r'^(\s*while\s+)\((?!yield\b)' + _NO_KW + r'([^,()]+)\):$')
+_RETURN_PARENS_RE = re.compile(r'^(\s*return\s+)\((?!\s*yield\b)' + _NO_KW + r'([^,()]+)\)$')
+_IF_PARENS_RE = re.compile(r'^(\s*(?:if|elif)\s+)\((?!\s*yield\b)' + _NO_KW + r'([^,()]+)\):$')
+_WHILE_PARENS_RE = re.compile(r'^(\s*while\s+)\((?!\s*yield\b)' + _NO_KW + r'([^,()]+)\):$')
 _DOUBLE_ASSIGNMENT_RE = re.compile(
     r'^(\s*)([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*\(\2\s*(\+|-|\*|/|//|%|&|\||\^|<<|>>|\*\*|@)=\s*(.*)\)$')
 _IMPORT_RE = re.compile(r'^([ \t]*)import\s+(.+)$')
 _FROM_IMPORT_RE = re.compile(r'^([ \t]*)from\s+([A-Za-z0-9_.]+)\s+import\s+(.+)$')
-_TRIPLE_QUOTED_RE = "(?<![A-Za-z0-9_])([A-Za-z]{0,3})('''|\"\"\")([\\s\\S]*?)\\2"
 
 
 def _bound_name(entry: str) -> str:
@@ -463,8 +499,8 @@ def _unique(entries: List[str]) -> List[str]:
 
 
 def _is_mergeable_import(match: "Optional[re.Match]", names_group: int) -> bool:
-    """Whether a matched import line is a plain list of names (not parenthesised, not continued)."""
-    return bool(match) and not re.search(r'[()\\]', match.group(names_group))
+    """Whether a matched import line is a plain list of names: not parenthesised, continued, commented, joined to another statement or a wildcard."""
+    return bool(match) and not re.search(r'[()\\#;*]', match.group(names_group))
 
 
 def merge_imports(text: str) -> str:
@@ -526,10 +562,21 @@ def strip_redundant_parens(text: str) -> str:
     return '\n'.join(out_lines)
 
 
+def _operator_tokens(text: str) -> Optional[List[str]]:
+    """The operator tokens of ``text`` (so brackets inside strings are not counted), or None when it does not tokenize."""
+    try:
+        return [t.string for t in tokenize.generate_tokens(io.StringIO(text).readline) if t.type == tokenize.OP]
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return None
+
+
 def _parens_balanced(text: str) -> bool:
+    ops = _operator_tokens(text)
+    if ops is None:
+        return False
     depth = 0
-    for char in text:
-        depth += (char == '(') - (char == ')')
+    for op in ops:
+        depth += (op == '(') - (op == ')')
         if depth < 0:
             return False
     return depth == 0
@@ -537,12 +584,12 @@ def _parens_balanced(text: str) -> bool:
 
 def _has_top_level_comma(text: str) -> bool:
     depth = 0
-    for char in text:
-        if char in '([{':
+    for op in _operator_tokens(text) or []:
+        if op in '([{':
             depth += 1
-        elif char in ')]}':
+        elif op in ')]}':
             depth -= 1
-        elif char == ',' and depth == 0:
+        elif op == ',' and depth == 0:
             return True
     return False
 
@@ -564,22 +611,38 @@ def _unwrap_print_argument(inner: str) -> str:
         return inner if re.match(r'\s*yield\b', inside) or _has_top_level_comma(inside) else inside
 
 
-def _one_line_string(match: "re.Match") -> str:
-    # A prefixed string (f"""...""", r"""...""", b"""...""") is left as it is: repr() would write the
-    # prefix in front of a quoted copy of its text, which is not the same string.
-    if match.group(1):
-        return match.group(0)
+def _one_line_triple_quoted(text: str) -> str:
+    """``text`` with each unprefixed triple-quoted string token written as a one-line literal of the same value.
+
+    A prefixed string (f\"\"\"...\"\"\", r, b) is left as it is: repr() would write the prefix in front of a quoted
+    copy of its text, which is not the same string. Tokens, not a pattern, find the strings, so quotes inside a
+    single-quoted string are never taken for an opener.
+    """
     try:
-        # the value of the literal, escapes included, not its source text
-        return repr(ast.literal_eval(match.group(0)))
-    except (SyntaxError, ValueError):
-        return match.group(0)
+        tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return text
+    offsets = [0]
+    for line in text.split("\n"):
+        offsets.append(offsets[-1] + len(line) + 1)
+    pieces, pos = [], 0
+    for tok in tokens:
+        if tok.type != tokenize.STRING or tok.string[:3] not in ('"""', "\'\'\'"):
+            continue
+        try:
+            literal = repr(ast.literal_eval(tok.string))   # the value, escapes included, not the source text
+        except (SyntaxError, ValueError):
+            continue
+        start = offsets[tok.start[0] - 1] + tok.start[1]
+        end = offsets[tok.end[0] - 1] + tok.end[1]
+        pieces.extend((text[pos:start], literal))
+        pos = end
+    pieces.append(text[pos:])
+    return "".join(pieces)
 
 
 def _tidy_print_call(match: "re.Match") -> str:
-    # Each literal is matched from its opener to its own closer in one pass, so the closer of one
-    # string is never taken for the opener of the next.
-    inner = re.sub(_TRIPLE_QUOTED_RE, _one_line_string, match.group(2))
+    inner = _one_line_triple_quoted(match.group(2))
     return f"{match.group(1)}{_unwrap_print_argument(inner)})"
 
 
@@ -616,7 +679,7 @@ def replace_leaked_tuples(text: str) -> str:
     text = re.sub(r"([ \t]*)([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*\('(func|class)',[^\n]*", _leak_replacement, text)
     # the header line and the lines indented below it
     return re.sub(
-        r"([ \t]*).*(?:def\s+<lambda>).*(?:\n\1[ \t]+\S.*|\n[ \t]*(?=(?:\n[ \t]*)*\n\1[ \t]+\S))*",
+        r"^([ \t]*)[^'\"\n]*(?:def\s+<lambda>).*(?:\n\1[ \t]+\S.*|\n[ \t]*(?=(?:\n[ \t]*)*\n\1[ \t]+\S))*",
         lambda m: f"{m.group(1)}# <genexpr/lambda — not reconstructable>\n{m.group(1)}pass",
         text, flags=re.MULTILINE)
 
@@ -667,9 +730,9 @@ def _run(transforms: Tuple[PostProcessTransform, ...], text: str, level: str) ->
 
 def post_process_source(source: str, beautification_level: str = 'core') -> str:
     """Clean up decompiled output to be more Pythonic (see STRING_TRANSFORMS, TEXT_TRANSFORMS and FINAL_TRANSFORMS)."""
-    text, literals = _mask_multiline_strings(source)
+    text, literals = _mask_multiline_strings(source, keep_print_arguments=True)
     text = _run(STRING_TRANSFORMS, text, beautification_level)
-    text, literals = _mask_multiline_strings(text, statements_only=False, literals=literals)
+    text, literals = _mask_multiline_strings(text, literals=literals)
     text = _run(TEXT_TRANSFORMS, text, beautification_level)
     result = _unmask_multiline_strings(text.strip('\r\n') + '\n', literals)
     return _run(FINAL_TRANSFORMS, result, beautification_level)

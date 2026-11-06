@@ -81,10 +81,10 @@ class TestGuardOnTheCorpus(unittest.TestCase):
     @staticmethod
     def _masked(raw, transform):
         """The text as ``post_process_source`` hands it to ``transform``, and the literals to put back."""
-        text, literals = pp._mask_multiline_strings(raw)  # pylint: disable=protected-access
+        text, literals = pp._mask_multiline_strings(  # pylint: disable=protected-access
+            raw, keep_print_arguments=True)
         if transform in pp.TEXT_TRANSFORMS:
-            text, literals = pp._mask_multiline_strings(  # pylint: disable=protected-access
-                text, statements_only=False, literals=literals)
+            text, literals = pp._mask_multiline_strings(text, literals=literals)  # pylint: disable=protected-access
         return text, literals
 
     def test_each_ast_preserving_transform_keeps_the_tree(self):
@@ -229,6 +229,54 @@ class TestReviewFindings(unittest.TestCase):
 
     def test_a_multiline_string_in_an_expression_keeps_its_blank_lines_and_text(self):
         source = 'x = """a\n\n\n\nb\ndef <lambda>(y):\nimport os\nimport sys\n    z = (q)\n"""\nprint(x)\n'
+        out = pp.post_process_source(source)
+        self.assertEqual(ast.dump(ast.parse(out)), ast.dump(ast.parse(source)))
+
+
+class TestSecondReview(unittest.TestCase):
+    """Cases the review of #363 found in the same layer."""
+
+    def test_a_yield_with_a_space_after_the_parenthesis_keeps_its_parentheses(self):
+        for text in ("return ( yield 1)", "if ( yield ):"):
+            with self.subTest(text=text):
+                self.assertEqual(pp.strip_redundant_parens(text), text)
+
+    def test_commented_or_joined_imports_are_not_merged(self):
+        for text in ("from a import x  # keep\nfrom a import y", "import a; import b\nimport c"):
+            with self.subTest(text=text):
+                self.assertEqual(pp.merge_imports(text), text)
+
+    def test_a_wildcard_import_stays_a_statement_of_its_own(self):
+        text = "from a import *\nfrom a import y"
+        self.assertEqual(pp.merge_imports(text), text)
+
+    def test_brackets_inside_a_string_do_not_decide_the_print_parentheses(self):
+        text = 'print(("(") + (")"))'
+        out = pp.tidy_print_calls(text)
+        self.assertEqual(ast.dump(ast.parse(out)), ast.dump(ast.parse(text)))
+
+    def test_triple_quotes_inside_a_single_quoted_string_are_left_alone(self):
+        text = "print('say \"\"\"hi\"\"\" now')"
+        out = pp.tidy_print_calls(text)
+        self.assertEqual(ast.dump(ast.parse(out)), ast.dump(ast.parse(text)))
+
+    def test_a_def_lambda_inside_a_one_line_string_is_not_replaced(self):
+        text = 'x = "def <lambda>(y)"\nprint(x)'
+        self.assertEqual(pp.replace_leaked_tuples(text), text)
+
+    def test_a_print_line_inside_a_multiline_string_is_not_rewritten(self):
+        source = 'x = """a\nprint((value))\nb"""\nprint(x)\n'
+        out = pp.post_process_source(source)
+        self.assertEqual(ast.dump(ast.parse(out)), ast.dump(ast.parse(source)))
+
+    def test_a_multiline_f_string_keeps_its_blank_lines(self):
+        source = 'name = 1\nx = f"""a\n\n\n{name}\n"""\n'
+        out = pp.post_process_source(source)
+        self.assertEqual(ast.dump(ast.parse(out)), ast.dump(ast.parse(source)))
+
+    def test_a_source_that_already_holds_the_placeholder_text_survives(self):
+        source = ('a = "__pycrefine_multiline_string_0__"\nb = """x\n\n\ny"""\n'
+                  'c = """__pycrefine_multiline_string_0__\nz"""\n')
         out = pp.post_process_source(source)
         self.assertEqual(ast.dump(ast.parse(out)), ast.dump(ast.parse(source)))
 

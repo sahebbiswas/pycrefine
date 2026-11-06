@@ -108,7 +108,14 @@ _FILLER_OPS = frozenset({"NOP", "CACHE"})
 
 
 _TRY_LOAD_OPS = frozenset({"LOAD_NAME", "LOAD_GLOBAL", "LOAD_FAST",
-                          "LOAD_DEREF", "LOAD_SMALL_INT", "LOAD_GLOBAL_MODULE"})
+                          "LOAD_DEREF", "LOAD_SMALL_INT", "LOAD_GLOBAL_MODULE",
+                          # a local that may be unbound (3.12+), borrowed loads (3.14), a name in a class body
+                          "LOAD_FAST_CHECK", "LOAD_FAST_BORROW", "LOAD_FAST_LOAD_FAST",
+                          "LOAD_FAST_BORROW_LOAD_FAST_BORROW", "LOAD_CLASSDEREF"})
+
+
+# What an `except` clause's type expression is made of, up to its CHECK_EXC_MATCH.
+_EXC_TYPE_EXPR_OPS = _TRY_LOAD_OPS | frozenset({"LOAD_ATTR", "LOAD_CONST", "BUILD_TUPLE", "PUSH_NULL", "NOP", "CACHE"})
 
 
 _TRY_LOOP_HEADS = frozenset({"FOR_ITER", "GET_ITER", "GET_ANEXT", "GET_AWAITABLE"})

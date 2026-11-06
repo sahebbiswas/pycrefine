@@ -164,9 +164,9 @@ What the analysis passes found before emission starts.
 | `nop_to_finally_merge` | try NOP -> finally start, for try/finally without except | `_map_try_nops` |
 | `suppress_push_exc_offsets` | PUSH_EXC_INFO that opens a handler rendered elsewhere | `_classify_push_exc_info` |
 | `push_exc_to_finally_merge` | merge offset -> the handler entry points (sorted) that rejoin there, for a `try` inside a loop whose handlers merge after the loop | `_map_handlers_to_merge_labels` |
-| `finally_merge_offsets` | merge labels where deferred finally/except text is emitted | `_at_merge_label`, `_close_blocks`, `_find_finally_merge_labels`, `_map_try_nops` |
-| `except_only_merge_offsets` | merge offsets that have handlers but no `finally`, so only the handler text is placed there | `_at_merge_label`, `_find_finally_merge_labels`, `_map_handlers_to_merge_labels` |
-| `finally_body_suppress` | instructions of an inlined copy of a `finally` body, left out of the normal flow because the text is emitted once at the merge label | `_elide_early_finally_copies`, `_forward_jump`, `_map_handlers_to_merge_labels`, `_map_try_nops`, `_mark_user_finally`, `_op_setup_with`, `_pop_block_break_from_if_39`, `_pop_block_break_path_39`, `_pop_block_return_39`, `_render_finally_bodies`, `_render_handler_sections`, `_suppress_copies` |
+| `finally_merge_offsets` | merge labels where deferred finally/except text is emitted | `_at_merge_label`, `_close_blocks`, `_find_finally_merge_labels`, `_map_finally_only_try` |
+| `except_only_merge_offsets` | merge offsets that have handlers but no `finally`, so only the handler text is placed there | `_at_merge_label`, `_find_finally_merge_labels`, `_record_handler_merge` |
+| `finally_body_suppress` | instructions of an inlined copy of a `finally` body, left out of the normal flow because the text is emitted once at the merge label | `_elide_early_finally_copies`, `_forward_jump`, `_map_handlers_to_merge_labels`, `_map_finally_only_try`, `_mark_user_finally`, `_op_setup_with`, `_pop_block_break_from_if_39`, `_pop_block_break_path_39`, `_pop_block_return_39`, `_render_finally_bodies`, `_render_handler_sections`, `_suppress_copies` |
 | `finally_targets` | 3.9: targets of the `SETUP_FINALLY`s that belong to a user `finally:` rather than to a handler | `_prescan_try_structure` |
 | `finally_from_handler` | 3.9: handler offset -> its RERAISE | `_elide_early_finally_copies`, `_open_finally_from_handler`, `_prescan_try_structure` |
 | `handler_section_suppress` | instructions of an except handler that is decompiled ahead of time as a section, so the main pass skips them | `_map_handlers_to_merge_labels`, `_render_handler_sections` |
@@ -196,8 +196,8 @@ Bookkeeping that changes while instructions are replayed.
 | `except_end_offsets` | end offsets of exception regions | `_dispatch_instruction`, `_op_pop_block_39` |
 | `exc_as_store_offset` | the `as e` STORE to skip | `_op_check_exc_match`, `_op_dup_top_39`, `_op_store` |
 | `exc_bound_names` | every name bound by `except ... as` | `_op_check_exc_match`, `_op_dup_top_39` |
-| `deferred_finally_lines` | merge offset -> rendered finally body | `_map_handlers_to_merge_labels`, `_map_try_nops`, `_render_finally_bodies` |
-| `deferred_except_lines` | merge offset -> rendered handler | `_map_handlers_to_merge_labels`, `_map_try_nops`, `_render_handler_sections` |
+| `deferred_finally_lines` | merge offset -> rendered finally body | `_map_handlers_to_merge_labels`, `_map_finally_only_try`, `_render_finally_bodies` |
+| `deferred_except_lines` | merge offset -> rendered handler | `_map_handlers_to_merge_labels`, `_map_finally_only_try`, `_render_handler_sections` |
 | `pending_finally_merge` | merge offset awaiting emission | `_at_merge_label`, `_map_handlers_to_merge_labels` |
 | `boolop_pending` | operators opened but not yet joined | `_prescan_value_boolops` |
 | `else_stack_snapshots` | second arm's offset -> stack to restore | `_decompile_step`, `_op_conditional_jump` |
