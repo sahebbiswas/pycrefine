@@ -3,7 +3,7 @@ import ast
 import io
 import re
 import tokenize
-from typing import List, Optional, Set
+from typing import Callable, FrozenSet, List, NamedTuple, Optional, Set, Tuple
 
 
 def _line_is_in_triple_quoted_string(lines: List[str], line_idx: int) -> bool:
@@ -298,25 +298,25 @@ def _string_continuation_rows(text: str) -> Set[int]:
     return rows
 
 
-def _mask_multiline_strings(source: str):
+def _mask_multiline_strings(source: str, statements_only: bool = True, literals: Optional[List[str]] = None):
     """
-    Replace each multi-line string that is a statement of its own (a docstring) with a
-    one-line placeholder.
+    Replace each multi-line string with a one-line placeholder: those that are a statement of
+    their own (a docstring) or, with ``statements_only=False``, every one.
 
-    The clean-ups below are line- and regex-based; inside such a string they would
-    change its value (spacing after commas, collapsed blank lines, sorted imports).
-    Strings inside expressions are left to them. Returns the masked source and the
-    literals in order.
+    The clean-ups are line- and regex-based; inside such a string they would change its value
+    (spacing after commas, collapsed blank lines, merged imports). Returns the masked source and
+    the literals in order (``literals``, if given, is extended and returned).
     """
+    literals = [] if literals is None else literals
     try:
         tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
     except (tokenize.TokenError, IndentationError, SyntaxError):
-        return source, []
+        return source, literals
     lines = source.split("\n")
     offsets = [0]
     for line in lines:
         offsets.append(offsets[-1] + len(line) + 1)
-    pieces, literals, pos = [], [], 0
+    pieces, pos = [], 0
     boundary = (tokenize.NEWLINE, tokenize.NL, tokenize.INDENT, tokenize.DEDENT, tokenize.ENCODING)
     significant = [t for t in tokens if t.type not in (tokenize.COMMENT,)]
     for n, tok in enumerate(significant):
@@ -324,8 +324,9 @@ def _mask_multiline_strings(source: str):
             continue
         before = significant[n - 1].type if n else tokenize.NEWLINE
         after = significant[n + 1].type if n + 1 < len(significant) else tokenize.NEWLINE
-        if before not in boundary or after not in (tokenize.NEWLINE, tokenize.ENDMARKER):
-            continue  # part of an expression, which the clean-ups may rewrite
+        is_statement = before in boundary and after in (tokenize.NEWLINE, tokenize.ENDMARKER)
+        if statements_only and not is_statement:
+            continue  # part of an expression: the `print` tidying reads these
         start = offsets[tok.start[0] - 1] + tok.start[1]
         end = offsets[tok.end[0] - 1] + tok.end[1]
         pieces.append(source[pos:start])
@@ -424,222 +425,251 @@ def split_dict_displays(source: str) -> str:
     return result
 
 
-def post_process_source(source: str, beautification_level: str = 'core') -> str:
-    """Clean up decompiled output to be more Pythonic."""
-    source, literals = _mask_multiline_strings(source)
-    lines = source.split('\n')
-    out_lines = []
+_AUGMENTED_OPS = r'(?:\+|-|\*|/|//|%|&|\||\^|<<|>>)'
+# The inner-expression pattern deliberately excludes lines that contain 'for', 'lambda' or ':=' because
+# those indicate that the outer parens are *required* (genexpr, lambda, walrus) rather than redundant
+# grouping added by the decompiler.
+_NO_KW = r'(?![^()]*(?:\b(?:for|lambda)\b|:=))'
+_ASSIGNMENT_PARENS_RE = re.compile(
+    r'^(\s*[A-Za-z_][A-Za-z0-9_.]*\s*' + _AUGMENTED_OPS + r'?=\s*)\(' + _NO_KW + r'([^,()]+)\)$')
+# (a `yield` needs its parentheses after `return`, `if`, `elif` and `while`; after `=` it does not)
+_RETURN_PARENS_RE = re.compile(r'^(\s*return\s+)\((?!yield\b)' + _NO_KW + r'([^,()]+)\)$')
+_IF_PARENS_RE = re.compile(r'^(\s*(?:if|elif)\s+)\((?!yield\b)' + _NO_KW + r'([^,()]+)\):$')
+_WHILE_PARENS_RE = re.compile(r'^(\s*while\s+)\((?!yield\b)' + _NO_KW + r'([^,()]+)\):$')
+_DOUBLE_ASSIGNMENT_RE = re.compile(
+    r'^(\s*)([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*\(\2\s*(\+|-|\*|/|//|%|&|\||\^|<<|>>|\*\*|@)=\s*(.*)\)$')
+_IMPORT_RE = re.compile(r'^([ \t]*)import\s+(.+)$')
+_FROM_IMPORT_RE = re.compile(r'^([ \t]*)from\s+([A-Za-z0-9_.]+)\s+import\s+(.+)$')
+_TRIPLE_QUOTED_RE = "(?<![A-Za-z0-9_])([A-Za-z]{0,3})('''|\"\"\")([\\s\\S]*?)\\2"
 
-    current_imports = []
-    current_froms = {}
-    current_indent = None
 
-    def flush_imports():
-        nonlocal current_imports, current_froms, current_indent
-        if current_imports:
-            unique_mods = []
-            for m in current_imports:
-                if m not in unique_mods:
-                    unique_mods.append(m)
-            for m in unique_mods:
-                out_lines.append(f"{current_indent}import {m}")
-            current_imports.clear()
+def _bound_name(entry: str) -> str:
+    """The name an import entry binds: its alias, else the first component of a dotted module."""
+    parts = entry.split()
+    return parts[-1] if len(parts) > 1 and parts[-2] == 'as' else parts[0].split('.')[0]
 
-        for mod, syms in current_froms.items():
-            unique_syms = []
-            for s in syms:
-                if s not in unique_syms:
-                    unique_syms.append(s)
-            out_lines.append(f"{current_indent}from {mod} import {', '.join(unique_syms)}")
-        current_froms.clear()
-        current_indent = None
 
-    # Parens-stripping regexes.
-    # The inner-expression pattern deliberately excludes lines that contain
-    # 'for', 'if', ':=', or 'lambda' because those keywords indicate that the
-    # outer parens are *required* (genexpr, conditional expr, walrus, lambda)
-    # rather than redundant grouping added by the decompiler.
-    _NO_KW = r'(?![^()]*\b(?:for|lambda)\b)'  # negative lookahead: no for/lambda inside
-    assignment_parens_re = re.compile(
-        r'^(\s*[A-Za-z_][A-Za-z0-9_.]*\s*(?:\+|-|\*|/|//|%|&|\||\^|<<|>>)?=\s*)'
-        r'\(' + _NO_KW + r'([^,()]+)\)$'
-    )
-    # (a `yield` needs its parentheses after `return`, `if`, `elif` and `while`; after `=` it does not)
-    return_parens_re = re.compile(
-        r'^(\s*return\s+)\((?!yield\b)' + _NO_KW + r'([^,()]+)\)$'
-    )
-    if_parens_re = re.compile(
-        r'^(\s*(?:if|elif)\s+)\((?!yield\b)' + _NO_KW + r'([^,()]+)\):$'
-    )
-    while_parens_re = re.compile(
-        r'^(\s*while\s+)\((?!yield\b)' + _NO_KW + r'([^,()]+)\):$'
-    )
+def _unique(entries: List[str]) -> List[str]:
+    """``entries`` without repeats; a repeat is kept when another entry bound its name in between."""
+    kept: List[str] = []
+    for entry in entries:
+        if entry in kept:
+            later = kept[kept.index(entry) + 1:]
+            if not any(_bound_name(other) == _bound_name(entry) for other in later):
+                continue
+            kept.remove(entry)
+        kept.append(entry)
+    return kept
 
-    for line in lines:
-        imp_m = re.match(r'^([ \t]*)import\s+(.+)$', line)
-        from_m = re.match(r'^([ \t]*)from\s+([A-Za-z0-9_.]+)\s+import\s+(.+)$', line)
 
-        handled = False
+def _is_mergeable_import(match: "Optional[re.Match]", names_group: int) -> bool:
+    """Whether a matched import line is a plain list of names (not parenthesised, not continued)."""
+    return bool(match) and not re.search(r'[()\\]', match.group(names_group))
+
+
+def merge_imports(text: str) -> str:
+    """Merge consecutive imports at one indent: one `import` line per run, and one `from` line per run of one module."""
+    out_lines: List[str] = []
+    imports: List[str] = []
+    from_module: Optional[str] = None
+    from_names: List[str] = []
+    indent: Optional[str] = None
+
+    def flush() -> None:
+        nonlocal indent, from_module
+        if imports:
+            out_lines.extend(f"{indent}import {module}" for module in _unique(imports))
+        if from_module is not None:
+            out_lines.append(f"{indent}from {from_module} import {', '.join(_unique(from_names))}")
+        imports.clear()
+        from_names.clear()
+        indent = from_module = None
+
+    for line in text.split('\n'):
+        imp_m = _IMPORT_RE.match(line)
+        from_m = _FROM_IMPORT_RE.match(line)
+        if not (_is_mergeable_import(imp_m, 2) or _is_mergeable_import(from_m, 3)):
+            flush()
+            out_lines.append(line)
+            continue
+        match = imp_m or from_m
+        # a run is one kind of import at one indent (and, for `from`, one module); anything else starts a new run
+        if indent is not None and match.group(1) != indent:
+            flush()
+        if (imp_m and from_module is not None) or (from_m and (imports or from_module != from_m.group(2))):
+            flush()
+        indent = match.group(1)
         if imp_m:
-            indent, mods = imp_m.groups()
-            mods_list = [m.strip() for m in mods.split(',')]
-            if indent == current_indent and not current_froms:
-                current_imports.extend(mods_list)
-                handled = True
-            elif current_indent is None:
-                current_indent = indent
-                current_imports.extend(mods_list)
-                handled = True
+            imports.extend(m.strip() for m in imp_m.group(2).split(','))
+        else:
+            from_module = from_m.group(2)
+            from_names.extend(m.strip() for m in from_m.group(3).split(','))
+    flush()
+    return '\n'.join(out_lines)
 
-        elif from_m:
-            indent, mod, syms = from_m.groups()
-            sym_list = [s.strip() for s in syms.split(',')]
-            if indent == current_indent and not current_imports:
-                current_froms.setdefault(mod, []).extend(sym_list)
-                handled = True
-            elif current_indent is None:
-                current_indent = indent
-                current_froms.setdefault(mod, []).extend(sym_list)
-                handled = True
 
-        if not handled:
-            flush_imports()
-            if imp_m:
-                indent, mods = imp_m.groups()
-                current_indent = indent
-                current_imports.extend([m.strip() for m in mods.split(',')])
-            elif from_m:
-                indent, mod, syms = from_m.groups()
-                current_indent = indent
-                current_froms.setdefault(mod, []).extend([s.strip() for s in syms.split(',')])
-            else:
-                # Cleanup doubled-up assignments from INPLACE binary ops
-                # e.g., 'var = (var += expr)' -> 'var += expr'
-                m_double = re.match(
-                    r'^(\s*)([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*\(\2\s*(\+|-|\*|/|//|%|&|\||\^|<<|>>|\*\*|@)=\s*(.*)\)$',
-                    line
-                )
-                if m_double:
-                    indent, var_name, op_sym, rhs = m_double.groups()
-                    line = f"{indent}{var_name} {op_sym}= {rhs}"
-                else:
-                    line = assignment_parens_re.sub(r'\1\2', line)
-                    line = return_parens_re.sub(r'\1\2', line)
-                    line = if_parens_re.sub(r'\1\2:', line)
-                    line = while_parens_re.sub(r'\1\2:', line)
+def strip_redundant_parens(text: str) -> str:
+    """Drop grouping parentheses around a whole right-hand side, `return` value or `if`/`while` test."""
+    out_lines = []
+    for line in text.split('\n'):
+        # a doubled-up assignment from an INPLACE op: `var = (var += expr)` -> `var += expr`
+        m_double = _DOUBLE_ASSIGNMENT_RE.match(line)
+        if m_double:
+            indent, var_name, op_sym, rhs = m_double.groups()
+            line = f"{indent}{var_name} {op_sym}= {rhs}"
+        else:
+            line = _ASSIGNMENT_PARENS_RE.sub(r'\1\2', line)
+            line = _RETURN_PARENS_RE.sub(r'\1\2', line)
+            line = _IF_PARENS_RE.sub(r'\1\2:', line)
+            line = _WHILE_PARENS_RE.sub(r'\1\2:', line)
+        out_lines.append(line)
+    return '\n'.join(out_lines)
 
-                out_lines.append(line)
 
-    flush_imports()
+def _parens_balanced(text: str) -> bool:
+    depth = 0
+    for char in text:
+        depth += (char == '(') - (char == ')')
+        if depth < 0:
+            return False
+    return depth == 0
 
-    text = '\n'.join(out_lines)
 
-    def fix_print_parens_and_strings(match):
-        prefix = match.group(1)
-        inner = match.group(2)
-        
-        # Convert triple-quoted strings inside a print() to single-line double-quoted
-        # strings with literal \n escapes. Use repr() to safely re-quote the value
-        # so embedded quotes never produce invalid syntax.
-        def repl_str(m):
-            # A prefixed string (f"""...""", r"""...""", b"""...""") is left as it is: repr() would
-            # write the prefix in front of a quoted copy of its text, which is not the same string.
-            if m.group(1):
-                return m.group(0)
-            # repr() of a str always produces a syntactically valid Python literal.
-            return repr(m.group(3))  # e.g. "'hello\\nworld'" or '"it\'s"'
+def _has_top_level_comma(text: str) -> bool:
+    depth = 0
+    for char in text:
+        if char in '([{':
+            depth += 1
+        elif char in ')]}':
+            depth -= 1
+        elif char == ',' and depth == 0:
+            return True
+    return False
 
-        # Each literal is matched from its opener to its own closer in one pass, so the closer of
-        # one string is never taken for the opener of the next.
-        inner = re.sub("(?<![A-Za-z0-9_])([A-Za-z]{0,3})(\'\'\'|\"\"\")([\\s\\S]*?)\\2", repl_str, inner)
 
-        # strip extra grouping parentheses if present, but only when the inner
-        # expression is NOT a tuple (top-level comma would change semantics).
-        m = re.match(r'^\((.*)\)$', inner, flags=re.DOTALL)
-        if m:
-            inside = m.group(1)
-            # Balance check: the parens must form a matched pair.
-            depth = 0
-            balanced = True
-            for char in inside:
-                if char == '(': depth += 1
-                elif char == ')': depth -= 1
-                if depth < 0:
-                    balanced = False
-                    break
-            if balanced and depth == 0:
-                try:
-                    # Robust check using AST to see if 'inside' is a tuple.
-                    # We use mode='eval' because 'inside' should be a single expression
-                    # (possibly a tuple expression).
-                    node = ast.parse(inside, mode='eval')
-                    # If it's an ast.Tuple, then unwrapping the outer parentheses
-                    # would turn one tuple argument into multiple arguments.
-                    if not isinstance(node.body, ast.Tuple):
-                        inner = inside
-                except (SyntaxError, ValueError):
-                    # Fallback to the manual comma scan if AST parsing fails.
-                    # (e.g., for specialized syntax like '*args' which mode='eval' might reject)
-                    # Use a scan that skips content inside delimiters.
-                    top_level_comma = False
-                    d = 0
-                    for char in inside:
-                        if char in '([{': d += 1
-                        elif char in ')]}': d -= 1
-                        elif char == ',' and d == 0:
-                            top_level_comma = True
-                            break
-                    if not top_level_comma:
-                        inner = inside
-        
-        return f"{prefix}{inner})"
+def _unwrap_print_argument(inner: str) -> str:
+    """`(x)` -> `x` for a print argument, unless `x` is a tuple (a top-level comma would split the argument)."""
+    m = re.match(r'^\((.*)\)$', inner, flags=re.DOTALL)
+    if not m:
+        return inner
+    inside = m.group(1)
+    if not _parens_balanced(inside):
+        return inner
+    try:
+        node = ast.parse(inside, mode='eval')
+        return inner if isinstance(node.body, ast.Tuple) else inside
+    except (SyntaxError, ValueError):
+        # e.g. `*args`, which mode='eval' rejects: fall back to a scan for a top-level comma
+        # (a `yield` argument needs its parentheses)
+        return inner if re.match(r'\s*yield\b', inside) or _has_top_level_comma(inside) else inside
 
-    if beautification_level in ('core', 'aggressive'):
-        text = re.sub(r'^([ \t]*print\s*\()([\s\S]*?)\)$', fix_print_parens_and_strings, text, flags=re.MULTILINE)
 
-    text = re.sub(r'\n{3,}', '\n\n', text)
+def _one_line_string(match: "re.Match") -> str:
+    # A prefixed string (f"""...""", r"""...""", b"""...""") is left as it is: repr() would write the
+    # prefix in front of a quoted copy of its text, which is not the same string.
+    if match.group(1):
+        return match.group(0)
+    try:
+        # the value of the literal, escapes included, not its source text
+        return repr(ast.literal_eval(match.group(0)))
+    except (SyntaxError, ValueError):
+        return match.group(0)
 
-    # ── Final cleanup: suppress raw decompiler-tuple leakage ─────────────
-    # If any ('func', ...) or ('class', ...) tuples slipped through to an
-    # assignment RHS or statement position, replace the ENTIRE statement
-    # (to end-of-line) with a comment + None so the output stays valid Python.
-    # Matches either:
-    # 1. string representation created by `_render_func_tuple`: "lambda params: ..."
-    # 2. raw "def <lambda>(params):\n..." block
+
+def _tidy_print_call(match: "re.Match") -> str:
+    # Each literal is matched from its opener to its own closer in one pass, so the closer of one
+    # string is never taken for the opener of the next.
+    inner = re.sub(_TRIPLE_QUOTED_RE, _one_line_string, match.group(2))
+    return f"{match.group(1)}{_unwrap_print_argument(inner)})"
+
+
+def tidy_print_calls(text: str) -> str:
+    """Write a triple-quoted string in a `print(...)` on one line and drop redundant grouping parentheses."""
+    return re.sub(r'^([ \t]*print\s*\()([\s\S]*?)\)$', _tidy_print_call, text, flags=re.MULTILINE)
+
+
+def collapse_blank_lines(text: str) -> str:
+    """Never more than one blank line in a row."""
+    return re.sub(r'\n{3,}', '\n\n', text)
+
+
+def _leak_comment(kind: str) -> str:
+    return 'genexpr/lambda' if kind == 'func' else 'class'
+
+
+def _leak_replacement(match: "re.Match") -> str:
+    return (f"{match.group(1)}# <{_leak_comment(match.group(3))} — not reconstructable>\n"
+            f"{match.group(1)}{match.group(2)} = None")
+
+
+def replace_leaked_tuples(text: str) -> str:
+    """Replace raw decompiler tuples (`('func', ...)`, `def <lambda>`) that reached the output with a comment.
+
+    The whole statement is replaced so the output stays valid Python. The first pattern matches the
+    string form made by `_render_func_tuple` (``lambda params: ...``) or a raw ``def <lambda>(params):``
+    block; the second an un-wrapped tuple floating on one line; the third a stray ``def <lambda>`` block.
+    """
     text = re.sub(
-        r"([ \t]*)([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*\('(func|class)',\s*.*?(?:def\s+<lambda>|lambda\s).*?(?:\n\1\)|'\)|\"\)|\"\"\"\)|'''\))\)?",
-        lambda m: (
-            f"{m.group(1)}# <{'genexpr/lambda' if m.group(3) == 'func' else 'class'}"
-            f" \u2014 not reconstructable>\n{m.group(1)}{m.group(2)} = None"
-        ),
-        text,
-        flags=re.MULTILINE | re.DOTALL
-    )
-    
-    # Also clean up un-wrapped cases that might be floating
-    text = re.sub(
-        r"([ \t]*)([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*\('(func|class)',[^\n]*",
-        lambda m: (
-            f"{m.group(1)}# <{'genexpr/lambda' if m.group(3) == 'func' else 'class'}"
-            f" \u2014 not reconstructable>\n{m.group(1)}{m.group(2)} = None"
-        ),
-        text,
-    )
-    
-    # Catch stray `def <lambda>` blocks anywhere
-    text = re.sub(
-        r"([ \t]*).*(?:def\s+<lambda>)[\s\S]*?(?=\n[ \t]*\S|\Z)",
-        lambda m: (
-            f"{m.group(1)}# <genexpr/lambda \u2014 not reconstructable>\n{m.group(1)}pass"
-        ),
-        text,
-        flags=re.MULTILINE
-    )
+        r"([ \t]*)([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*\('(func|class)',\s*.*?(?:def\s+<lambda>|lambda\s).*?"
+        r"(?:\n\1\)|'\)|\"\)|\"\"\"\)|'''\))\)?",
+        _leak_replacement, text, flags=re.MULTILINE | re.DOTALL)
+    text = re.sub(r"([ \t]*)([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*\('(func|class)',[^\n]*", _leak_replacement, text)
+    # the header line and the lines indented below it
+    return re.sub(
+        r"([ \t]*).*(?:def\s+<lambda>).*(?:\n\1[ \t]+\S.*|\n[ \t]*(?=(?:\n[ \t]*)*\n\1[ \t]+\S))*",
+        lambda m: f"{m.group(1)}# <genexpr/lambda — not reconstructable>\n{m.group(1)}pass",
+        text, flags=re.MULTILINE)
 
-    if beautification_level in ('core', 'aggressive'):
-        text = flatten_elif(text)
 
+class PostProcessTransform(NamedTuple):
+    """One named step of the output clean-up.
+
+    ``levels`` are the beautification levels that run it. ``preserves_ast`` says whether, for text that
+    parses, the result parses to the same tree; tests/test_postprocess_guard.py checks that claim.
+    """
+    name: str
+    apply: Callable[[str], str]
+    levels: FrozenSet[str]
+    preserves_ast: bool
+
+
+_EVERY_LEVEL = frozenset(('none', 'core', 'aggressive'))
+_CORE_UP = frozenset(('core', 'aggressive'))
+
+# Run first, with only the docstrings masked: they read the triple-quoted strings inside a `print(...)`.
+STRING_TRANSFORMS: Tuple[PostProcessTransform, ...] = (
+    PostProcessTransform("tidy_print_calls", tidy_print_calls, _CORE_UP, True),
+)
+
+# Run next, in this order, with every multi-line string literal masked out so none of them can change its value.
+TEXT_TRANSFORMS: Tuple[PostProcessTransform, ...] = (
+    # a repeated import is dropped, so the tree is not always identical
+    PostProcessTransform("merge_imports", merge_imports, _EVERY_LEVEL, False),
+    PostProcessTransform("strip_redundant_parens", strip_redundant_parens, _EVERY_LEVEL, True),
+    PostProcessTransform("collapse_blank_lines", collapse_blank_lines, _EVERY_LEVEL, True),
+    # a leaked tuple becomes `name = None`
+    PostProcessTransform("replace_leaked_tuples", replace_leaked_tuples, _EVERY_LEVEL, False),
+    PostProcessTransform("flatten_elif", flatten_elif, _CORE_UP, True),
+)
+
+# Run last, on the finished text, after the string literals are put back.
+FINAL_TRANSFORMS: Tuple[PostProcessTransform, ...] = (
+    PostProcessTransform("split_dict_displays", split_dict_displays, frozenset(('aggressive',)), True),
+)
+
+
+def _run(transforms: Tuple[PostProcessTransform, ...], text: str, level: str) -> str:
+    for transform in transforms:
+        if level in transform.levels:
+            text = transform.apply(text)
+    return text
+
+
+def post_process_source(source: str, beautification_level: str = 'core') -> str:
+    """Clean up decompiled output to be more Pythonic (see STRING_TRANSFORMS, TEXT_TRANSFORMS and FINAL_TRANSFORMS)."""
+    text, literals = _mask_multiline_strings(source)
+    text = _run(STRING_TRANSFORMS, text, beautification_level)
+    text, literals = _mask_multiline_strings(text, statements_only=False, literals=literals)
+    text = _run(TEXT_TRANSFORMS, text, beautification_level)
     result = _unmask_multiline_strings(text.strip('\r\n') + '\n', literals)
-    if beautification_level == 'aggressive':
-        result = split_dict_displays(result)
-    return result
+    return _run(FINAL_TRANSFORMS, result, beautification_level)
