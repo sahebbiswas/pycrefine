@@ -3,7 +3,6 @@ import ast
 import dis
 import keyword
 import re
-import sys
 import types
 from dataclasses import replace
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -321,7 +320,7 @@ class DecompilerGeneric(DecompilerBase):
         is_function = bool(code.co_flags & 0x1)  # CO_OPTIMIZED: a function body
         if self.indent_level <= 0 or not is_function or code.co_name.startswith("<") or not code.co_consts:
             return None
-        if self.target_version >= (3, 14) and not code.co_flags & 0x4000000:
+        if self._supports("docstring_flag") and not code.co_flags & 0x4000000:
             return None
         first = code.co_consts[0]
         return first if isinstance(first, str) else None
@@ -361,7 +360,7 @@ class DecompilerGeneric(DecompilerBase):
         if not doc:
             return '""'
         text = doc
-        if self.target_version >= (3, 13) and "\n" in text and self.indent_level > 0:
+        if self._supports("dedented_docstrings") and "\n" in text and self.indent_level > 0:
             pad = "    " * self.indent_level
             first, *rest = text.split("\n")
             rest = [pad + ln if ln else "" for ln in rest]
@@ -761,7 +760,7 @@ class DecompilerGeneric(DecompilerBase):
         drop: Set[int] = set()
         for head, end in ends.items():
             ins, last = instrs[head], instrs[end]
-            if self.target_version < (3, 12):
+            if not self._supports("cold_handlers"):
                 if end + 1 >= len(instrs):
                     continue
                 target = instrs[end + 1].offset
@@ -788,7 +787,7 @@ class DecompilerGeneric(DecompilerBase):
         """
         instrs = self.instructions
         ends: Dict[int, int] = {}
-        entries = self._exception_entries() if tuple(self.target_version) >= (3, 11) else None
+        entries = self._exception_entries() if self._supports("exception_table") else None
         if entries is not None:
             index_at = {ins.offset: n for n, ins in enumerate(instrs)}
             for n, ins in enumerate(instrs):
@@ -914,7 +913,7 @@ class DecompilerGeneric(DecompilerBase):
         opname = self.instructions[k].opname
         if opname == "GET_YIELD_FROM_ITER":
             return "YIELD_FROM_EXPR"
-        if opname == "GET_ANEXT" and self.target_version >= (3, 10):   # (3.9: not read, and reported)
+        if opname == "GET_ANEXT" and self._supports("anext_opcode"):   # (3.9: not read, and reported)
             return "ANEXT_EXPR"
         if opname != "GET_AWAITABLE":
             return None
@@ -949,12 +948,12 @@ class DecompilerGeneric(DecompilerBase):
         """True if the GET_AWAITABLE at index *k* awaits the entry or the exit of an `async with`, not an `await`."""
         instrs = self.instructions
         ins = instrs[k]
-        if ins.arg in (1, 2) and self.target_version >= (3, 11):    # (where the awaited value comes from)
+        if ins.arg in (1, 2) and self._supports("awaited_exit_args"):    # (where the awaited value comes from)
             return True
         before = instrs[k - 1].opname if k else ""
         if before in ("BEFORE_ASYNC_WITH", "WITH_EXCEPT_START"):
             return True
-        if tuple(self.target_version) != (3, 10):
+        if not self._supports("normalised_block_stack"):
             return False
         # 3.10: `LOAD_CONST None; DUP_TOP; DUP_TOP; CALL_FUNCTION 3` (read as three loads and a CALL 2 on 3.11's form)
         return k > 3 and ((before == "CALL_FUNCTION" and instrs[k - 1].arg == 3
@@ -1176,7 +1175,7 @@ class DecompilerGeneric(DecompilerBase):
         if prev is None or prev.opname not in ("POP_TOP", "POP_ITER"):
             return False
         return jump.opname == "JUMP_ABSOLUTE" or (jump.opname.startswith("JUMP_BACKWARD")
-                                                 and self.target_version >= (3, 12))
+                                                 and self._supports("iterator_drop_uses_jump_backward"))
 
     def _for_start(self, loop_end: int) -> int:
         """Offset a jump back to the loop that ends at *loop_end* lands on (its FOR_ITER, or the EXTENDED_ARG before it), or -1."""
@@ -1548,7 +1547,7 @@ class DecompilerGeneric(DecompilerBase):
         the loop's guard: a conditional jump of the opposite sense that leaves the loop, and
         whose condition ends in the same instruction as this copy's does.
         """
-        if not (3, 10) <= self.target_version < (3, 12):
+        if not self._supports("loop_condition_copy"):
             return False
         if not (instr.opname.startswith("POP_JUMP") and "_IF_" in instr.opname):
             return False
@@ -1585,7 +1584,7 @@ class DecompilerGeneric(DecompilerBase):
 
     def _is_null_sentinel(self, v: Any) -> bool:
         """Check if v is a NULL sentinel (None or StackNULL). 3.11+ only."""
-        if getattr(self, "target_version", sys.version_info) < (3, 11):
+        if not self._supports("null_sentinels"):
             return False
         if v is None: return True
         vs = str(v)
@@ -1679,7 +1678,7 @@ class DecompilerGeneric(DecompilerBase):
         """
         self.prescan.chain_values = {}
         self._suppress_condition_chain_cleanups()
-        if self.target_version < (3, 12):
+        if not self._supports("chain_comparison_values"):
             self._prescan_chain_cleanups()
             return
         instrs = self.instructions
@@ -2855,7 +2854,7 @@ class DecompilerGeneric(DecompilerBase):
         # consuming store / POP_TOP -- followed by STORE_FAST of each saved name.
         j = end_idx + 1
         # 3.12's END_FOR pops the iterator itself; 3.13+ emit a separate pop.
-        if (j < n_ins and self.target_version >= (3, 13)
+        if (j < n_ins and self._supports("separate_iterator_pop")
                 and instrs[j].opname in ("POP_TOP", "POP_ITER")):
             j += 1
         j = self._past_comprehension_handler(j)
@@ -3669,11 +3668,11 @@ class DecompilerGeneric(DecompilerBase):
                 # the back-edge (`if c: return x` as the last statement).
                 continue
             guard_offset = self._find_while_guard(jb, body_start, head_is_nop, head_is_for, exit_block)
-            if guard_offset > body_start and (self.target_version < (3, 10) or self.target_version >= (3, 14)):
+            if guard_offset > body_start and self._supports("loop_head_condition"):
                 # 3.9 and 3.14 test the condition at the loop head: for `while a and b:`
                 # every clause jumps out, and the last one is the guard that opens the body.
                 guard_offset = self._last_jump_of_condition(guard_offset, jb.offset)
-                if self.target_version >= (3, 14):
+                if self._supports("inverted_loop_guards"):
                     guard_offset = self._last_inverted_clause(guard_offset, jb.offset)
             if guard_offset >= 0:
                 self._register_while_guard(jb_idx, jb, body_start, guard_offset, exit_block)
@@ -3733,7 +3732,7 @@ class DecompilerGeneric(DecompilerBase):
             # never lies above `body_start`: a conditional jump there belongs to an
             # enclosing `if`, as in `if a: while b: ...` (the `if` jump is the closest).
             if (ins.offset < body_start and not inverted
-                    and (self.target_version < (3, 10) or self.target_version >= (3, 14))):
+                    and self._supports("loop_head_condition")):
                 continue
             if t <= jb.offset and not inverted and not (
                     exit_block is not None and t == exit_block[0]) and not (
@@ -3754,7 +3753,7 @@ class DecompilerGeneric(DecompilerBase):
                         if scan.opname not in _WHILE_TRIVIAL_OPS:
                             only_trivial = False
                             break
-                        if scan.opname == "NOP" and (3, 10) <= self.target_version < (3, 14):
+                        if scan.opname == "NOP" and not self._supports("loop_head_condition"):
                             only_trivial = False    # the marker of a `while True:` that follows the `if`
                             break
                 if not only_trivial:
@@ -3770,7 +3769,7 @@ class DecompilerGeneric(DecompilerBase):
         """Record the loop headed at *body_start* as a `while` with the guard at *guard_offset*, and what its copies and exits suppress."""
         self.prescan.while_header_targets[body_start] = guard_offset
         guard = next(i for i in self.instructions if i.offset == guard_offset)
-        late_guard = (self.target_version >= (3, 14) and guard_offset > body_start
+        late_guard = (self._supports("inverted_loop_guards") and guard_offset > body_start
                       and self._exit_pair_jump(self.instructions.index(guard)) is not None)
         if late_guard:
             self.prescan.inverted_guards[guard_offset] = body_start
@@ -3781,7 +3780,7 @@ class DecompilerGeneric(DecompilerBase):
         # 3.12/3.13 copy the loop condition to the bottom of the body.
         # Suppress exactly that copy's exit jumps, never body-level ifs.
         after_loop = self.instructions[jb_idx + 1].offset
-        if exit_block is None and self.target_version >= (3, 14):
+        if exit_block is None and self._supports("inverted_loop_guards"):
             before_handlers = self._exit_block_before_handlers(guard_offset)
             if before_handlers is not None:
                 exit_block, after_loop = before_handlers[:2], before_handlers[2]
@@ -3849,7 +3848,7 @@ class DecompilerGeneric(DecompilerBase):
         """
         instrs = self.instructions
         jb = instrs[idx]
-        if self.target_version < (3, 14) or not self._is_handler_exit_back_jump(idx):
+        if not self._supports("inverted_loop_guards") or not self._is_handler_exit_back_jump(idx):
             return None
         head = self._get_jump_target(jb)
         by_offset = {ins.offset: n for n, ins in enumerate(instrs)}
@@ -4388,7 +4387,7 @@ class DecompilerGeneric(DecompilerBase):
         leave the loop or go back to the body too. Everything before the copy's first
         instruction is a body statement; body-level `if` jumps stay out of the set.
         """
-        if self.target_version >= (3, 14):
+        if self._supports("condition_tested_once"):
             return set()  # 3.14 tests the condition once, at the loop head
         instrs = self.instructions
         idx = next((i for i, ins in enumerate(instrs) if ins is jb), -1)
@@ -4724,7 +4723,7 @@ class DecompilerGeneric(DecompilerBase):
         if idx >= 2 and instrs[idx - 1].opname == "POP_TOP" and instrs[idx - 2].opname == "POP_EXCEPT":
             return True
         # 3.11 ends the exit handler with `POP_TOP; POP_EXCEPT; POP_TOP; POP_TOP`
-        return (self.target_version < (3, 12) and idx >= 4
+        return (not self._supports("cold_handlers") and idx >= 4
                 and [i.opname for i in instrs[idx - 4:idx]] == ["POP_TOP", "POP_EXCEPT", "POP_TOP", "POP_TOP"])
 
     def _classify_handler_exit_jumps(self):
@@ -4861,7 +4860,7 @@ class DecompilerGeneric(DecompilerBase):
                     # Only the no-op that marks the end of the try body lies in between
                     # (a body ending in a loop leaves one before the inline finally).
                     merge = after_body
-                elif self.target_version >= (3, 12) and self._handlers_all_leave(e.target, body_end) \
+                elif self._supports("cold_handlers") and self._handlers_all_leave(e.target, body_end) \
                         and self._body_falls_into(body_end, e.start):
                     # (3.12+ lays the handlers out after all ordinary code.) Every way out of them is a
                     # `continue` or a `return`, so nothing rejoins: they go right after the body.
@@ -4931,10 +4930,10 @@ class DecompilerGeneric(DecompilerBase):
             # code that follows the `with` statement comes before the next handler: the
             # wrapper ends with its own cleanup, not with the next one. (3.12 and later move
             # every handler to the end of the code, where the next handler is the boundary.)
-            cleanup_end = self._with_exit_handler_end(pei_idx) if self.target_version < (3, 12) else None
+            cleanup_end = self._with_exit_handler_end(pei_idx) if not self._supports("cold_handlers") else None
             if cleanup_end is not None:
                 end_off = min(end_off, cleanup_end)
-            elif self.target_version < (3, 12):
+            elif not self._supports("cold_handlers"):
                 # The handler ends with its own clean-up (`COPY 3; POP_EXCEPT; RERAISE 1`);
                 # what follows, in a loop, is the rest of the loop body.
                 end_off = min(end_off, self._wrapper_cleanup_end(pei_off, end_off))
@@ -5433,7 +5432,7 @@ class DecompilerGeneric(DecompilerBase):
         on into the inner try's body and then its handler, so the handler's protected range starts after the
         outer handler and before the inner one.
         """
-        if self.target_version < (3, 12):
+        if not self._supports("cold_handlers"):
             return set()
         nested: Set[int] = set()
         for handler in sorted(real_push_exc):
@@ -5453,7 +5452,7 @@ class DecompilerGeneric(DecompilerBase):
         as well as writing it once after the try. The clause falls through to the tail in the source, so the
         copy is dropped when it is the same straight-line code, up to the `return`, as the one after the try.
         """
-        if self.target_version < (3, 12):
+        if not self._supports("cold_handlers"):
             return handler_instrs
         instrs = self.instructions
         start = next((n for n, ins in enumerate(instrs) if ins.offset == merge), None)
@@ -5593,7 +5592,7 @@ class DecompilerGeneric(DecompilerBase):
                     and instrs[by_offset[e.target] + 1].opname == "WITH_EXCEPT_START"}
         inline_exit_handlers = {
             h for h in handlers
-            if self.target_version < (3, 12) and self._with_exit_handler_end(by_offset[h]) is not None
+            if not self._supports("cold_handlers") and self._with_exit_handler_end(by_offset[h]) is not None
         }
         for handler in handlers:
             ranges = [e for e in entries if e.target == handler]
@@ -5610,7 +5609,7 @@ class DecompilerGeneric(DecompilerBase):
             # with's own, and the code after the try is still body.)
             cold = min((x.offset for x in instrs if x.opname == "PUSH_EXC_INFO" and x.offset > body_start
                         and x.offset not in inline_exit_handlers
-                        and (self.target_version >= (3, 12) or x.offset > handler)), default=handler)
+                        and (self._supports("cold_handlers") or x.offset > handler)), default=handler)
             # Code in a try nested in the body is protected by that try's handler, whose
             # own code the with's handler protects: those ranges belong to the body too.
             body_ranges = [e for e in entries if e.target in _owned_handlers(handler, entries) and e.start < cold]
@@ -5674,7 +5673,7 @@ class DecompilerGeneric(DecompilerBase):
         The compiler lays it out after the handlers, so it would be written after the code that
         follows the enclosing loop. It is rendered where the with block closes instead.
         """
-        if self.target_version < (3, 12):
+        if not self._supports("cold_handlers"):
             return
         instrs = self.instructions
         by_offset = {ins.offset: k for k, ins in enumerate(instrs)}
@@ -6526,7 +6525,7 @@ class DecompilerGeneric(DecompilerBase):
                 
         # 3.11+ LOAD_GLOBAL with bit 0 set pushes NULL sentinel.
         # Python 3.9/3.10 do not use this bit for sentinels.
-        if getattr(self, "target_version", sys.version_info) >= (3, 11) and ("LOAD_GLOBAL" in opname):
+        if self._supports("null_sentinels") and ("LOAD_GLOBAL" in opname):
             arg = int(instr.arg) if instr.arg is not None else 0
             if (arg & 1):
                 # Pushes [NULL, func]
@@ -6565,7 +6564,7 @@ class DecompilerGeneric(DecompilerBase):
         if instr.offset == self.emit.exc_as_store_offset:
             self.emit.exc_as_store_offset = -1
             return
-        if self.target_version >= (3, 11):
+        if self._supports("store_name_batches"):
             self._begin_name_batch()
         if self.stack:
             val = self.stack.pop()
@@ -6647,7 +6646,7 @@ class DecompilerGeneric(DecompilerBase):
         flags = self.code_obj.co_flags
         future = bool(flags & 0x1000000)  # CO_FUTURE_ANNOTATIONS
         if (str(container) != "__annotations__" or not self._is_name_literal(key) or flags & 0x1
-                or (self.target_version >= (3, 14) and not future)):
+                or (self._supports("lazy_annotations") and not future)):
             return None
         text = str(val)
         if not future:
@@ -6821,7 +6820,7 @@ class DecompilerGeneric(DecompilerBase):
             if not self.stack: return "Exception"
             v = self.stack.pop()
             # Sentinels skipped only on 3.11+
-            if getattr(self, "target_version", sys.version_info) >= (3, 11):
+            if self._supports("null_sentinels"):
                 while self._is_null_sentinel(v) and self.stack:
                     v = self.stack.pop()
             return v
@@ -7075,14 +7074,14 @@ class DecompilerGeneric(DecompilerBase):
             slots.pop()
         k = self.pc - 1
         instrs = self.instructions
-        return (self.target_version >= (3, 12) and bool(slots) and slots[-1] == len(self.emit.except_header_indents) - 1
+        return (self._supports("cold_handlers") and bool(slots) and slots[-1] == len(self.emit.except_header_indents) - 1
                 and 0 < k < len(instrs) - 1 and instrs[k - 1].opname == "COPY" and instrs[k + 1].opname == "RERAISE")
 
     def _is_exception_cleanup(self) -> bool:
         """True when the POP_EXCEPT being handled is that of a `COPY 3; POP_EXCEPT; RERAISE 1` clean-up handler (3.11)."""
         k = self.pc - 1  # index of *instr*
         instrs = self.instructions
-        return (self.target_version < (3, 12) and 0 < k < len(instrs) - 1 and instrs[k - 1].opname == "COPY" and instrs[k + 1].opname == "RERAISE")
+        return (not self._supports("cold_handlers") and 0 < k < len(instrs) - 1 and instrs[k - 1].opname == "COPY" and instrs[k + 1].opname == "RERAISE")
 
     def _close_except_clause(self) -> None:
         """End the innermost except clause: give an empty one a `pass`, and dedent."""
@@ -7400,7 +7399,7 @@ class DecompilerGeneric(DecompilerBase):
                 loads += 2
             elif ins.opname == "BUILD_SLICE" and isinstance(ins.arg, int) and loads >= ins.arg:
                 loads -= ins.arg - 1    # the key of a subscript that is a slice: `o[a:b]` before 3.12
-            elif ins.opname != "LOAD_ATTR" or (self.target_version >= (3, 12) and (ins.arg or 0) & 1):
+            elif ins.opname != "LOAD_ATTR" or (self._supports("load_attr_method_flag") and (ins.arg or 0) & 1):
                 # (before 3.12 the argument of LOAD_ATTR is only the name, not a method flag)
                 return ((ins.opname == "STORE_ATTR" and loads == 1) or (ins.opname == "STORE_SUBSCR" and loads == 2)
                         or (ins.opname == "STORE_SLICE" and loads == 3))
@@ -8077,7 +8076,7 @@ class DecompilerGeneric(DecompilerBase):
         if opname == "CALL_FUNCTION_EX":
             flags = num_args
             kwargs_dict = None
-            if self.target_version >= (3, 14):
+            if self._supports("call_ex_keyword_slot"):
                 # 3.14 dropped the flag: the keyword slot is always there, a NULL when unused.
                 item = self._pop()
                 kwargs_dict = None if self._is_null_sentinel(item) else item
@@ -9160,7 +9159,7 @@ class DecompilerGeneric(DecompilerBase):
                     # (a `with` whose exit handler is hidden ends at this jump too)
                     if cb_type not in ("if", "else") and not (
                             cb_type == "with" and self.blocks[-1][0] < next_offset
-                            and self.target_version < (3, 11)):
+                            and not self._supports("exception_table")):
                         break
                     self.blocks.pop()
                     if cb_type not in _NO_PASS_TYPES:
@@ -10092,7 +10091,7 @@ class DecompilerGeneric(DecompilerBase):
 
     def _body_annotations(self) -> list:
         """The annotations of a 3.14 module or class body, read from its `__annotate__` code (empty otherwise)."""
-        if self.target_version < (3, 14):
+        if not self._supports("lazy_annotations"):
             return []
         # The compiler emits its `__annotate__` after the body's statements, so a user-defined function of that
         # name comes earlier in `co_consts`.
@@ -10214,12 +10213,12 @@ class DecompilerGeneric(DecompilerBase):
         # 3.12+ LOAD_ATTR arg is a bitmask. Bit 0 (0x01) means push NULL/self sentinel.
         # This is used for method calls: stack becomes [obj, NULL, func]
         arg = int(instr.arg) if instr.arg is not None else 0
-        if (arg & 1) and self.target_version >= (3, 12):
+        if (arg & 1) and self._supports("load_attr_method_flag"):
             self.stack.append(obj)
             self.stack.append(StackNULL(is_method=True))
             self.stack.append(str(instr.argval))
         else:
-            if instr.opname == "LOAD_METHOD" and self.target_version >= (3, 11):
+            if instr.opname == "LOAD_METHOD" and self._supports("load_method_null_slot"):
                 # 3.11's LOAD_METHOD leaves [NULL, method] under the call's arguments. Without
                 # the NULL slot a call nested in another call's arguments would take the
                 # outer callable for its own (see #226). `is_method=False` is deliberate: the

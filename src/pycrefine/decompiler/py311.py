@@ -15,7 +15,7 @@ class Decompiler311Plus(DecompilerGeneric):
 
     def _disassemble(self):
         super()._disassemble()
-        if tuple(self.target_version) == (3, 10) and has_block_handlers(self.instructions):
+        if self._supports("normalised_block_stack") and has_block_handlers(self.instructions):
             self.instructions, self._block_entries = normalise_block_handlers(self.instructions)
 
     def _dispatch_instruction(self, instr: BytecodeInstruction):

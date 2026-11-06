@@ -8,6 +8,7 @@ from .state import PrescanState
 from ..diagnostics import INTERNAL_ERROR, STACK_UNDERFLOW, DecompilationError, Diagnostic
 from ..expr import UnknownExpression
 from ..instructions import BytecodeInstruction
+from ..versions import supports
 
 # Marks "no fallback given" for _pop(), since None is a fallback callers use.
 _UNSET: Any = object()
@@ -58,6 +59,10 @@ class DecompilerBase:
         # Loop-item placeholders _loop_placeholder chose because "_item" was already in use.
         self._loop_placeholder_names: Set[str] = set()
         self._code_names_cache: Optional[Set[str]] = None
+
+    def _supports(self, capability: str) -> bool:
+        """Whether the bytecode of the version being decompiled has *capability* (see ``versions.CAPABILITIES``)."""
+        return supports(capability, tuple(self.target_version))
 
     def _report(self, kind: str, reason: str, instr: Optional[BytecodeInstruction] = None) -> None:
         """
@@ -330,12 +335,12 @@ class DecompilerBase:
         cached = self._exception_entries_cache
         if cached is False:
             cached = None
-            if tuple(self.target_version) == (3, 10):
+            if self._supports("normalised_block_stack"):
                 # computed from the block stack when the instructions were read (block_handlers)
                 cached = self._block_entries
                 if cached is not None and self._throw_handlers:
                     cached = [e for e in cached if e.target not in self._throw_handlers]
-            elif tuple(self.target_version) >= (3, 11):
+            elif self._supports("exception_table"):
                 try:
                     bytecode = dis.Bytecode(self.code_obj)
                     at = {ins.offset: ins for ins in bytecode}

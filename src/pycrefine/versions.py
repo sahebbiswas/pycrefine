@@ -18,7 +18,7 @@ Support is a ladder; each level includes the one above it:
 Whether the bytecode can be *parsed* on another host is a separate fact (``cross_host``).
 """
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 RECOGNIZED = "recognized"
 RECONSTRUCTABLE = "reconstructable"
@@ -68,6 +68,77 @@ VERSIONS: Tuple[PythonVersion, ...] = (
 # not a plausible magic number at all (a source file or archive read as a header).
 FUTURE_MAGIC_LIMIT = 5000
 FUTURE_LABEL = "3.15+"
+
+
+# ---------------------------------------------------------------------------------------------
+# Capabilities: what the bytecode of a version looks like.
+#
+# The decompiler asks `supports("name", version)` instead of comparing the version with a tuple,
+# so every difference between versions is named, described and listed here, and adding a version
+# means reading this table. Each capability holds for the versions in one or more half-open
+# intervals ``[since, until)``; ``None`` means unbounded. tests/test_capabilities.py checks that
+# every name the code asks for is defined here, that every name defined here is asked for, and
+# that no comparison with a version tuple is left in the decompiler.
+# ---------------------------------------------------------------------------------------------
+Version = Tuple[int, int]
+Interval = Tuple[Optional[Version], Optional[Version]]
+
+
+@dataclass(frozen=True)
+class Capability:
+    """One version-dependent property of the bytecode and the intervals of versions that have it."""
+    description: str
+    intervals: Tuple[Interval, ...]
+
+
+def _since(version: Version, description: str) -> Capability:
+    return Capability(description, ((version, None),))
+
+
+CAPABILITIES: Dict[str, Capability] = {
+    # 3.10
+    "anext_opcode": _since((3, 10), "GET_ANEXT is read as the `__anext__` call of an async loop."),
+    "normalised_block_stack": Capability(
+        "The exception handlers are found from the block stack (SETUP_FINALLY and POP_BLOCK) and rewritten "
+        "to the exception-table form before the passes run: 3.10 only.", (((3, 10), (3, 11)),)),
+    "loop_condition_copy": Capability(
+        "The condition of a `while` is copied to the bottom of the body, with its own exit jumps.",
+        (((3, 10), (3, 12)),)),
+    # 3.11
+    "exception_table": _since((3, 11), "Exception handlers are listed in an exception table (no SETUP_FINALLY)."),
+    "null_sentinels": _since((3, 11), "A NULL is pushed under a callee and popped with the call (PUSH_NULL, LOAD_GLOBAL bit 0)."),
+    "awaited_exit_args": _since((3, 11), "GET_AWAITABLE's argument says whether it awaits the entry or the exit of an `async with`."),
+    "store_name_batches": _since((3, 11), "The stores of one statement are grouped, so a name stored twice in one is one batch."),
+    "load_method_null_slot": _since((3, 11), "LOAD_METHOD leaves [NULL, method] under the call's arguments."),
+    # 3.12
+    "cold_handlers": _since((3, 12), "Exception handlers are laid out after all the ordinary code, not inline after their try."),
+    "chain_comparison_values": _since((3, 12), "A chained comparison used as a value is a run of links with a shared clean-up."),
+    "iterator_drop_uses_jump_backward": _since((3, 12), "The jump after the drop of a `for` loop's iterator is JUMP_BACKWARD."),
+    "load_attr_method_flag": _since((3, 12), "LOAD_ATTR bit 0 marks a method load, which pushes the object and a NULL."),
+    # 3.13
+    "dedented_docstrings": _since((3, 13), "The compiler strips the indentation of a docstring, so the text has to be re-indented."),
+    "separate_iterator_pop": _since((3, 13), "The end of a `for` loop pops the iterator with its own POP_ITER."),
+    # 3.14
+    "docstring_flag": _since((3, 14), "A function's docstring is co_consts[0] only when CO_HAS_DOCSTRING is set."),
+    "lazy_annotations": _since((3, 14), "Annotations are computed by an `__annotate__` function, not stored while the body runs."),
+    "call_ex_keyword_slot": _since((3, 14), "CALL_FUNCTION_EX always has a keyword slot (a NULL when unused), with no flag."),
+    "inverted_loop_guards": _since((3, 14), "A loop's guard can jump into the body, with the fall-through leaving the loop."),
+    "condition_tested_once": _since((3, 14), "A `while` condition is tested once, at the loop head, and not copied to the bottom."),
+    "loop_head_condition": Capability(
+        "The condition of a `while` is tested at the head of the loop, so a conditional jump above the head is "
+        "an enclosing `if`: 3.9 and 3.14.", ((None, (3, 10)), ((3, 14), None))),
+}
+
+
+def supports(capability: str, version: Version) -> bool:
+    """Whether the bytecode of *version* has *capability*.
+
+    Raises:
+        KeyError: if *capability* is not in ``CAPABILITIES`` (a misspelt name must not read as False).
+    """
+    version = (int(version[0]), int(version[1]))
+    return any((since is None or version >= since) and (until is None or version < until)
+               for since, until in CAPABILITIES[capability].intervals)
 
 
 def version_for_magic(version_id: int) -> Optional[PythonVersion]:
