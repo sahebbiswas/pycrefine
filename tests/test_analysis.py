@@ -1,10 +1,18 @@
 """The analysis passes (src/pycrefine/analysis) on small snippets, with no decompiler involved (#120)."""
+import argparse
 import dataclasses
 import dis
+import json
+import os
+import subprocess
 import sys
+import textwrap
+import tokenize
+import types
 import unittest
 
-from pycrefine.analysis import HandlerClassification, classify_handlers, split_superinstructions
+from pycrefine.analysis import (ExceptionTableEntry, HandlerClassification, classify_handlers,
+                                parse_exception_table, split_superinstructions)
 from pycrefine.instructions import BytecodeInstruction
 
 
@@ -113,6 +121,47 @@ class TestClassifyHandlers(unittest.TestCase):
     def test_a_code_object_without_handlers_has_none(self):
         _, _, result = self.classify("x = 1\n")
         self.assertEqual(result, HandlerClassification(frozenset(), frozenset(), frozenset(), frozenset()))
+
+
+class TestParseExceptionTable(unittest.TestCase):
+
+    def test_an_empty_table_has_no_entries(self):
+        self.assertEqual(parse_exception_table(b""), [])
+
+    def test_one_entry(self):
+        # start 2 units, length 3, target 7, depth 1 with lasti: 0x80|2, 3, 7, (1 << 1) | 1
+        self.assertEqual(parse_exception_table(bytes([0x82, 3, 7, 3])),
+                         [ExceptionTableEntry(4, 10, 14, 1, True)])
+
+    def test_a_number_of_several_bytes(self):
+        # 70 = 1 * 64 + 6: the first byte has the continuation bit and the high part
+        self.assertEqual(parse_exception_table(bytes([0x80 | 0x40 | 1, 6, 1, 2, 0])),
+                         [ExceptionTableEntry(140, 142, 4, 0, False)])
+
+    def test_two_entries_keep_their_order(self):
+        table = bytes([0x80, 1, 5, 0, 0x81, 1, 5, 2])
+        self.assertEqual([(e.start, e.end, e.target, e.depth) for e in parse_exception_table(table)],
+                         [(0, 2, 10, 0), (2, 4, 10, 1)])
+
+    def test_a_table_that_ends_inside_an_entry_is_refused(self):
+        for cut in (bytes([0x80]), bytes([0x80, 1]), bytes([0x80, 1, 5]), bytes([0xC0])):
+            with self.subTest(cut=cut), self.assertRaises(ValueError):
+                parse_exception_table(cut)
+
+    @unittest.skipIf(sys.version_info < (3, 11), "the exception table is 3.11+")
+    def test_it_agrees_with_dis_on_real_code(self):
+        checked = 0
+        for module in (argparse, json, os, subprocess, textwrap, tokenize, unittest, dis):
+            source = open(module.__file__, encoding="utf-8").read()
+            todo = [compile(source, module.__file__, "exec")]
+            while todo:
+                code = todo.pop()
+                todo.extend(c for c in code.co_consts if isinstance(c, types.CodeType))
+                ours = [tuple(e) for e in parse_exception_table(code.co_exceptiontable)]
+                theirs = [tuple(e) for e in dis.Bytecode(code).exception_entries]
+                self.assertEqual(ours, theirs, code.co_qualname if hasattr(code, "co_qualname") else code.co_name)
+                checked += bool(ours)
+        self.assertGreater(checked, 50)
 
 
 if __name__ == "__main__":

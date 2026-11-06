@@ -5,6 +5,7 @@ import sys
 import types
 from typing import Any, Dict, List, Optional, Set, Tuple
 from .state import PrescanState
+from ..analysis import parse_exception_table
 from ..diagnostics import INTERNAL_ERROR, STACK_UNDERFLOW, DecompilationError, Diagnostic
 from ..expr import UnknownExpression
 from ..instructions import BytecodeInstruction
@@ -344,7 +345,7 @@ class DecompilerBase:
                 try:
                     bytecode = dis.Bytecode(self.code_obj)
                     at = {ins.offset: ins for ins in bytecode}
-                    entries = self._remap_entries([e for e in bytecode.exception_entries
+                    entries = self._remap_entries([e for e in parse_exception_table(self.code_obj.co_exceptiontable)
                                                    if not self._is_generator_wrapper(e, at)])
                     cached = self._joined_entries([e for e in entries if e.target not in self._throw_handlers])
                 except (AttributeError, TypeError, ValueError, IndexError) as exc:
