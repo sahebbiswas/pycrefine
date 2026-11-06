@@ -11,6 +11,13 @@
         "tests/test_try_in_clause.py::TestTryInClause::test_the_inner_clause_does_not_match",
         "tests/test_try_in_clause.py::TestTryInClause::test_the_reproduction"
       ]
+    },
+    {
+      "issue": 371,
+      "reason": "the finally of a try whose body is a re-raising try is written as ordinary code after the statement",
+      "tests": [
+        "tests/test_nested_try_with_finally.py::TestNestedTryWithFinally::test_the_finally_belongs_to_the_outer_statement"
+      ]
     }
   ]
 }
