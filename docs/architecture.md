@@ -70,9 +70,13 @@ source. For the development workflow, see [CONTRIBUTING.md](../CONTRIBUTING.md).
    and finally body, and is the first instruction of a body that `finally_body_suppress`
    then hides), then relocated exits, then the with-exit, finally-body, handler-section and
    wrapper-body sets. `tests/test_suppression_order.py` pins the order.
-5. **Post-process** (`postprocess.post_process_source`) the text: compiler-generated
-   returns, `elif` flattening at the `core` beautification level, and placeholders for
-   constructs that could not be rebuilt.
+5. **Post-process** (`postprocess.post_process_source`) the text by running an ordered list of
+   named transforms (`STRING_TRANSFORMS`, `TEXT_TRANSFORMS` with every multi-line string masked, then `FINAL_TRANSFORMS`), each selected by the
+   beautification level: import merging, redundant-parenthesis removal, `print` tidying, blank-line
+   collapsing, placeholders for constructs that could not be rebuilt, `elif` flattening (`core` and
+   up) and dict splitting (`aggressive`). A transform that is marked `preserves_ast` must leave the
+   parsed tree of parseable text unchanged, and the whole layer must be idempotent;
+   `tests/test_postprocess_guard.py` checks both on every file of the corpus.
 
 **How the dispatch table is built.** `_BASE_DISPATCH` maps opcode names to handler method
 names (strings). `DecompilerGeneric.__init_subclass__` runs once for each backend class, when

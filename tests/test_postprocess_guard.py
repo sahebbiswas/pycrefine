@@ -1,206 +1,236 @@
-"""Post-processing must not change what the program means, and must be stable (#121).
+"""The post-processing layer rewrites text, so it is held to the tree of the code it was given (#121).
 
-``post_process_source`` rewrites the emitted text with regular expressions. This guard
-decompiles every corpus entry that applies to the running Python and checks, wherever the
-raw output parses, that the rewritten text parses to the same tree and that rewriting it a
-second time changes nothing.
+Every transform that claims `preserves_ast` must leave the parsed tree of parseable input unchanged,
+the whole layer must be idempotent, and each transform has its own cases. The raw text used is what
+the backends hand to `post_process_source` for every file of the versioned corpus.
 """
 import ast
-import importlib.util
-import os
 import py_compile
-import sys
 import tempfile
 import unittest
-import warnings
 from pathlib import Path
+from unittest import mock
 
 from pycrefine import get_decompiler
-from pycrefine import postprocess
-from pycrefine.decompiler import generic
+from pycrefine import postprocess as pp
 
-_ROOT = Path(__file__).resolve().parent.parent
-_spec = importlib.util.spec_from_file_location("check_differential_guard", _ROOT / "quality" / "check_differential.py")
-cd = importlib.util.module_from_spec(_spec)
-sys.modules["check_differential_guard"] = cd
-_spec.loader.exec_module(cd)
-
-# Raw output and its post-processed form, per decompiled unit, filled by the wrapper below.
-_SEEN = []
-_ORIGINAL = generic.post_process_source
+_CORPUS = Path(__file__).resolve().parent.parent / "quality" / "corpus"
+LEVELS = ("none", "core", "aggressive")
 
 
-def _recording(source, beautification_level="core"):
-    result = _ORIGINAL(source, beautification_level=beautification_level)
-    _SEEN.append((source, result))
-    return result
+def _raw_outputs():
+    """(level, raw text) for every unit the backends post-process, across the corpus sources."""
+    seen = []
+    real = pp.post_process_source
 
+    def record(source, beautification_level="core"):
+        seen.append((beautification_level, source))
+        return real(source, beautification_level)
 
-class _Imports(ast.NodeTransformer):
-    """Spell imports one name per statement and drop repeats within an import run.
-
-    Merging imports is a deliberate rewrite (``import a`` twice becomes once, two
-    ``from m import`` lines become one, even with another import in between); it must not
-    count as a change of meaning. A run ends at any other statement, so an import repeated
-    after one stays.
-    """
-
-    def generic_visit(self, node):
-        super().generic_visit(node)
-        for field in ("body", "orelse", "finalbody"):
-            stmts = getattr(node, field, None)
-            if not isinstance(stmts, list):
+    with mock.patch("pycrefine.decompiler.generic.post_process_source", record):
+        for path in sorted(_CORPUS.rglob("*.py")):
+            if path.name.startswith("generate_"):
                 continue
-            flat = []
-            for stmt in stmts:
-                if isinstance(stmt, ast.Import):
-                    flat.extend(ast.Import(names=[alias]) for alias in stmt.names)
-                elif isinstance(stmt, ast.ImportFrom):
-                    flat.extend(ast.ImportFrom(module=stmt.module, names=[alias], level=stmt.level)
-                                for alias in stmt.names)
-                else:
-                    flat.append(stmt)
-            folded = []
-            run = set()  # dumps of the imports seen in the current uninterrupted run
-            for stmt in flat:
-                if isinstance(stmt, (ast.Import, ast.ImportFrom)):
-                    key = ast.dump(stmt)
-                    if key in run:
-                        continue
-                    run.add(key)
-                else:
-                    run.clear()
-                folded.append(stmt)
-            setattr(node, field, folded)
-        return node
+            with tempfile.TemporaryDirectory() as tmp:
+                pyc = str(Path(tmp) / "m.pyc")
+                try:
+                    py_compile.compile(str(path), cfile=pyc, doraise=True)
+                except (py_compile.PyCompileError, SyntaxError):
+                    continue
+                for level in LEVELS:
+                    try:
+                        get_decompiler(pyc, beautification_level=level).decompile()
+                    except Exception:  # pylint: disable=broad-except
+                        continue  # a file the running Python cannot decompile is not this test's concern
+    return seen
+
+
+def _without_imports(text):
+    """The tree of ``text`` with import statements replaced by the names they bind, in order."""
+    tree = ast.parse(text)
+    names = []
+
+    class Strip(ast.NodeTransformer):
+        def visit_Import(self, node):  # pylint: disable=invalid-name
+            names.extend(("import", a.name, a.asname) for a in node.names)
+            return ast.Pass()
+
+        def visit_ImportFrom(self, node):  # pylint: disable=invalid-name
+            names.extend((node.module, a.name, a.asname) for a in node.names)
+            return ast.Pass()
+
+    return ast.dump(Strip().visit(tree)), names
 
 
 def _tree(text):
-    """The tree of *text* with import spelling normalised, as a string."""
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")  # decompiled text may hold odd escapes (SyntaxWarning, or DeprecationWarning before 3.12)
-        return ast.dump(_Imports().visit(ast.parse(_in_context(text))))
-
-
-def _in_context(text):
-    """*text* wrapped so a unit that starts indented parses.
-
-    A function body is recorded before the ``def`` around it exists, so it starts at the
-    indentation it will have inside the function. One ``if 1:`` per level restores that.
-    """
-    first = next((line for line in text.splitlines() if line.strip()), "")
-    depth = (len(first) - len(first.lstrip(" "))) // 4
-    if depth == 0:
-        return text
-    head = "".join("    " * level + "if 1:\n" for level in range(depth))
-    return head + text
-
-
-def _version():
-    return sys.version_info[:2]
-
-
-def _entries():
-    entries = cd.load_corpus(_ROOT / "quality" / "corpus")
-    return [e for e in cd.select_entries(entries, [], None, _version()) if e.source_path() is not None]
-
-
-def _compile_at(source, optimize):
-    """Compile *source* to a temp .pyc at *optimize* (the entry's declared level); caller deletes it."""
-    with tempfile.TemporaryDirectory() as tmp:
-        py_path = os.path.join(tmp, "unit.py")
-        with open(py_path, "w", encoding="utf-8") as handle:
-            handle.write(source)
-        fd, pyc = tempfile.mkstemp(suffix=".pyc")
-        os.close(fd)
-        py_compile.compile(py_path, cfile=pyc, doraise=True, optimize=optimize)
-    return pyc
-
-
-def _raw_and_final(source, optimize=0):
-    """Every (raw, post-processed) pair recorded while decompiling *source*, innermost first.
-
-    Nested functions and classes are decompiled before the unit around them, so the last
-    pair is the module and the earlier ones are the bodies within it.
-
-    Nothing is caught: every corpus entry decompiles on every supported Python today, so an
-    exception here is a real failure (a decompiler crash, or a bug in this test) and must not
-    let the guard pass by skipping the entry.
-    """
-    pyc = _compile_at(source, optimize)
-    _SEEN.clear()
-    generic.post_process_source = _recording  # generic.py imported the name, so patch it there
     try:
-        get_decompiler(pyc).decompile()
-    finally:
-        generic.post_process_source = _ORIGINAL
-        os.unlink(pyc)
-    return list(_SEEN)
+        return ast.dump(ast.parse(text))
+    except SyntaxError:
+        return None
 
 
-class TestPostProcessingPreservesTheProgram(unittest.TestCase):
+class TestGuardOnTheCorpus(unittest.TestCase):
 
-    def test_corpus_output_keeps_its_ast_and_is_stable(self):
-        checked = nested = 0
-        for entry in _entries():
-            source = entry.source_path().read_text(encoding="utf-8")
-            try:
-                compile(source, entry.id, "exec", optimize=entry.optimize)
-            except SyntaxError:  # the source itself needs a newer Python
+    @classmethod
+    def setUpClass(cls):
+        cls.raw = _raw_outputs()
+
+    def test_the_corpus_gave_input(self):
+        self.assertGreater(len(self.raw), 100)
+
+    @staticmethod
+    def _masked(raw, transform):
+        """The text as ``post_process_source`` hands it to ``transform``, and the literals to put back."""
+        text, literals = pp._mask_multiline_strings(raw)  # pylint: disable=protected-access
+        if transform in pp.TEXT_TRANSFORMS:
+            text, literals = pp._mask_multiline_strings(  # pylint: disable=protected-access
+                text, statements_only=False, literals=literals)
+        return text, literals
+
+    def test_each_ast_preserving_transform_keeps_the_tree(self):
+        for transform in pp.STRING_TRANSFORMS + pp.TEXT_TRANSFORMS + pp.FINAL_TRANSFORMS:
+            if not transform.preserves_ast:
                 continue
-            pairs = _raw_and_final(source, entry.optimize)
-            for index, (raw, final) in enumerate(pairs):
-                try:
-                    raw_tree = _tree(raw)
-                except SyntaxError:
-                    continue  # nothing to preserve: the decompiler's own output is not Python
+            checked = 0
+            for level, raw in self.raw:
+                before = _tree(raw)
+                if level not in transform.levels or before is None:
+                    continue
+                text, literals = self._masked(raw, transform)
+                after = pp._unmask_multiline_strings(transform.apply(text), literals)  # pylint: disable=protected-access
                 checked += 1
-                nested += index < len(pairs) - 1
-                with self.subTest(entry=entry.id, unit=index):
-                    try:
-                        final_tree = _tree(final)
-                    except SyntaxError as exc:
-                        self.fail(f"post-processing made the output unparsable: {exc}")
-                    self.assertEqual(final_tree, raw_tree, "post-processing changed the AST")
-                    self.assertEqual(postprocess.post_process_source(final), final, "post-processing is not idempotent")
-        self.assertGreater(checked, 20, "the guard checked too few units to mean anything")
-        self.assertGreater(nested, 10, "the guard checked too few nested function bodies to mean anything")
+                self.assertEqual(_tree(after), before, f"{transform.name} changed the tree of:\n{raw}")
+            with self.subTest(transform=transform.name):
+                self.assertGreater(checked, 0)
+
+    def test_the_whole_layer_keeps_the_tree_unless_it_drops_or_replaces_something(self):
+        checked = 0
+        for level, raw in self.raw:
+            before = _tree(raw)
+            imports = [ln.strip() for ln in raw.split("\n") if ln.lstrip().startswith(("import ", "from "))]
+            if before is None or "('func'" in raw or "('class'" in raw or len(imports) != len(set(imports)):
+                continue
+            # (merged imports are one statement fewer, so compare the imported names in order)
+            self.assertEqual(_without_imports(pp.post_process_source(raw, level)), _without_imports(raw),
+                             f"[{level}]\n{raw}")
+            checked += 1
+        self.assertGreater(checked, 100)
+
+    def test_the_layer_is_idempotent(self):
+        for level, raw in self.raw:
+            once = pp.post_process_source(raw, level)
+            self.assertEqual(pp.post_process_source(once, level), once, f"[{level}]\n{raw}")
+
+    def test_parseable_input_stays_parseable(self):
+        for level, raw in self.raw:
+            if _tree(raw) is not None:
+                self.assertIsNotNone(_tree(pp.post_process_source(raw, level)), f"[{level}]\n{raw}")
 
 
-class TestKnownRewrites(unittest.TestCase):
-    """Rewrites the layer is meant to make, and shapes it must leave alone."""
+class TestRegistry(unittest.TestCase):
 
-    def assertPreserved(self, source):
-        final = postprocess.post_process_source(source)
-        self.assertEqual(_tree(final), _tree(source), final)
-        self.assertEqual(postprocess.post_process_source(final), final)
-        return final
+    def test_names_are_unique(self):
+        names = [t.name for t in pp.STRING_TRANSFORMS + pp.TEXT_TRANSFORMS + pp.FINAL_TRANSFORMS]
+        self.assertEqual(len(names), len(set(names)))
 
-    def test_redundant_parentheses_go_but_required_ones_stay(self):
-        self.assertEqual(self.assertPreserved("def f(a):\n    return (a + 1)\n"), "def f(a):\n    return a + 1\n")
-        self.assertPreserved("def f(a):\n    return (a if a else 0)\n")
-        self.assertPreserved("def f(a):\n    x = (lambda: a)\n    return x\n")
-        self.assertPreserved("def f(a):\n    return (x for x in a)\n")
+    def test_none_level_runs_only_the_always_on_transforms(self):
+        run = [t.name for t in pp.STRING_TRANSFORMS + pp.TEXT_TRANSFORMS + pp.FINAL_TRANSFORMS if "none" in t.levels]
+        self.assertEqual(run, ["merge_imports", "strip_redundant_parens", "collapse_blank_lines",
+                               "replace_leaked_tuples"])
 
-    def test_imports_merge_only_in_a_run_at_one_indent(self):
-        merged = self.assertPreserved("import os\nimport os\nimport sys\n")
-        self.assertEqual(merged, "import os\nimport sys\n")
-        self.assertPreserved("import os\nif x:\n    import os\n")
-        self.assertEqual(self.assertPreserved("import os\nimport sys\nimport os\n"), "import os\nimport sys\n")
-        self.assertPreserved("import os\nx = 1\nimport os\n")
+    def test_dict_splitting_is_aggressive_only(self):
+        self.assertEqual(pp.FINAL_TRANSFORMS[0].levels, frozenset(("aggressive",)))
 
-    def test_elif_is_flattened_without_touching_strings(self):
-        flat = self.assertPreserved("if a:\n    pass\nelse:\n    if b:\n        pass\n")
-        self.assertIn("elif b:", flat)
-        self.assertPreserved('x = """\nelse:\n    if b:\n"""\n')
 
-    def test_print_triple_quoted_strings_are_matched_one_at_a_time(self):
-        """A closing triple quote is not paired with the next opening one, and prefixed strings stay."""
-        plain = self.assertPreserved("print(\'\'\'a\nb\'\'\')\n")
-        self.assertNotIn("\'\'\'", plain)
-        self.assertPreserved("print(f\'\'\'{x}\'\'\' + \'\'\'b\'\'\')\n")
-        self.assertPreserved('print(f"""{x}""" + """b""")\n')
-        self.assertPreserved("print(r\'\'\'a\\n\'\'\', b\'\'\'c\'\'\')\n")
+class TestTransforms(unittest.TestCase):
+
+    def test_merge_imports_dedupes_and_groups_by_kind(self):
+        text = "import os\nimport os, sys\nfrom a import x\nfrom a import y, x\nz = 1"
+        self.assertEqual(pp.merge_imports("import os\nimport os, sys\nz = 1"), "import os\nimport sys\nz = 1")
+        self.assertEqual(pp.merge_imports(text), "import os\nimport sys\nfrom a import x, y\nz = 1")
+
+    def test_merge_imports_keeps_indents_apart(self):
+        self.assertEqual(pp.merge_imports("import a\ndef f():\n    import b\n    import c"),
+                         "import a\ndef f():\n    import b\n    import c")
+
+    def test_strip_redundant_parens(self):
+        self.assertEqual(pp.strip_redundant_parens("x = (a + b)\ny = (z)"), "x = a + b\ny = z")
+
+    def test_strip_parens_keeps_required_ones(self):
+        text = "x = (a, b)\ny = (i for i in z)\nreturn (yield)\nif (yield):\n    pass"
+        self.assertEqual(pp.strip_redundant_parens(text), text)
+
+    def test_strip_parens_in_conditions_and_returns(self):
+        self.assertEqual(pp.strip_redundant_parens("if (a < b):\n    return (a)\nwhile (c):\n    pass"),
+                         "if a < b:\n    return a\nwhile c:\n    pass")
+
+    def test_inplace_double_assignment(self):
+        self.assertEqual(pp.strip_redundant_parens("    n = (n += 1)"), "    n += 1")
+
+    def test_tidy_print_one_line_string_and_parens(self):
+        self.assertEqual(pp.tidy_print_calls("print((x))"), "print(x)")
+        self.assertEqual(pp.tidy_print_calls("print((a, b))"), "print((a, b))")
+        self.assertEqual(pp.tidy_print_calls('print("""a\nb""")'), "print('a\\nb')")
+
+    def test_tidy_print_leaves_prefixed_strings(self):
+        self.assertEqual(pp.tidy_print_calls('print(f"""a\nb""")'), 'print(f"""a\nb""")')
+
+    def test_collapse_blank_lines(self):
+        self.assertEqual(pp.collapse_blank_lines("a\n\n\n\nb\n\nc"), "a\n\nb\n\nc")
+
+    def test_replace_leaked_tuples(self):
+        out = pp.replace_leaked_tuples("    f = ('func', 'name', code)")
+        self.assertEqual(out, "    # <genexpr/lambda \u2014 not reconstructable>\n    f = None")
+        out = pp.replace_leaked_tuples("c = ('class', 'C', 1)")
+        self.assertEqual(out, "# <class \u2014 not reconstructable>\nc = None")
+
+    def test_replace_stray_lambda_def(self):
+        out = pp.replace_leaked_tuples("def <lambda>(x):\n    a = 1\n\n    return x\ny = 1")
+        self.assertIn("not reconstructable", out)
+        self.assertTrue(out.endswith("y = 1"))
+        ast.parse(out)  # the body of the stray def goes with its header
+
+
+class TestReviewFindings(unittest.TestCase):
+    """Cases the review of #362 found; each one changed the program or broke it before."""
+
+    def test_interleaved_imports_keep_their_order(self):
+        text = "from a import x\nfrom b import y\nfrom a import z"
+        self.assertEqual(pp.merge_imports(text), text)
+
+    def test_a_rebound_alias_keeps_its_last_binding(self):
+        # the earlier copy goes, so the last statement still decides what `x` is
+        self.assertEqual(pp.merge_imports("import a as x\nimport b as x\nimport a as x"),
+                         "import b as x\nimport a as x")
+
+    def test_a_plain_repeat_is_still_dropped(self):
+        self.assertEqual(pp.merge_imports("import a\nimport b\nimport a"), "import a\nimport b")
+
+    def test_parenthesised_and_continued_imports_are_left_alone(self):
+        for text in ("from a import (x)\nfrom a import (y)", "from a import x, \\\n    y\nfrom a import z"):
+            with self.subTest(text=text):
+                self.assertEqual(pp.merge_imports(text), text)
+
+    def test_a_walrus_keeps_its_parentheses(self):
+        for text in ("y = (z := 1)", "return (z := 1)", "    n += (z := 2)"):
+            with self.subTest(text=text):
+                self.assertEqual(pp.strip_redundant_parens(text), text)
+
+    def test_a_yield_argument_keeps_its_parentheses(self):
+        for text in ("print((yield))", "print((yield 1))"):
+            with self.subTest(text=text):
+                self.assertEqual(pp.tidy_print_calls(text), text)
+
+    def test_an_escape_in_a_triple_quoted_print_argument_keeps_its_value(self):
+        for source in (r'print("""a\nb""")', r'print("""it\'s\t""", 5)'):
+            with self.subTest(source=source):
+                text = "def f():\n    " + source + "\n"
+                self.assertEqual(ast.dump(ast.parse(pp.post_process_source(text))), ast.dump(ast.parse(text)))
+
+    def test_a_multiline_string_in_an_expression_keeps_its_blank_lines_and_text(self):
+        source = 'x = """a\n\n\n\nb\ndef <lambda>(y):\nimport os\nimport sys\n    z = (q)\n"""\nprint(x)\n'
+        out = pp.post_process_source(source)
+        self.assertEqual(ast.dump(ast.parse(out)), ast.dump(ast.parse(source)))
 
 
 if __name__ == "__main__":

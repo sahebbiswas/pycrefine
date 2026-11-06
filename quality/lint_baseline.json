@@ -147,13 +147,8 @@
     "src/pycrefine/loader.py::too-many-return-statements::MarshalParser._load_inner": 1,
     "src/pycrefine/loader.py::too-many-statements::get_decompiler": 1,
     "src/pycrefine/postprocess.py::too-complex::flatten_elif": 1,
-    "src/pycrefine/postprocess.py::too-complex::post_process_source": 1,
     "src/pycrefine/postprocess.py::too-many-branches::flatten_elif": 1,
-    "src/pycrefine/postprocess.py::too-many-branches::post_process_source": 1,
-    "src/pycrefine/postprocess.py::too-many-branches::post_process_source.fix_print_parens_and_strings": 1,
     "src/pycrefine/postprocess.py::too-many-nested-blocks::flatten_elif": 4,
-    "src/pycrefine/postprocess.py::too-many-statements::flatten_elif": 1,
-    "src/pycrefine/postprocess.py::too-many-statements::post_process_source": 1,
-    "src/pycrefine/postprocess.py::trailing-whitespace::<module>": 4
+    "src/pycrefine/postprocess.py::too-many-statements::flatten_elif": 1
   }
 }
