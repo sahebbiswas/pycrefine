@@ -8,7 +8,9 @@ from .state import PrescanState
 from ..analysis import parse_exception_table
 from ..diagnostics import INTERNAL_ERROR, STACK_UNDERFLOW, DecompilationError, Diagnostic
 from ..expr import UnknownExpression
+from ..codeobj import _is_code
 from ..instructions import BytecodeInstruction
+from ..opcodes.decode import decode_instructions, opcodes_for, stack_effect
 from ..versions import supports
 
 # Marks "no fallback given" for _pop(), since None is a fallback callers use.
@@ -16,6 +18,7 @@ _UNSET: Any = object()
 
 # Stem of the name used for a for-loop item that a later unpacking stores.
 _LOOP_PLACEHOLDER = "_item"
+_SPLIT_PIECES = frozenset(("STORE_FAST", "LOAD_FAST"))   # what split_superinstructions makes of STORE_FAST_LOAD_FAST
 
 
 class DecompilerBase:
@@ -145,6 +148,10 @@ class DecompilerBase:
 
     def _disassemble(self):
         """Convert code object bytecode into a list of BytecodeInstruction."""
+        if self._decodes_foreign_bytecode():
+            # bytecode of another Python version: ``dis`` would read it with this host's tables (#94)
+            self.instructions.extend(decode_instructions(self.code_obj, tuple(self.target_version)))
+            return
         for instr in dis.get_instructions(self.code_obj):
             starts_line = instr.starts_line
             if isinstance(starts_line, bool):
@@ -160,6 +167,35 @@ class DecompilerBase:
                 is_jump_target=instr.is_jump_target,
                 argrepr=instr.argrepr,
             ))
+
+    def _decodes_foreign_bytecode(self) -> bool:
+        """True when the code was written by another Python than this host and the packaged opcode tables read it."""
+        return self._supports("opcode_tables") and tuple(self.target_version) != sys.version_info[:2]
+
+    def _native_instructions(self) -> list:
+        """The instructions of the code object, as the ``dis`` of the Python version that wrote it reads them."""
+        if self._decodes_foreign_bytecode():
+            return decode_instructions(self.code_obj, tuple(self.target_version))
+        return list(dis.Bytecode(self.code_obj))
+
+    def _opcode_number(self, name: str) -> int:
+        """The number of opcode *name* in the Python version that wrote the code (110 for JUMP_FORWARD when unknown)."""
+        if self._decodes_foreign_bytecode():
+            return opcodes_for(tuple(self.target_version)).numbers.get(name, 110)
+        return dis.opmap.get(name, 110)
+
+    def _stack_effect(self, ins: Any) -> int:
+        """``dis.stack_effect(..., jump=False)`` of *ins* under the version that wrote it; ValueError when unknown."""
+        name, arg = ins.opname, ins.arg
+        if arg is None and name in _SPLIT_PIECES:
+            # the halves of a split STORE_FAST_LOAD_FAST carry their variable in argval; the effect does not depend on it
+            arg = 0
+        elif ins.opcode < 0:
+            raise ValueError(f"no stack effect for the synthetic {name}")   # dis has no number for it either
+        if self._decodes_foreign_bytecode():
+            return stack_effect(tuple(self.target_version), name, arg)
+        number = dis.opmap[name] if name in _SPLIT_PIECES and ins.arg is None else ins.opcode
+        return dis.stack_effect(number, arg if number >= dis.HAVE_ARGUMENT else None, jump=False)
 
     def decompile(self) -> str:
         """
@@ -185,7 +221,7 @@ class DecompilerBase:
                 for attr in ('co_varnames', 'co_names', 'co_cellvars', 'co_freevars'):
                     names.update(getattr(code, attr, ()))
                 pending.extend(c for c in getattr(code, 'co_consts', ())
-                               if isinstance(c, types.CodeType))
+                               if _is_code(c))
             self._code_names_cache = names
         return self._code_names_cache
 
@@ -343,8 +379,7 @@ class DecompilerBase:
                     cached = [e for e in cached if e.target not in self._throw_handlers]
             elif self._supports("exception_table"):
                 try:
-                    bytecode = dis.Bytecode(self.code_obj)
-                    at = {ins.offset: ins for ins in bytecode}
+                    at = {ins.offset: ins for ins in self._native_instructions()}
                     entries = self._remap_entries([e for e in parse_exception_table(self.code_obj.co_exceptiontable)
                                                    if not self._is_generator_wrapper(e, at)])
                     cached = self._joined_entries([e for e in entries if e.target not in self._throw_handlers])

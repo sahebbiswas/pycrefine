@@ -21,39 +21,40 @@ pycrefine path/to/__pycache__/settings.cpython-312.pyc -o settings.py
 python -m py_compile settings.py      # check that the result compiles
 ```
 
-Run it under the Python version in the file name (here 3.12); see
+Any Python 3.9 or later reads it, whichever version wrote the file; see
 [Decompile files written by another Python version](#decompile-files-written-by-another-python-version).
 
 ## Recover a project from `__pycache__`
 
 When the sources are gone but the `__pycache__` directories are left, this script
 rebuilds the package tree next to them. It maps `pkg/__pycache__/mod.cpython-312.pyc`
-back to `pkg/mod.py`, skips files written by a different Python version than the one
-running it (and lists them), skips the `-O`/`-OO` variants (`mod.cpython-312.opt-1.pyc`,
+back to `pkg/mod.py` (whichever Python version wrote each cache), skips the `-O`/`-OO` variants (`mod.cpython-312.opt-1.pyc`,
 which have no `assert` statements or docstrings) and lists any module that only has one of
 those, and reports
-the files that did not decompile or do not compile:
+the files that did not decompile or do not compile. When one module has caches from several
+Python versions (`mod.cpython-311.pyc` and `mod.cpython-312.pyc`), the first is written to `mod.py`
+and the others to `mod.<tag>.py`, so no revision is lost; compare them and keep the one you need:
 
 ```python
 # recover_tree.py: python recover_tree.py <project dir> <output dir>
 import pathlib
+import re
 import sys
 
 import pycrefine
 
 src_root, out_root = map(pathlib.Path, sys.argv[1:3])
-tag = sys.implementation.cache_tag            # e.g. "cpython-312"
-failed, other_versions, optimized = [], [], []
+failed, optimized, written = [], [], set()
 
 for pyc in sorted(src_root.rglob("__pycache__/*.pyc")):
     module, _, rest = pyc.name.partition(".")
-    if rest != f"{tag}.pyc":                  # exactly mod.<tag>.pyc
-        if rest.startswith(f"{tag}.opt-"):    # -O/-OO build: no asserts/docstrings
+    if not re.fullmatch(r"cpython-3\d+\.pyc", rest):   # exactly mod.<tag>.pyc
+        if ".opt-" in rest:                            # -O/-OO build: no asserts/docstrings
             optimized.append(pyc)
-        else:
-            other_versions.append(pyc)
         continue
     target = out_root / pyc.parent.parent.relative_to(src_root) / f"{module}.py"
+    if target in written:                     # another version's cache of the same module: keep both
+        target = target.with_name(f"{module}.{rest[:-4]}.py")
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         source = pycrefine.get_decompiler(str(pyc)).decompile()
@@ -62,12 +63,11 @@ for pyc in sorted(src_root.rglob("__pycache__/*.pyc")):
         failed.append((pyc, exc))
         continue
     target.write_text(source, encoding="utf-8")
+    written.add(target)
 
 print(f"recovered into {out_root}; {len(failed)} failed")
 for pyc, exc in failed:
     print(f"  FAILED {pyc}: {exc}")
-if other_versions:
-    print(f"{len(other_versions)} files are for another Python (not {tag}); run again under it")
 if optimized:
     print(f"{len(optimized)} optimized (-O/-OO) files skipped")
     for pyc in optimized:                     # no plain .pyc next to it: nothing recovered
@@ -80,8 +80,8 @@ if optimized:
 python recover_tree.py old_project/ recovered/
 ```
 
-Files written by another Python version are skipped rather than reported as errors, so you
-can run the script once per version found (see the next section). For legacy `.pyc` files
+Files written by any supported Python version are decompiled in one run. A file that cannot be
+(Python 3.8 or older, say) is reported as a failure. For legacy `.pyc` files
 that sit next to the source instead of in `__pycache__` (`mod.pyc`, with no version tag in
 the name), change the glob to `**/*.pyc`, drop the `rest` check, take the module name from
 `pyc.stem`, and build the target from `pyc.parent.relative_to(src_root)`, since there is no
@@ -111,33 +111,18 @@ version. If you try the wrong interpreter, pycrefine's error names the right one
 
 ## Decompile files written by another Python version
 
-Bytecode from Python 3.9 decompiles under any Python 3.9 or later. Bytecode from 3.10
-onwards must be decompiled by the same minor version
-([#94](https://github.com/sahebbiswas/pycrefine/issues/94)). With
-[uv](https://docs.astral.sh/uv/) that is one command per version, and uv fetches the
-interpreter if it is missing:
+Bytecode from Python 3.9 to 3.14 decompiles under any Python 3.9 or later, whichever version
+wrote it. To use the writing version anyway, [uv](https://docs.astral.sh/uv/) runs one per
+command and fetches the interpreter if it is missing:
 
 ```bash
 uvx --python 3.12 pycrefine app.cpython-312.pyc -o app.py
 uvx --python 3.14 pycrefine tool.cpython-314.pyc -o tool.py
 ```
 
-For a tree with several versions, run the [recovery script](#recover-a-project-from-__pycache__)
-once per version:
-
-```bash
-for v in 3.11 3.12 3.13 3.14; do
-  uv run --no-project --python "$v" --with pycrefine python recover_tree.py old_project/ recovered/
-done
-```
-
-Each run only writes the modules compiled by its own version, so the runs fill in the
-tree together. A module cached by several versions is written by each of them, and the
-last run wins.
-
 Without uv, use the Windows launcher (`py -3.12 -m pycrefine file.pyc`), pyenv, or the
 official Docker image (`python:3.12`); see
-[Getting started](getting-started.md#run-under-the-python-that-wrote-the-file).
+[Getting started](getting-started.md#files-from-another-python-version).
 
 ## Decompile a `.pyc` without a header (PyInstaller, marshal dumps)
 

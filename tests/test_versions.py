@@ -50,8 +50,9 @@ class TestTable(unittest.TestCase):
         self.assertEqual({by_tag[t] for t in ("3.10", "3.11", "3.12")}, {"Decompiler311Plus"})
         self.assertEqual({by_tag[t] for t in ("3.13", "3.14")}, {"Decompiler314"})
 
-    def test_only_3_9_reads_across_hosts(self):
-        self.assertEqual([row.tag for row in vs.VERSIONS if row.cross_host], ["3.9"])
+    def test_every_reconstructable_version_reads_across_hosts(self):
+        self.assertEqual([row.tag for row in vs.VERSIONS if row.cross_host],
+                         [row.tag for row in vs.VERSIONS if row.reconstructable])
 
 
 class TestLookup(unittest.TestCase):

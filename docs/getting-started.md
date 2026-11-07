@@ -102,19 +102,15 @@ source = decompiler.decompile()
 
 [Command line and Python API](usage.md) lists the options and what each call raises.
 
-## Run under the Python that wrote the file
+## Files from another Python version
 
-A `.pyc` file records which Python compiled it. Bytecode from Python 3.9 can be decompiled
-under any Python 3.9 or later, but bytecode from 3.10 onwards needs the same minor version
-([#94](https://github.com/sahebbiswas/pycrefine/issues/94)). Otherwise pycrefine stops with:
+A `.pyc` file records which Python compiled it. Bytecode from Python 3.9 to 3.14 can be decompiled
+under any Python 3.9 or later: pycrefine reads the instructions itself, so it does not need the
+Python that wrote the file. The file name usually tells you the version (`cpython-312` is 3.12); if it
+does not, see [Which Python wrote this file?](use-cases.md#find-out-which-python-wrote-a-pyc-file).
 
-```text
-Error: Cannot decompile Python 3.12 bytecode from 'shapes.cpython-312.pyc' under Python 3.14: Python 3.10+ bytecode can only be decompiled by the same Python minor version that wrote it. Run pycrefine under Python 3.12. (Python 3.9 bytecode works on any host.)
-```
-
-The file name usually tells you the version (`cpython-312` is 3.12); if it does not, see
-[Which Python wrote this file?](use-cases.md#find-out-which-python-wrote-a-pyc-file).
-Then run pycrefine under that version:
+Running it under the version that wrote the file is still an option, for example to compare with
+what that version's `dis` shows:
 
 | Tool | Command |
 |---|---|

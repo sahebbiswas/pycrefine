@@ -310,8 +310,8 @@ version, including the entries that fail to compile.
 
 Main gaps visible in the baseline:
 
-* Python 3.10+ `.pyc` fixtures decompile only on a host of the same minor
-  version (#94); Python 3.9 fixtures decompile on every host (#89).
+* The foreign-version fixtures (`tests/fixtures/foreign_pyc`) decompile on every host, 3.9 to 3.14
+  (#89, #94); `tests/test_cross_host.py` compares each with a run under the Python that wrote it.
 * Some output compiles but behaves differently from the source, which the
   ladder cannot see until behavioral testing lands (#77). Known cases:
   `while True` with a conditional `break` (#96), and `if` decompiled as

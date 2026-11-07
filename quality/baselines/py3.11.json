@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "python_version": "3.11",
-  "python_patch": "3.11.15",
+  "python_patch": "3.11.18",
   "diagnostics_recorded": true,
   "entries": {
     "corpus/comprehensive.py": {
@@ -123,25 +123,49 @@
         "def issue_5": "compiles"
       }
     },
+    "tests/fixtures/foreign_pyc/comprehensive.cpython-310.pyc": {
+      "kind": "pyc",
+      "status": "compiles"
+    },
+    "tests/fixtures/foreign_pyc/comprehensive.cpython-311.pyc": {
+      "kind": "pyc",
+      "status": "compiles"
+    },
     "tests/fixtures/foreign_pyc/comprehensive.cpython-312.pyc": {
       "kind": "pyc",
-      "status": "decompile_error"
+      "status": "compiles"
+    },
+    "tests/fixtures/foreign_pyc/comprehensive.cpython-313.pyc": {
+      "kind": "pyc",
+      "status": "compiles"
     },
     "tests/fixtures/foreign_pyc/comprehensive.cpython-314.pyc": {
       "kind": "pyc",
-      "status": "decompile_error"
+      "status": "compiles"
     },
     "tests/fixtures/foreign_pyc/comprehensive.cpython-39.pyc": {
       "kind": "pyc",
       "status": "compiles"
     },
+    "tests/fixtures/foreign_pyc/simple.cpython-310.pyc": {
+      "kind": "pyc",
+      "status": "compiles"
+    },
+    "tests/fixtures/foreign_pyc/simple.cpython-311.pyc": {
+      "kind": "pyc",
+      "status": "compiles"
+    },
+    "tests/fixtures/foreign_pyc/simple.cpython-312.pyc": {
+      "kind": "pyc",
+      "status": "compiles"
+    },
     "tests/fixtures/foreign_pyc/simple.cpython-313.pyc": {
       "kind": "pyc",
-      "status": "decompile_error"
+      "status": "compiles"
     },
     "tests/fixtures/foreign_pyc/simple.cpython-314.pyc": {
       "kind": "pyc",
-      "status": "decompile_error"
+      "status": "compiles"
     },
     "tests/fixtures/foreign_pyc/simple.cpython-39.pyc": {
       "kind": "pyc",

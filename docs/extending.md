@@ -93,9 +93,12 @@ Support for a new CPython has these parts, in this order:
    `Decompiler314` covers 3.13–3.14. Copy only what differs. Opcodes that were renamed
    or fused (the 3.13 `LOAD_FAST_LOAD_FAST` family, 3.14's `LOAD_SPECIAL`) are handled by
    `analysis.split_superinstructions`, `_COMPOUND_EXPR_OPS` in `_constants.py`, and the backend.
-3. **Bytecode that other versions cannot read.** 3.10 and later are decoded by the host's
-   `dis`, so the new version can only be decompiled under itself until
-   [#94](https://github.com/sahebbiswas/pycrefine/issues/94) lands.
+3. **Opcode data.** Run `quality/generate_opcode_tables.py` with an interpreter of the new
+   version (and of the others) to add its row to `opcodes/tables.py`; `opcodes/decode.py`
+   reads every 3.10+ version's bytecode from that data, so other hosts can decompile it
+   ([#94](https://github.com/sahebbiswas/pycrefine/issues/94)). Add `3.X` fixtures with
+   `tests/fixtures/regenerate_foreign_pyc.py`; `tests/test_decode.py` and
+   `tests/test_cross_host.py` then cover it.
 4. **CI.** A `ci-py3X.yml` workflow that calls `reusable-test.yml`, with read-only token
    permissions like the others.
 5. **Baselines.** `python quality/check_correctness.py --update-baseline` and

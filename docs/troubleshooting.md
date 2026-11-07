@@ -54,25 +54,13 @@ wheel (`pycrefine-X.Y.Z-py3-none-any.whl` from PyPI or a release) and run
 
 ### I need several Python versions
 
-Bytecode from 3.10 onwards is only readable under the same Python minor version that
-wrote it (any 3.12.x reads 3.12 bytecode), so
-recovering a project may need several interpreters. The simplest way is
-[uv](https://docs.astral.sh/uv/), which downloads them on demand:
-`uvx --python 3.12 pycrefine file.pyc`. Alternatives are the Windows `py` launcher,
-pyenv, or the `python:3.X` Docker images; see
-[Getting started](getting-started.md#run-under-the-python-that-wrote-the-file).
+You do not: bytecode from every supported version (3.9 to 3.14) is readable under any
+Python 3.9 or later, so one interpreter recovers a whole project. To compare with what the
+writing version's own `dis` shows, [uv](https://docs.astral.sh/uv/) downloads one on demand:
+`uvx --python 3.12 pycrefine file.pyc`; see
+[Getting started](getting-started.md#files-from-another-python-version).
 
 ## Error messages
-
-### `Cannot decompile Python 3.12 bytecode from '...' under Python 3.14`
-
-```text
-Error: Cannot decompile Python 3.12 bytecode from 'app.cpython-312.pyc' under Python 3.14: Python 3.10+ bytecode can only be decompiled by the same Python minor version that wrote it. Run pycrefine under Python 3.12. (Python 3.9 bytecode works on any host.)
-```
-
-The file was written by a different Python than the one running pycrefine. Run it under
-the version the message names, for example `uvx --python 3.12 pycrefine app.cpython-312.pyc`
-([#94](https://github.com/sahebbiswas/pycrefine/issues/94) tracks removing this limit).
 
 ### `Invalid or unsupported Python magic number: 0x000000e3 (version id: 227)`
 

@@ -300,19 +300,6 @@ def get_decompiler(filepath: str, beautification_level: str = 'core', strict: bo
     tv_str = row.tag
     target_version = row.version
 
-    # Only the 3.9 backend decodes bytecode itself; the 3.10+ backends read
-    # instructions through the host's dis module, so they need a host of the
-    # same minor version.
-    if (magic != host_magic and not row.cross_host
-            and target_version != sys.version_info[:2]):
-        host_ver = f"{sys.version_info[0]}.{sys.version_info[1]}"
-        raise ValueError(
-            f"Cannot decompile Python {tv_str} bytecode from '{filepath}' "
-            f"under Python {host_ver}: Python 3.10+ bytecode can only be decompiled "
-            f"by the same Python minor version that wrote it. Run pycrefine under "
-            f"Python {tv_str}. (Python 3.9 bytecode works on any host.)"
-        )
-
     code_obj = None
     failures: list = []  # why each header offset could not be read, for the final error
     # The marshal format only changes between minor versions, so the native
