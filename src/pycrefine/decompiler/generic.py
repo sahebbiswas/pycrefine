@@ -6996,6 +6996,15 @@ class DecompilerGeneric(DecompilerBase):
         # opening a spurious nested 'if' block
         self.stack.append("_exc_match")
 
+    def _exit_ends_an_if(self, index: int, instr: BytecodeInstruction) -> bool:
+        """True if a conditional jump before *instr* lands on the instruction at *index*: the `break` or `continue` ends an `if` of the
+        except clause, which goes on with the code at *index*."""
+        if index >= len(self.instructions):
+            return False
+        landing = self.instructions[index].offset
+        return any("POP_JUMP" in x.opname and x.offset < instr.offset and self._get_jump_target(x) == landing
+                   for x in self.instructions)
+
     def _op_cleanup(self, instr: BytecodeInstruction):
         opname = instr.opname
         # POP_EXCEPT for try/except cleanup.
@@ -7024,7 +7033,8 @@ class DecompilerGeneric(DecompilerBase):
                 # `break`: the loop's iterator is dropped before the jump to the code after the loop
                 self._append_reconstructed("break")
                 self.pc = ahead + 2
-                self._close_except_clause()
+                if not self._exit_ends_an_if(ahead + 2, instr):
+                    self._close_except_clause()
                 return
             if ahead < len(self.instructions):
                 nxt = self.instructions[ahead]
