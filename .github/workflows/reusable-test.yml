@@ -5,10 +5,14 @@ on:
       python-version:
         required: true
         type: string
+      ubuntu-version:
+        required: false
+        type: string
+        default: ubuntu-latest
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.ubuntu-version }}
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
