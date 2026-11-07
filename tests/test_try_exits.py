@@ -3,6 +3,7 @@
 Each shape is decompiled and run against the original, on every Python the suite runs on.
 """
 import ast
+import sys
 import unittest
 
 from .test_helpers import decompile
@@ -67,6 +68,49 @@ class TestTryExits(unittest.TestCase):
         self.assert_same(body, ([], 2), ([], 0))
         self.assert_same("    try:\n        return xs[stop]\n    except IndexError as err:\n        raise ValueError('no') from err\n",
                          ([1, 2], 1), ([1, 2], 7))
+
+    def _clause(self, middle, tail="        out.append('end')\n"):
+        return ("    out = []\n    for x in xs:\n        try:\n            out.append(10 // x)\n"
+                "        except ZeroDivisionError:\n" + middle + tail + "    return out\n")
+
+    def test_if_ending_in_continue_inside_an_except_clause(self):
+        calls = (([1, 2, 5], 0), ([0, 1, 0, 2], 0), ([0, 0], 0), ([], 0), ([0, 5, 0], 0))
+        self.assert_same(self._clause("            if len(out) > 1:\n                continue\n"
+                                      "            out.append('z')\n            continue\n"), *calls)
+        self.assert_same(self._clause("            if len(out) > 1:\n                continue\n"
+                                      "            out.append('z')\n"), *calls)
+        self.assert_same(self._clause("            if len(out) > 1:\n                continue\n"
+                                      "            if len(out) > 0:\n                continue\n"
+                                      "            out.append('z')\n            continue\n"), *calls)
+
+    def test_if_ending_in_break_or_return_inside_an_except_clause(self):
+        calls = (([1, 2, 5], 0), ([0, 1, 0, 2], 0), ([0, 0], 0), ([], 0), ([0, 5, 0], 0))
+        for exit_ in ("break", "return out"):
+            self.assert_same(self._clause("            if len(out) > 1:\n                " + exit_ + "\n"
+                                          "            out.append('z')\n            continue\n"), *calls)
+
+    def test_continue_ending_an_if_followed_by_another_handler(self):
+        self.assert_same("    out = []\n    for x in xs:\n        try:\n            out.append(10 // x)\n"
+                         "        except ZeroDivisionError:\n            if len(out) > 1:\n                continue\n"
+                         "            out.append('z')\n            continue\n        except ValueError:\n            break\n"
+                         "        out.append('end')\n    return out\n", ([1, 2, 5], 0), ([0, 1, 0, 2], 0), ([0, 0], 0))
+
+    @unittest.skipIf(sys.version_info[:2] == (3, 14), "3.14 rebuilds the inner loop wrongly (#382)")
+    def test_if_ending_in_break_out_of_an_inner_loop_inside_an_except_clause(self):
+        self.assert_same("    out = []\n    n = 0\n    while n < 3:\n        n += 1\n        m = 0\n        while m < 2:\n            m += 1\n"
+                         "            try:\n                out.append(10 // xs[m - 1])\n            except ZeroDivisionError:\n"
+                         "                if len(out) > 1:\n                    break\n                out.append('z')\n                continue\n"
+                         "            out.append('end')\n        out.append('e')\n    return out\n",
+                         ([1, 2, 5], 0), ([0, 1, 0, 2], 0), ([0, 0], 0), ([0, 0, 0], 0))
+
+    @unittest.skipIf(sys.version_info[:2] == (3, 14), "3.14 rebuilds the inner loop wrongly (#382)")
+    def test_if_ending_in_break_when_the_inner_loop_ends_the_outer_body(self):
+        head = ("    out = []\n    n = 0\n    while n < 3:\n        n += 1\n        m = 0\n        while m < 2:\n            m += 1\n"
+                "            try:\n                out.append(10 // xs[m - 1])\n            except ZeroDivisionError:\n"
+                "                if len(out) > 1:\n                    break\n                out.append('z')\n")
+        calls = (([1, 2, 5], 0), ([0, 1, 0, 2], 0), ([0, 0], 0), ([0, 0, 0], 0), ([2, 0], 0))
+        self.assert_same(head + "                continue\n            out.append('end')\n    return out\n", *calls)
+        self.assert_same(head + "    return out\n", *calls)
 
 
 if __name__ == "__main__":
