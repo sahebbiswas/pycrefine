@@ -1327,12 +1327,18 @@ class Decompiler39(DecompilerGeneric):
                 if isinstance(jt, int) and (jt in _for_iter_offsets or self._is_innermost_while_head(jt, jmp.offset)):
                     self._append_reconstructed("continue")
                     self.pc = look + 1   # consume the JUMP_ABSOLUTE
-                    self._skip_dead_clause_exit(jmp)
+                    # (a conditional jump to the code right after it: the `continue` ends an `if`, and the clause
+                    # goes on with what follows)
+                    if self._exit_ends_an_if(look + 1, instr):
+                        _keep_open = True
+                    else:
+                        self._skip_dead_clause_exit(jmp)
                     _emitted_continue = True
                 elif isinstance(jt, int) and self._is_while_head(jt):
                     # back to the head of an enclosing `while` that the inner loop ended: it leaves the inner loop
                     self._append_reconstructed("break")
                     self.pc = look + 1
+                    _keep_open = self._exit_ends_an_if(look + 1, instr)
                     _emitted_continue = True
 
             if not _emitted_continue:
@@ -1347,7 +1353,9 @@ class Decompiler39(DecompilerGeneric):
                     self._append_reconstructed("break")
                     self.pc = look + 2
                     dead = self.instructions[look + 2:look + 4]
-                    if [x.opname for x in dead] == ["POP_EXCEPT", "JUMP_ABSOLUTE"]:
+                    if self._exit_ends_an_if(look + 2, instr):
+                        _keep_open = True
+                    elif [x.opname for x in dead] == ["POP_EXCEPT", "JUMP_ABSOLUTE"]:
                         self.pc = look + 4   # the compiler's unreachable copy of the clause exit
                     _emitted_continue = True
 
