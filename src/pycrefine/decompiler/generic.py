@@ -4866,6 +4866,10 @@ class DecompilerGeneric(DecompilerBase):
                 # The handler ends with its own clean-up (`COPY 3; POP_EXCEPT; RERAISE 1`);
                 # what follows, in a loop, is the rest of the loop body.
                 end_off = min(end_off, self._wrapper_cleanup_end(pei_off, end_off))
+            elif self._finally_wrapper_in_clause(pei_off):
+                # 3.12+: the `finally` handler of a try inside an except clause sits among the clause's code; what
+                # follows its clean-up is the rest of the clause.
+                end_off = min(end_off, self._wrapper_cleanup_end(pei_off, end_off))
             elif pei_idx + 1 < len(instrs) and instrs[pei_idx + 1].opname == "WITH_EXCEPT_START":
                 # 3.12+: the exit handler of a `with` inside an except clause sits among the
                 # clause's code; what follows its clean-up is the rest of the clause.
@@ -4890,7 +4894,8 @@ class DecompilerGeneric(DecompilerBase):
                     if ins.offset > push_off and ins.opname == "PUSH_EXC_INFO" and not (
                             ins.offset in self.prescan.wrapper_body_suppress and k + 1 < n
                             and instrs[k + 1].opname == "WITH_EXCEPT_START") \
-                            and ins.offset not in self.prescan.handlers_in_clauses:
+                            and ins.offset not in self.prescan.handlers_in_clauses \
+                            and not self._finally_wrapper_in_clause(ins.offset, push_off):
                         handler_end = ins.offset
                         break
                 # The code where the try's paths rejoin is not part of its handlers.
@@ -4921,6 +4926,26 @@ class DecompilerGeneric(DecompilerBase):
                     self.emit.deferred_outer_except_lines.setdefault(merge_off, []).extend(handler_lines)
                 else:
                     self.emit.deferred_except_lines[merge_off].extend(handler_lines)
+
+    def _finally_wrapper_in_clause(self, wrapper: int, clause: Optional[int] = None) -> bool:
+        """Whether the re-raise wrapper at *wrapper* belongs to a `try`/`finally` written inside an except clause (the one at
+        *clause*, or any): its body runs with the caught exception on the stack, in the middle of the clause."""
+        if wrapper not in self.prescan.suppress_push_exc_offsets:
+            return False
+        entries = self._exception_entries() or []
+        ranges = [e for e in entries if e.target == wrapper and not e.lasti]
+        if not ranges or not all(e.depth >= 1 for e in ranges):
+            return False
+        first = min(e.start for e in ranges)
+        clauses = [clause] if clause is not None else [
+            ins.offset for ins in self.instructions
+            if ins.opname == "PUSH_EXC_INFO" and ins.offset < first and ins.offset not in self.prescan.suppress_push_exc_offsets]
+        for start in clauses:
+            # (the clause runs up to its own clean-up handler, which every range inside it leads to)
+            cleanup = next((e.target for e in entries if e.start == start and e.lasti), None)
+            if start < first and cleanup is not None and wrapper < cleanup:
+                return True
+        return False
 
     def _finally_body_end_after(self, merge_off: int) -> Optional[int]:
         """Where an inline `finally` body at ``merge_off`` ends when no wrapper told: the next try-entry NOP, else the implicit return."""
@@ -5080,7 +5105,8 @@ class DecompilerGeneric(DecompilerBase):
         # A NOP with no real handler whose only handler is a suppressed re-raise wrapper opens a
         # try/finally without `except`.
         for nop_off in nops:
-            if nop_off in self.prescan.nop_to_push_exc:
+            # (a try/finally inside an except clause that was rendered whole is the clause's, not the function's)
+            if nop_off in self.prescan.nop_to_push_exc or nop_off in self.prescan.handler_section_suppress:
                 continue
             body_start = nop_off + 2
             handler = next((e for e in exc_entries
@@ -5390,6 +5416,31 @@ class DecompilerGeneric(DecompilerBase):
                 if nop in inside and sub.prescan.nop_to_push_exc.get(nop, e.target) == e.target:
                     sub.prescan.try_nop_offsets.add(nop)
                     sub.prescan.nop_to_push_exc[nop] = e.target
+
+    def _mark_nested_finally_tries(self, sub: Any, handler_instrs: list) -> None:
+        """Tell the sub-decompiler of an except clause about the `try`/`finally` written inside it (no `except`): where
+        its body ends and the `finally` body that follows, which the clause's code would otherwise run on into."""
+        entries = self._exception_entries() or []
+        inside = {ins.offset for ins in handler_instrs}
+        for nop in sorted(self.prescan.try_nop_offsets & inside):
+            if nop in self.prescan.nop_to_push_exc or nop in sub.prescan.nop_to_finally_merge:
+                continue
+            entry = next((e for e in entries if e.start <= nop + 2 < e.end
+                          and e.target in self.prescan.suppress_push_exc_offsets and not e.lasti), None)
+            if entry is None:
+                continue
+            start, end, _ = self._finally_only_extent(entry, nop + 2, entries)
+            if end is None or end < start:
+                continue
+            body = [ins for ins in self.instructions if start <= ins.offset < end]
+            if not body:
+                body = self._handler_copy_instrs(entry.target)   # (a body that always raises has only the handler's copy)
+                start = next((ins.offset for ins in handler_instrs if ins.offset >= end), end)
+            sub.prescan.finally_body_suppress.update(ins.offset for ins in body)
+            sub.emit.deferred_finally_lines[start] = self._render_finally_body(body) or ["pass"]
+            sub.prescan.nop_to_finally_merge[nop] = start
+            sub.prescan.finally_merge_offsets.add(start)
+            sub.prescan.try_nop_offsets.add(nop)
 
     def _handlers_in_clauses(self, entries: list, real_push_exc: Set[int]) -> Set[int]:
         """
@@ -6268,6 +6319,7 @@ class DecompilerGeneric(DecompilerBase):
         sub._async_for_offsets = self._async_for_offsets
         sub.emit.annotations = self._body_annotations()    # (3.14: an annotation in a handler is written where it ran)
         self._mark_nested_tries(sub, handler_instrs)
+        self._mark_nested_finally_tries(sub, handler_instrs)
         sub._enclosing_locals = self._enclosing_locals
         # Install only the handler instructions
         sub.instructions = handler_instrs

@@ -112,6 +112,24 @@ class TestTryExits(unittest.TestCase):
         self.assert_same(head + "                continue\n            out.append('end')\n    return out\n", *calls)
         self.assert_same(head + "    return out\n", *calls)
 
+    def _nested_finally(self, clause, handlers=""):
+        return ("    try:\n        if stop == 1:\n            raise ValueError\n        if stop == 2:\n            raise KeyError\n"
+                "    except ValueError:\n" + clause + handlers +
+                "    finally:\n        xs.append('outer')\n        xs.append('after')\n    return xs\n")
+
+    @unittest.skipIf(sys.version_info[:2] == (3, 10), "3.10 rebuilds the nested finally wrongly (#378)")
+    def test_finally_inside_a_clause_of_a_try_with_a_finally(self):
+        calls = (([], 0), ([], 1), ([], 2))
+        inner = "        try:\n            xs.append('inner')\n        finally:\n            xs.append('nested')\n"
+        self.assert_same(self._nested_finally(inner), *calls)
+        self.assert_same(self._nested_finally(inner + "        xs.append('tail')\n"), *calls)
+        self.assert_same(self._nested_finally(inner, "    except KeyError:\n        xs.append('key')\n"), *calls)
+
+    @unittest.skipIf(sys.version_info[:2] == (3, 10), "3.10 rebuilds the nested finally wrongly (#378)")
+    def test_finally_inside_a_clause_whose_body_always_raises(self):
+        raising = "        try:\n            xs.append('inner')\n            raise KeyError\n        finally:\n            xs.append('nested')\n"
+        self.assert_same(self._nested_finally(raising), ([], 0), ([], 1), ([], 2))
+
 
 if __name__ == "__main__":
     unittest.main()
